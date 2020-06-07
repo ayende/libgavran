@@ -18,10 +18,11 @@
 typedef struct page_map page_map_t;
 
 struct database_transction{
-    uint64_t txid;
     database_handle_t* db;
-    uint32_t flags;
     page_map_t* page_map;
+    uint64_t txid;
+    uint32_t flags;
+    char _padding[4];
 };
 
 
@@ -65,11 +66,11 @@ typedef struct  {
             uint32_t _reserved;
             char header_hash[STRONG_HASH_SIZE];
         };
-        char _padding[256];
+        char _padding[96];
     };
 } file_header_t;
 
-_Static_assert (sizeof(file_header_t) == 256, "File header must be exactly 256 bytes");
+_Static_assert (sizeof(file_header_t) == 96, "File header must be exactly 96 bytes");
 _Static_assert (sizeof(page_header_t) == 16, "Page header must be exactly 16 bytes");
 
 
@@ -93,8 +94,7 @@ void* _get_page_pointer(char* base PAGE_ALIGNED, uint64_t page);
 
 bool _create_new_database(database_options_t* options, database_handle_t* database, file_handle_t* handle);
 
-
-page_map_t* create_page_map(uint32_t initial_capacity);
+page_map_t* create_page_map(txn_t* tx,uint32_t initial_capacity);
 
 bool set_page_map(page_map_t* map, uint64_t page, page_header_t* header, void* val, page_header_t**old_header, void** old_value);
 
@@ -105,3 +105,8 @@ bool del_page_map(page_map_t* map, uint64_t page, page_header_t** old_header, vo
 void destroy_page_map(page_map_t** map, void (*destroyer)(uint64_t page, page_header_t* header, void* value, void* ctx), void* context);
 
 bool modify_page(txn_t* tx, uint64_t page, page_header_t** header, void** page_data);
+
+void* allocate_tx_mem(txn_t* tx, uint64_t size);
+void  release_tx_mem(txn_t* tx, void* address);
+void* allocate_tx_page(txn_t* tx, uint64_t number_of_pages);
+void  release_tx_page(txn_t* tx, void* address, uint64_t number_of_pages);

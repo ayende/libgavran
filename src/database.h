@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 
 #define PAGE_SIZE 8192
@@ -20,10 +21,15 @@ typedef struct {
     uint64_t minimum_size;
 } database_options_t;
 
-bool create_database(database_options_t* options, database_handle_t** db);
+bool create_database(database_options_t* options, database_handle_t** db, void* mem);
 
-bool close_database(database_handle_t** db);
+bool close_database(database_handle_t* db);
 
-txn_t* create_transaction(database_handle_t* database, uint32_t flags);
+size_t get_txn_t_size(void);
 
+size_t get_database_handle_size(database_options_t* options);
+
+bool create_transaction(database_handle_t* database, uint32_t flags, txn_t** tx);
+
+void hi(void);
 

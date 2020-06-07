@@ -12,6 +12,8 @@
 uint64_t _size_of_free_space_bitmap_in_pages(uint64_t number_of_pages){
     uint64_t number_of_bits_required = (number_of_pages / FREE_SPACE_PAGES_BLOCK);
     uint64_t number_of_bytes_required = number_of_bits_required / 8;
+    if(number_of_bits_required % 8)
+        number_of_bytes_required++;
     uint64_t number_of_pages_required = number_of_bytes_required / PAGE_SIZE;
     if(number_of_bytes_required % PAGE_SIZE)
         number_of_pages_required++;
@@ -93,43 +95,53 @@ bool _create_new_database(database_options_t* options, database_handle_t* databa
     return true;
 }
 
-bool create_database(database_options_t* options, database_handle_t** database){
+static bool validate_options(database_options_t* options) {
     if(options->minimum_size < MINIMUM_DATABASE_SIZE)
         options->minimum_size = MINIMUM_DATABASE_SIZE;
 
     if(options->minimum_size % PAGE_SIZE)
         options->minimum_size += PAGE_SIZE - (options->minimum_size % PAGE_SIZE);
 
-    if(!options->path){
-        push_error(EINVAL, "The database path was not specified, but is required");
+    if(!options->path || !strlen(options->path)){
+        push_error(EINVAL, "The database path was not specified or empty, but is required");
         return false; 
     }
-    if(!options->name){
-        push_error(EINVAL, "The database name was not specified, but is required");
+    if(!options->name || !strlen(options->name)){
+        push_error(EINVAL, "The database name was not specified or empty, but is required");
         return false;
     } 
+    return true;
+}
 
-    *database = 0;
-    file_handle_t* handle = 0;
-    if(!create_file(options->path, &handle)){
+size_t get_database_handle_size(database_options_t* options) {
+    size_t len = get_file_handle_size(options->path, options->name);
+    return len + sizeof(database_handle_t);
+}
+
+bool create_database(database_options_t* options, database_handle_t** database, void* mem){
+
+    database_handle_t* handle = *database = mem;
+
+    if(!validate_options(options))
+        return false;
+
+    size_t len = get_file_handle_size(options->path, options->name);
+    assert(len); // shouldn't happen, already checked in validate_options
+
+    memset(mem, 0, sizeof(handle) + len);
+
+    if(!create_file(options->path, options->name, &handle->file_handle, (char*)mem + sizeof(handle))){
         push_error(EIO, "Could not create database %s", options->name);
-        return false;
+        goto exit_error;
     }
-    *database = malloc(sizeof(struct database_handle));
-    if(!*database){
-        push_error(ENOMEM, "Unable to allocate memory for database handle for %s", options->name);
-        close_file(&handle);
-        return false;
-    }
-    
  
-    if(!get_file_size(handle, &(*database)->database_size)){
+    if(!get_file_size(handle->file_handle, &handle->database_size)){
         push_error(errno, "Unable to create database %s", options->name);
         goto exit_error;
     }
 
-    if((*database)->database_size == 0){
-        if(!_create_new_database(options, *database, handle))
+    if(handle->database_size == 0){
+        if(!_create_new_database(options, *database, handle->file_handle))
             goto exit_error;
     }
     else {
@@ -140,30 +152,25 @@ bool create_database(database_options_t* options, database_handle_t** database){
 exit_error:
     // these can fail, but in this case, we don't care, the error is reported anyway via push_error
     // and there isn't much we can do further to handle this
-    close_database(database);
+    close_database(*database);
     return false;
 }
 
-bool close_database(database_handle_t** database) {
-    if(!database || !*database)
+bool close_database(database_handle_t* database) {
+    if(!database)
         return true;
 
     bool success = true;
-    if((*database)->mapped_memory)  
-        success &= unmap_file((*database)->mapped_memory, (*database)->database_size);
-    success &= close_file(&(*database)->file_handle);
-    free(*database);
-    *database = 0;
+    if(database->mapped_memory)  
+        success &= unmap_file(database->mapped_memory, database->database_size);
+    success &= close_file(database->file_handle);
 
     return success;
 }
 
-txn_t* create_transaction(database_handle_t* database, uint32_t flags){
-    txn_t* txn = malloc(sizeof(txn_t));
-    if(!txn){
-        push_error(ENOMEM, "Unable to allocate a new transaction");
-        return 0;
-    }
+bool create_transaction(database_handle_t* database, uint32_t flags, txn_t** tx) {
+    txn_t* txn = *tx;
+    memset(txn, 0, sizeof(txn_t));
 
     txn->txid = database->current_file_header.last_txid;
     if (flags & TX_READ_WRITE)
@@ -171,57 +178,10 @@ txn_t* create_transaction(database_handle_t* database, uint32_t flags){
 
     txn->db = database;
     txn->flags = flags;
-    txn->page_map = create_page_map(32);
+    txn->page_map = create_page_map(txn, 32);
     if (!txn->page_map) {
         push_error(ENOMEM, "Unable to allocate a page map for transaction");
-        free(txn);
-        return false;
-    }
-    return txn;
-}
-
-bool modify_page(txn_t* tx, uint64_t page, page_header_t** header, void** page_data) {
-    if(get_page_map(tx->page_map, page, header, page_data))
-        return true;
-
-    if(page > tx->db->current_file_header.size_in_pages){
-        push_error(EINVAL, "Attempted to read page %lu but the max page is %ul", page, tx->db->current_file_header.size_in_pages);
-        return false;
-    }
-
-    page_header_t* read_header = _get_page_header(tx->db->mapped_memory, &(tx->db->current_file_header), page);
-    void* read_data = _get_page_pointer(tx->db->mapped_memory, page);
-
-    int number_of_pages = 1;
-
-    if(read_header->flags & PAGE_FLAGS_OVERFLOW) {
-        number_of_pages = read_header->overflow_size / PAGE_SIZE + (read_header->overflow_size % PAGE_SIZE ? 1 : 0);
-    }
-
-    int rc = posix_memalign(page_data, PAGE_SIZE, PAGE_SIZE * number_of_pages);
-    if(!rc){
-        push_error(rc, "Unable to allocate memory for modifed copy of page %lu (%ul pages)", page, number_of_pages);
-        return false;
-    }
-    *header = malloc(sizeof(page_header_t));
-    if (!*header){
-        push_error(ENOMEM, "Unable to allocate memory for modified page header %lu", page);
-        free(*page_data);
-        *page_data = 0;
-        return false;
-    } 
-
-    memcpy(*header, read_header, sizeof(page_header_t));
-    memcpy(*page_data, read_data, PAGE_SIZE * number_of_pages);
-
-    if(!set_page_map(tx->page_map, page, *header, *page_data, &read_header, &read_data)){
-        push_error(ENOMEM, "Unable to allocate memory for transaction's page map");
-        free(*page_data);
-        free(*header);
-        *header = 0;
-        *page_data = 0;
         return false;
     }
     return true;
 }
-

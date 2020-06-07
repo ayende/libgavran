@@ -5,7 +5,7 @@ CC = clang
 #  -g    adds debugging information to the executable file
 #  -Wall turns on most, but not all, compiler warnings
   
-TARGET_EXEC ?= garvan
+TARGET_EXEC ?= garvan.so
 
 BUILD_DIR ?= ./build
 SRC_DIRS ?= ./src
@@ -20,10 +20,10 @@ INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 WARNINGS = -Weverything -Wno-gnu-zero-variadic-macro-arguments
 DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
-CFLAGS  = -g $(WARNINGS) $(INC_FLAGS)  -MMD -MP $(DEFINES)
+CFLAGS  = -g $(WARNINGS) $(INC_FLAGS)  -MMD -MP $(DEFINES) -fPIC
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+	$(CC) $(OBJS) -shared   -o $@ $(LDFLAGS)
 
 # c source 
 $(BUILD_DIR)/%.c.o: %.c

@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stddef.h>
+
 #include "pal.h"
 #include "errors.h"
 
@@ -14,21 +16,42 @@ const char* _get_file_name(file_handle_t* handle){
     return ((char*)handle + sizeof(file_handle_t)); 
 }
 
-bool create_file(const char* file, file_handle_t** handle) { 
-    size_t len = strlen(file) + 1 /* null terminating*/;
-    void* mem = malloc(sizeof(file_handle_t) + len);
-    if(!mem){
-        push_error(ENOMEM, "Unable to allocate memory for file handle's for: %s", file);
-        return false; 
-    }
+size_t get_file_handle_size(const char* path, const char* name) { 
+    if(!path || !name)
+        return 0;
+
+    size_t path_len = strlen(path);
+    size_t name_len = strlen(name);
+
+    if(!path_len || !name_len)
+        return 0;
+
+    return sizeof(file_handle_t) + path_len + 1 /* slash */ + name_len + 1 /* null terminating*/;
+}
+
+bool create_file(const char* path, const char* name, file_handle_t** handle, void* mem) { 
     *handle = (file_handle_t*)mem;
-    memcpy((char*)mem + sizeof(file_handle_t), file, len);     
+
+    // we rely on the fact that foo/bar == foo//bar on linux
+    uint64_t path_len = strlen(path);
+    uint64_t name_len = strlen(name);
+    memcpy((char*)mem + sizeof(file_handle_t), path, path_len); 
+    *((char*)mem + sizeof(file_handle_t) + path_len) = '/';
+    memcpy((char*)mem + sizeof(file_handle_t) + path_len + 1, name, name_len); 
     
+    char* file = (char*)mem + sizeof(file_handle_t);
+
+    if(mkdir(path, S_IRWXU) == -1 ){
+        if(errno != EEXIST){
+            push_error(errno, "Unable to create directory %s", path);
+            return false;
+        }
+    }
+
     int fd = open(file, O_CLOEXEC  | O_CREAT | O_RDWR , S_IRUSR | S_IWUSR);
-    if (fd== -1){
+    if (fd == -1){
         push_error(errno, "Unable to open file %s", file);
-        free(handle);
-        return false;
+        return false; 
     }
     (*handle)->fd = fd;
     return true;
@@ -52,6 +75,7 @@ bool map_file(file_handle_t* handle, uint64_t size, void** address){
         *address = 0;
         return false;
     }
+    *address = addr;
     return true;
 }
 
@@ -63,24 +87,16 @@ bool unmap_file(void* address, uint64_t size){
     return true;
 }
 
-bool close_file(file_handle_t** handle){
-    if(handle == NULL)
+bool close_file(file_handle_t* handle){
+    if(!handle)
         return true;
 
-    int res = close((*handle)->fd);
-    bool result = true;
-    if(res != -1){
-        goto exit;
+    if(close(handle->fd) == -1){
+        push_error(errno, "Failed to close file %s", _get_file_name(handle));
+        return false;
     }
 
-    push_error(errno, "Failed to close file %s", _get_file_name(*handle));
-    result = false;
-
-exit:
-    free(*handle);
-    *handle = 0;
-    return result;
-        
+    return true;
 }
 
 bool ensure_file_minimum_size(file_handle_t* handle, uint64_t minimum_size){

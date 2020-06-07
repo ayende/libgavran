@@ -1,11 +1,13 @@
 #include <errno.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
+
 #include "private.h"
 #include "errors.h"
 
 // partially based on: https://github.com/CyanogenMod/android_system_core/blob/ics/libcutils/hashmap.c
-// this is a trivial hash, because we have to have a page map to be able to work
+// this is a trivial hash map, because we have to have a page map to be able to work
 // assumption, value can never be NULL
 
 typedef struct map_entry {
@@ -19,20 +21,21 @@ struct page_map {
     uint64_t count_of_items;
     uint64_t number_of_buckets;
     map_entry_t** buckets; 
+    txn_t* tx;
 };
 
 static inline uint64_t get_page_bucket(uint64_t number_of_buckets, uint64_t page) {
     return page & (number_of_buckets - 1);
 }
 
-page_map_t* create_page_map(uint32_t initial_capacity){
+page_map_t* create_page_map(txn_t* tx, uint32_t initial_capacity){
     
-    page_map_t* map = malloc(sizeof(page_map_t));
+    page_map_t* map = allocate_tx_mem(tx, sizeof(page_map_t));
     if (map == 0) {
         push_error(ENOMEM, "Unable to allocate page map");
         return 0;
     }
-    
+    map->tx = tx;
     // 0.75 load factor.
     uint32_t minimum_bucket_count = initial_capacity * 4 / 3;
     map->number_of_buckets = 1;
@@ -41,10 +44,11 @@ page_map_t* create_page_map(uint32_t initial_capacity){
         map->number_of_buckets <<= 1; 
     }
 
-    map->buckets = calloc(map->number_of_buckets, sizeof(map_entry_t*));
+    map->buckets = allocate_tx_mem(tx, map->number_of_buckets * sizeof(map_entry_t*));
+    memset(map->buckets, 0, map->number_of_buckets * sizeof(map_entry_t*));
     if (!map->buckets ) {
         push_error(ENOMEM, "Unable to allocate page map %lu buckets", map->number_of_buckets);
-        free(map);
+        release_tx_mem(tx, map);
         return 0;
     }
     
@@ -53,8 +57,8 @@ page_map_t* create_page_map(uint32_t initial_capacity){
     return map;
 }
 
-static map_entry_t* create_map_entry(uint64_t page, page_header_t* header, void* value) {
-    map_entry_t* entry = malloc(sizeof(map_entry_t));
+static map_entry_t* create_map_entry(page_map_t* map, uint64_t page, page_header_t* header, void* value) {
+    map_entry_t* entry = allocate_tx_mem(map->tx, sizeof(map_entry_t));
     if (!entry) {
         push_error(ENOMEM, "Unable to allocate page map entry for page: %lu", page);
         return 0;
@@ -71,7 +75,8 @@ static void maybe_expand_page_map(page_map_t* map) {
     if (map->count_of_items > (map->number_of_buckets * 3 / 4)) {
         // Start off with a 0.33 load factor.
         uint64_t new_number_of_buckets = map->number_of_buckets << 1;
-        map_entry_t** new_buckets = calloc(new_number_of_buckets, sizeof(map_entry_t*));
+        map_entry_t** new_buckets = allocate_tx_mem(map->tx, new_number_of_buckets * sizeof(map_entry_t*));
+        memset(new_buckets, 0, new_number_of_buckets * sizeof(map_entry_t*));
         if ( !new_buckets ) {
             // Abort expansion, not an error, because we can proceed
             return;
@@ -90,7 +95,7 @@ static void maybe_expand_page_map(page_map_t* map) {
         }
 
         // Copy over internals.
-        free(map->buckets);
+        release_tx_mem(map->tx, map->buckets);
         map->buckets = new_buckets;
         map->number_of_buckets = new_number_of_buckets;
     }
@@ -108,7 +113,7 @@ bool set_page_map(page_map_t* map, uint64_t page, page_header_t* header, void* v
 
         // Add a new entry.
         if (current == NULL) {
-            *p = create_map_entry(page, header, value);
+            *p = create_map_entry(map, page, header, value);
             if (!*p ) {
                 return false;
             }
@@ -162,7 +167,7 @@ bool del_page_map(page_map_t* map, uint64_t page, page_header_t** old_header, vo
             *old_value = current->value;
             *old_header = current->header;
             *p = current->next;
-            free(current);
+            release_tx_mem(map->tx, current);
             map->count_of_items--;
             return true;
         }
@@ -174,16 +179,17 @@ bool del_page_map(page_map_t* map, uint64_t page, page_header_t** old_header, vo
 }
 
 void destroy_page_map(page_map_t** map, void (*destroyer)(uint64_t page, page_header_t* header, void* value, void* ctx), void* context) {
+    txn_t* tx = (*map)->tx;
      for (uint64_t i = 0; i < (*map)->number_of_buckets; i++) {
         map_entry_t* entry = (*map)->buckets[i];
         while (entry != NULL) {
             map_entry_t *next = entry->next;
             destroyer(entry->page, entry->header, entry->value, context);
-            free(entry);
+            release_tx_mem(tx, entry);
             entry = next;
         }
     }
-    free((*map)->buckets);
-    free(*map);
+    release_tx_mem(tx, (*map)->buckets);
+    release_tx_mem(tx, *map);
     *map = 0;
 }

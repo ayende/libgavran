@@ -45,11 +45,9 @@ void push_error_internal(const char* file, uint32_t line, const char *func, int3
         out_of_memory |= 2;
     }
     else{
-        errors_buffer_len += (uint32_t)error->len;
+        errors_buffer_len += (uint32_t)error->len +1;
         error->msg = msg;
     }
-
-    printf("%s\n", msg);
 
 	va_end(ap);
 }
@@ -100,8 +98,8 @@ void print_error(error_entry* e, void *u) {
 	else
 		file++;// move past the directory separator
 
-	printf("%s:%i - %s() - %i %s\n", file, e->line,
-		e->func, e->code, e->msg);
+    int chars = printf("%-12s - %6i - %s()", file, e->line, e->func);
+	printf("%*i %s\n", 50 - chars, e->code, e->msg);
 }
 
 
