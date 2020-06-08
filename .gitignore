@@ -1,3 +1,5 @@
 /build
 /db
 /test/db
+/Output
+/tex2pdf.*
