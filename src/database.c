@@ -8,6 +8,7 @@
 #include "errors.h"
 #include "pal.h"
 
+/*
 
 uint64_t _size_of_free_space_bitmap_in_pages(uint64_t number_of_pages){
     uint64_t number_of_bits_required = (number_of_pages / FREE_SPACE_PAGES_BLOCK);
@@ -42,12 +43,12 @@ page_header_t* _get_page_header(char* base PAGE_ALIGNED, file_header_t* header, 
      page_header_t* buffer = (void*)(base + header->page_headers_first_page * PAGE_SIZE);
      return &buffer[page];
 }
+*/
 
-void* _get_page_pointer(char* base PAGE_ALIGNED, uint64_t page) {
-    return (void*)(base + page * PAGE_SIZE);
-}
 
-bool _create_new_database(database_options_t* options, database_handle_t* database, file_handle_t* handle){
+
+bool _create_new_database(database_options_t* options, database_handle_t* database){
+    file_handle_t* handle = database->file_handle;
     assert(options->minimum_size % PAGE_SIZE == 0);
     if(!ensure_file_minimum_size(handle, options->minimum_size))
         return false;
@@ -65,32 +66,36 @@ bool _create_new_database(database_options_t* options, database_handle_t* databa
 
     file_header_t header = {
         .magic = FILE_HEADER_MAGIC_CONSTANT,
-        .last_txid = 0,
+//        .last_txid = 0,
         .size_in_pages = number_of_pages,
+        .last_allocated_page = 1, // exluding the header page
         .version = 1,        
     };
+    /*
     header.page_headers_first_page = number_of_pages - 
                 _size_of_page_header_buffer_in_pages(number_of_pages); 
 
     header.free_space_first_page = header.page_headers_first_page - 
                 _size_of_free_space_bitmap_in_pages(number_of_pages);
+    */
 
     char* base = address;
-    memcpy(base, &header, sizeof(header));             // PAGE 0
-    memcpy(base + PAGE_SIZE, &header, sizeof(header)); // PAGE 1
-
+    // we copy the header twice on the same page, but on different sectors
+    _Static_assert(PAGE_SIZE/2 >= 4096,"We need to ensure that this reside on separate sectors, and on SSD, that means 4KB apart");
+    memcpy(base, &header, sizeof(header));              // PAGE 0
+    memcpy(base + PAGE_SIZE/2, &header, sizeof(header));// PAGE 0.5
     memcpy(&database->current_file_header, &header, sizeof(header));
 
-    _set_free_space_bitmap(base, &header, 0); 
-    _get_page_header(base, &header, 0)->flags = PAGE_FLAGS_SINGLE;
+    // _set_free_space_bitmap(base, &header, 0); 
+    // _get_page_header(base, &header, 0)->flags = PAGE_FLAGS_SINGLE;
     
-    _set_free_space_bitmap(base, &header, 1);
-    _get_page_header(base, &header, 1)->flags = PAGE_FLAGS_SINGLE;
+    // _set_free_space_bitmap(base, &header, 1);
+    // _get_page_header(base, &header, 1)->flags = PAGE_FLAGS_SINGLE;
 
-    for(uint64_t i = header.free_space_first_page; i < number_of_pages; i++){
-        _set_free_space_bitmap(base, &header, i);
-         _get_page_header(base, &header, i)->flags = PAGE_FLAGS_SINGLE;
-    }
+    // for(uint64_t i = header.free_space_first_page; i < number_of_pages; i++){
+    //     _set_free_space_bitmap(base, &header, i);
+    //      _get_page_header(base, &header, i)->flags = PAGE_FLAGS_SINGLE;
+    // }
 
     return true;
 }
@@ -118,9 +123,7 @@ size_t get_database_handle_size(database_options_t* options) {
     return len + sizeof(database_handle_t);
 }
 
-bool create_database(database_options_t* options, database_handle_t** database, void* mem){
-
-    database_handle_t* handle = *database = mem;
+bool create_database(database_options_t* options, database_handle_t* database){
 
     if(!validate_options(options))
         return false;
@@ -128,20 +131,20 @@ bool create_database(database_options_t* options, database_handle_t** database, 
     size_t len = get_file_handle_size(options->path, options->name);
     assert(len); // shouldn't happen, already checked in validate_options
 
-    memset(mem, 0, sizeof(handle) + len);
+    memset(database, 0, sizeof(database) + len);
 
-    if(!create_file(options->path, options->name, &handle->file_handle, (char*)mem + sizeof(handle))){
+    if(!create_file(options->path, options->name, &database->file_handle, (char*)database + sizeof(database))){
         push_error(EIO, "Could not create database %s", options->name);
         goto exit_error;
     }
  
-    if(!get_file_size(handle->file_handle, &handle->database_size)){
+    if(!get_file_size(database->file_handle, &database->database_size)){
         push_error(errno, "Unable to create database %s", options->name);
         goto exit_error;
     }
 
-    if(handle->database_size == 0){
-        if(!_create_new_database(options, *database, handle->file_handle))
+    if(database->database_size == 0){
+        if(!_create_new_database(options, database))
             goto exit_error;
     }
     else {
@@ -152,29 +155,30 @@ bool create_database(database_options_t* options, database_handle_t** database, 
 exit_error:
     // these can fail, but in this case, we don't care, the error is reported anyway via push_error
     // and there isn't much we can do further to handle this
-    close_database(*database);
+    close_database(database);
     return false;
 }
 
 bool close_database(database_handle_t* database) {
     if(!database)
         return true;
-
+    
     bool success = true;
     if(database->mapped_memory)  
         success &= unmap_file(database->mapped_memory, database->database_size);
     success &= close_file(database->file_handle);
+    if(!success)
+        push_error(EIO, "Failed to close database %s", get_file_name(database->file_handle));
 
     return success;
 }
 
-bool create_transaction(database_handle_t* database, uint32_t flags, txn_t** tx) {
-    txn_t* txn = *tx;
+bool create_transaction(database_handle_t* database, uint32_t flags, txn_t* txn) {
     memset(txn, 0, sizeof(txn_t));
 
-    txn->txid = database->current_file_header.last_txid;
-    if (flags & TX_READ_WRITE)
-        txn->txid++;
+    // txn->txid = database->current_file_header.last_txid;
+    // if (flags & TX_READ_WRITE)
+    //     txn->txid++;
 
     txn->db = database;
     txn->flags = flags;
@@ -183,5 +187,17 @@ bool create_transaction(database_handle_t* database, uint32_t flags, txn_t** tx)
         push_error(ENOMEM, "Unable to allocate a page map for transaction");
         return false;
     }
+    return true;
+}
+
+static void _page_map_value_destroyer(uint64_t page, page_header_t* header, void* value, void* ctx){
+    (void)page;
+    (void)header;
+    (void)value;
+    (void)ctx;
+}
+
+bool close_transaction(txn_t* tx){
+    destroy_page_map(&tx->page_map, _page_map_value_destroyer, 0);
     return true;
 }

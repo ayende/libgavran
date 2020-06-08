@@ -4,35 +4,57 @@
 #include "database.h"
 #include "errors.h"
 
-void hi(void) {
-   printf("hi");
+#include <errno.h>
+
+static  MUST_CHECK  bool dance() {
+   return true;
+}
+
+static MUST_CHECK bool sing(const char* song){
+   push_error(ENOTSUP, "Can't sing '%s', can't recall the lyrics", song);
+   return false;
+}
+
+static MUST_CHECK bool action(){
+   if(!sing("Fernando")){
+      mark_error();
+      return false;
+   }
+   if(!dance()){
+      mark_error();
+      return false;
+   }
+   return true;
 }
 
 int main () {
 
-   database_options_t options = {
-      .path = "db",
-      .name = "orev"
-   };
+   (void)action();
 
-   size_t req_size = get_database_handle_size(&options);
-   void* mem = malloc(req_size);
-   if(!mem){
-      return -2;
-   }
+   print_all_errors();
 
-   database_handle_t* db;
-   if(!create_database(&options, &db, mem)){
-      print_all_errors();
-      free(mem);
-      return -1;
-   }
+   // database_options_t options = {
+   //    .path = "db",
+   //    .name = "orev"
+   // };
 
-   close_database(db);
+   // size_t req_size = get_database_handle_size(&options);
+   // database_handle_t* db = malloc(req_size);
+   // if(!db){
+   //    return -2;
+   // }
+
+   // if(!create_database(&options, db)){
+   //    print_all_errors();
+   //    free(db);
+   //    return -1;
+   // }
+
+   // close_database(db);
    
-   free(mem);
+   // free(db);
 
-   printf("Done\n");
+   // printf("Done\n");
 
 
    return(0);

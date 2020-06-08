@@ -1,28 +1,26 @@
 #pragma once
 
-
 #include <stdint.h>
 
-#define push_error(code, format, ...) push_error_internal(__FILE__, __LINE__, __func__, code, format, ##__VA_ARGS__)
+#define MUST_CHECK __attribute__((warn_unused_result))
+
+#define mark_error() push_error_again(__FILE__, __LINE__, __func__)
+#define push_error(code, format, ...) push_error_internal(\
+	__FILE__, __LINE__, __func__, code, format, ##__VA_ARGS__)
 
 __attribute__((__format__ (__printf__, 5, 6)))
-void push_error_internal(const char* file, uint32_t line, const char *func, int32_t code, const char* format, ...);
+void 	push_error_internal(const char* file, uint32_t line, const char *func, int32_t code, const char* format, ...);
 
-typedef struct {
-	int32_t len;
-	uint32_t line;
- 	int32_t code;
-    char _padding[4];
-	const char* msg;
-	const char* file, *func; 
-} error_entry;
+void 	push_error_again(const char* file, uint32_t line, const char *func);
 
-typedef void(*error_callback)(error_entry* e, void * u);
+typedef void(*error_callback)(const char* msg, int32_t code, void * u);
 
-void consume_errors(error_callback cb, void * u);
+void 	consume_errors(error_callback cb, void * u);
 
-void print_all_errors(void);
+void 	print_all_errors(void);
 
-void clear_errors(void);
+void 	clear_errors(void);
 
-error_entry* get_errors(uint32_t* number_of_errors);
+const char** 
+		get_errors_messages(size_t* number_of_errors);
+int* 	get_errors_codes(size_t* number_of_errors);

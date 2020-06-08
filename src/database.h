@@ -5,7 +5,10 @@
 #include <stddef.h>
 
 
+
 #define PAGE_SIZE 8192
+
+_Static_assert(PAGE_SIZE > 4096 && PAGE_SIZE % 4096 == 0, "PAGE_SIZE must be of a multiple of 4096 and > 4096");
 
 
 #define TX_READ_ONLY    1
@@ -21,15 +24,20 @@ typedef struct {
     uint64_t minimum_size;
 } database_options_t;
 
-bool create_database(database_options_t* options, database_handle_t** db, void* mem);
+bool create_database(database_options_t* options, database_handle_t* db);
 
 bool close_database(database_handle_t* db);
 
-size_t get_txn_t_size(void);
+size_t get_txn_size(void);
+
+uint64_t get_txn_id(txn_t* tx);
 
 size_t get_database_handle_size(database_options_t* options);
 
-bool create_transaction(database_handle_t* database, uint32_t flags, txn_t** tx);
+bool create_transaction(database_handle_t* database, uint32_t flags, txn_t* tx);
 
-void hi(void);
+bool close_transaction(txn_t* tx);
 
+bool allocate_page(txn_t* tx, uint32_t number_of_pages, uint32_t flags, uint64_t* page_number);
+
+bool modify_page(txn_t* tx, uint64_t page_number, void** page_buffer, uint32_t* number_of_pages_allocated);

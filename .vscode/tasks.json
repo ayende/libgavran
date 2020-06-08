@@ -6,7 +6,7 @@
     {
       "type": "shell",
       "label": "Make",
-      "command": "make",
+      "command": "make clean && make",
       "args": [],
       "options": {
         "cwd": "${workspaceFolder}"

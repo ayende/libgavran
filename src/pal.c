@@ -12,7 +12,7 @@
 #include "pal.h"
 #include "errors.h"
 
-const char* _get_file_name(file_handle_t* handle){
+const char* get_file_name(file_handle_t* handle){
     return ((char*)handle + sizeof(file_handle_t)); 
 }
 
@@ -64,14 +64,14 @@ bool get_file_size(file_handle_t* handle, uint64_t* size){
         *size = (uint64_t)st.st_size;
         return true;
     }
-    push_error(errno, "Unable to stat(%s)", _get_file_name(handle));
+    push_error(errno, "Unable to stat(%s)", get_file_name(handle));
     return false;
 }
 
 bool map_file(file_handle_t* handle, uint64_t size, void** address){
     void* addr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
     if(addr == MAP_FAILED){
-        push_error(errno, "Unable to map file %s with size %lu", _get_file_name(handle), size);
+        push_error(errno, "Unable to map file %s with size %lu", get_file_name(handle), size);
         *address = 0;
         return false;
     }
@@ -92,7 +92,7 @@ bool close_file(file_handle_t* handle){
         return true;
 
     if(close(handle->fd) == -1){
-        push_error(errno, "Failed to close file %s", _get_file_name(handle));
+        push_error(errno, "Failed to close file %s (%i)", get_file_name(handle), handle->fd);
         return false;
     }
 
@@ -104,7 +104,7 @@ bool ensure_file_minimum_size(file_handle_t* handle, uint64_t minimum_size){
     if(res != -1)
         return true;
     
-    push_error(errno, "Unable to extend file to size %s to %lu", _get_file_name(handle), minimum_size);
+    push_error(errno, "Unable to extend file to size %s to %lu", get_file_name(handle), minimum_size);
     return false;
 }
  

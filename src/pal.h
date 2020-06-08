@@ -21,5 +21,5 @@ bool map_file(file_handle_t* handle, uint64_t minimum_size, void** address);
 
 bool unmap_file(void* address, uint64_t size);
 
-const char* _get_file_name(file_handle_t* handle);
+const char* get_file_name(file_handle_t* handle);
 

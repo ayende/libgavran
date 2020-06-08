@@ -8,7 +8,7 @@
 #include "errors.h"
 #include "pal.h"
 
-
+/*
 bool modify_page(txn_t* tx, uint64_t page, page_header_t** header, void** page_data) {
     if(get_page_map(tx->page_map, page, header, page_data))
         return true;
@@ -54,8 +54,54 @@ bool modify_page(txn_t* tx, uint64_t page, page_header_t** header, void** page_d
     return true;
 }
 
-size_t get_txn_t_size(void) { 
+file_header_t* get_current_file_header(txn_t* tx){
+    void* first_page_buffer = get_page_pointer(tx->db->mapped_memory, 0);
+    file_header_t* fst = (file_header_t*)first_page_buffer;
+    file_header_t* snd = (file_header_t*)((char*)first_page_buffer + PAGE_SIZE/2);
+    if (fst->last_txid > snd->last_txid)
+        return fst;
+    return snd;
+}
+
+*/
+
+
+void* get_page_pointer(char* base PAGE_ALIGNED, uint64_t page) {
+    return (void*)(base + page * PAGE_SIZE);
+}
+
+
+size_t get_txn_size(void) { 
     return sizeof(txn_t);
+}
+
+uint64_t get_txn_id(txn_t* tx) {
+    return tx->txid;
+}
+
+bool modify_page(txn_t* tx, uint64_t page_number, void**page_buffer, uint32_t* number_of_pages_allocated){
+    file_header_t* header = &tx->db->current_file_header;
+    if(page_number >= header->last_allocated_page){
+        push_error(EINVAL, "Page %lu was not allocated in %s", page_number, get_file_name(tx->db->file_handle));
+        return false;
+    }
+    *page_buffer = get_page_pointer(tx->db->mapped_memory, page_number);
+    *number_of_pages_allocated = 1;
+    return true;
+}
+
+bool allocate_page(txn_t* tx, uint32_t number_of_pages, uint32_t flags, uint64_t* page_number){
+    (void)flags; // currently unused
+    assert(number_of_pages == 1);
+    file_header_t* header = &tx->db->current_file_header;
+    if(header->last_allocated_page + number_of_pages >= header->size_in_pages){
+        push_error(ENOSPC, "Unable to allocate %u page(s) for %s because %lu pages are allocated", number_of_pages,
+            get_file_name(tx->db->file_handle), header->last_allocated_page);
+        return false;
+    }
+    *page_number  = header->last_allocated_page ;
+    header->last_allocated_page += number_of_pages;
+    return true;
 }
 
 
@@ -76,7 +122,7 @@ void* allocate_tx_page(txn_t* tx, uint64_t number_of_pages){
     return 0;
 }
 
-void  release_tx_mem(txn_t* tx, void* address){
+void release_tx_mem(txn_t* tx, void* address){
     (void)tx;
     free(address);
 }
@@ -86,3 +132,5 @@ void  release_tx_page(txn_t* tx, void* address, uint64_t number_of_pages){
     (void)number_of_pages;
     free(address);
 }
+
+

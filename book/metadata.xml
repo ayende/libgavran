@@ -1,0 +1,16 @@
+<?xml version="1.0" ?>
+
+<metadata
+  xmlns="http://example.org/myapp/"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://example.org/myapp/ http://example.org/myapp/schema.xsd"
+  xmlns:dc="http://purl.org/dc/elements/1.1/">
+
+  	<dc:title>Building a storage engine</dc:title> 
+	<dc:language>en-US</dc:language> 
+	<dc:creator opf:file-as="Eini, Oren" opf:role="aut">Oren Eini</dc:creator> 
+	<dc:publisher>Hibernating Rhinos LTD</dc:publisher>
+	<dc:date opf:event="publication">2018-05-12</dc:date>
+	<dc:rights>Copyright ©2020 by Oren Eini</dc:rights>
+
+</metadata>
