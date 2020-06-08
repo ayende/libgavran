@@ -12,6 +12,11 @@
 #include "pal.h"
 #include "errors.h"
 
+
+struct pal_file_handle{ 
+    int fd;
+};
+
 const char* get_file_name(file_handle_t* handle){
     return ((char*)handle + sizeof(file_handle_t)); 
 }
@@ -29,18 +34,18 @@ size_t get_file_handle_size(const char* path, const char* name) {
     return sizeof(file_handle_t) + path_len + 1 /* slash */ + name_len + 1 /* null terminating*/;
 }
 
-bool create_file(const char* path, const char* name, file_handle_t** handle, void* mem) { 
-    *handle = (file_handle_t*)mem;
+bool create_file(const char* path, const char* name, file_handle_t* handle) { 
 
     // we rely on the fact that foo/bar == foo//bar on linux
     uint64_t path_len = strlen(path);
     uint64_t name_len = strlen(name);
-    memcpy((char*)mem + sizeof(file_handle_t), path, path_len); 
-    *((char*)mem + sizeof(file_handle_t) + path_len) = '/';
-    memcpy((char*)mem + sizeof(file_handle_t) + path_len + 1, name, name_len); 
-    
-    char* file = (char*)mem + sizeof(file_handle_t);
 
+    char* filename = (char*)handle + sizeof(file_handle_t);
+
+    memcpy(filename, path, path_len); 
+    *(filename + path_len) = '/';
+    memcpy(filename + path_len + 1, name, name_len + 1); 
+    
     if(mkdir(path, S_IRWXU) == -1 ){
         if(errno != EEXIST){
             push_error(errno, "Unable to create directory %s", path);
@@ -48,12 +53,12 @@ bool create_file(const char* path, const char* name, file_handle_t** handle, voi
         }
     }
 
-    int fd = open(file, O_CLOEXEC  | O_CREAT | O_RDWR , S_IRUSR | S_IWUSR);
+    int fd = open(filename, O_CLOEXEC  | O_CREAT | O_RDWR , S_IRUSR | S_IWUSR);
     if (fd == -1){
-        push_error(errno, "Unable to open file %s", file);
+        push_error(errno, "Unable to open file %s", filename);
         return false; 
     }
-    (*handle)->fd = fd;
+    handle->fd = fd;
     return true;
 }
 
