@@ -3,35 +3,31 @@
 
 #include "database.h"
 #include "errors.h"
+#include "pal.h"
 
 #include <errno.h>
 
-static  MUST_CHECK  bool dance() {
-   return true;
-}
-
-static MUST_CHECK bool sing(const char* song){
-   push_error(ENOTSUP, "Can't sing '%s', can't recall the lyrics", song);
-   return false;
-}
-
-static MUST_CHECK bool action(){
-   if(!sing("Fernando")){
-      mark_error();
-      return false;
-   }
-   if(!dance()){
-      mark_error();
-      return false;
-   }
-   return true;
-}
+#define defer(func, var) void* \
+   __defer ## __LINE__ __attribute__ \
+   ((__cleanup__(func))) = var; \
+   (void)__defer ## __LINE__ 
 
 int main () {
 
-   (void)action();
-
-   print_all_errors();
+   size_t size = get_file_handle_size("db", "phones");
+   file_handle_t* handle = malloc(size);
+   if(!handle)
+      return ENOMEM;
+   int i = 4;
+   defer(freef, handle);
+    if(!create_file("db", "phones", handle) || 
+   	  !ensure_file_minimum_size(handle, 128 * 1024) || 
+   	  !close_file(handle)
+   	  ) {
+	      print_all_errors();
+	      return EIO;
+   }
+   return 0;
 
    // database_options_t options = {
    //    .path = "db",
@@ -57,5 +53,4 @@ int main () {
    // printf("Done\n");
 
 
-   return(0);
 }

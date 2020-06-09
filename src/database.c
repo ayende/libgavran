@@ -133,7 +133,7 @@ bool create_database(database_options_t* options, database_handle_t* database){
 
     memset(database, 0, sizeof(database) + len);
 
-    if(!create_file(options->path, options->name, &database->file_handle, (char*)database + sizeof(database))){
+    if(!create_file(options->path, options->name, database->file_handle)){
         push_error(EIO, "Could not create database %s", options->name);
         goto exit_error;
     }

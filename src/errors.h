@@ -13,14 +13,11 @@ void 	push_error_internal(const char* file, uint32_t line, const char *func, int
 
 void 	push_error_again(const char* file, uint32_t line, const char *func);
 
-typedef void(*error_callback)(const char* msg, int32_t code, void * u);
-
-void 	consume_errors(error_callback cb, void * u);
-
 void 	print_all_errors(void);
 
 void 	clear_errors(void);
 
 const char** 
 		get_errors_messages(size_t* number_of_errors);
+		
 int* 	get_errors_codes(size_t* number_of_errors);
