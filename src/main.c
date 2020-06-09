@@ -7,26 +7,51 @@
 
 #include <errno.h>
 
-#define defer(func, var) void* \
-   __defer ## __LINE__ __attribute__ \
-   ((__cleanup__(func))) = var; \
-   (void)__defer ## __LINE__ 
+#define DB_SIZE (128*1024)
 
+static void close_handle_p(void** h){
+   if(!close_file(*h)){
+      print_all_errors();
+   }
+}
+
+static void unmap_mem_p(void** m){
+   if(!unmap_file(*(void**)m, DB_SIZE)){
+      print_all_errors();
+   }
+}
 int main () {
 
-   size_t size = get_file_handle_size("db", "phones");
-   file_handle_t* handle = malloc(size);
+   file_handle_t* handle = malloc(128);
    if(!handle)
       return ENOMEM;
-   int i = 4;
-   defer(freef, handle);
-    if(!create_file("db", "phones", handle) || 
-   	  !ensure_file_minimum_size(handle, 128 * 1024) || 
-   	  !close_file(handle)
-   	  ) {
-	      print_all_errors();
-	      return EIO;
+   if(!create_file("db/orev", handle)){
+      print_all_errors();
+      return EIO;
    }
+   defer(close_handle_p, handle);
+
+   if(!ensure_file_minimum_size(handle, DB_SIZE)){
+      print_all_errors();
+      return EIO;
+   }
+   
+   void* addr;
+   if(!map_file(handle, 0, DB_SIZE, &addr)){
+      print_all_errors();
+      return EIO;
+   }
+   defer(unmap_mem_p, addr);
+
+   const char msg[] = "Hello Gavran";
+   if(!write_file(handle, 0, msg, sizeof(msg))){
+      print_all_errors();
+      return EIO;
+   }
+
+   printf("%s\n", addr);
+
+
    return 0;
 
    // database_options_t options = {

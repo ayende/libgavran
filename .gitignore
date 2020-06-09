@@ -3,3 +3,5 @@
 /test/db
 /Output
 /tex2pdf.*
+/pygavran/db
+/pygavran/__pycache__

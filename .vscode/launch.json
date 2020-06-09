@@ -5,19 +5,12 @@
     "version": "0.2.0",
     "configurations": [
       {
-        "type": "mago-mi",
+        "type": "gdb",
         "request": "launch",
         "name": "Launch Program",
-        "program": "${workspaceRoot}/build/garvan",
-            "cwd": "${workspaceRoot}",
+        "target": "${workspaceRoot}/build/garvan.so",
+        "cwd": "${workspaceRoot}",
         "valuesFormatting": "parseText"
-      },
-        {
-            "name": "Client",
-            "type": "vgdb",
-            "request": "launch",
-            "program": "${workspaceRoot}/build/garvan",
-            "cwd": "${workspaceRoot}"
-          }
-        ]
+      }
+    ]
 }
