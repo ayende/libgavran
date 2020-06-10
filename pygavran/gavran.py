@@ -56,18 +56,19 @@ gvn.close_file.restype = c_bool
 class Pal:
 
     @staticmethod
-    def get_file_handle_size(path):
+    def get_file_handle_size(realpath):
         size = c_size_t()
-        if not gvn.get_file_handle_size(path, byref(size)):
+        if not gvn.get_file_handle_size(c_char_p(realpath), byref(size)):
             GarvanError.Raise()
 
         return size.value
 
     @staticmethod
     def create_file(path):
-        size = Pal.get_file_handle_size(path)
+        realpath = os.path.abspath(path).encode('utf-8')
+        size = Pal.get_file_handle_size(realpath)
         buffer = create_string_buffer(size)
-        if not gvn.create_file(path, buffer):
+        if not gvn.create_file(realpath, buffer):
             GarvanError.Raise()
         return buffer
 
@@ -96,10 +97,7 @@ class GarvanError(Exception):
         size = c_size_t()
         errs = gvn.get_errors_messages(pointer(size))
         codes = gvn.get_errors_codes(pointer(size))
-        
-        if size == 0:
-            return
-
+      
         msg = "\n"
         codes_arr = []
         for i in reversed(range(size.value)):

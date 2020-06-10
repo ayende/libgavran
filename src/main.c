@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "database.h"
+#include <string.h>
+#include <limits.h>
+#include "transactions.h"
 #include "errors.h"
 #include "pal.h"
 
@@ -15,11 +16,12 @@ static void close_handle_p(void** h){
    }
 }
 
-static void unmap_mem_p(void** m){
-   if(!unmap_file(*(void**)m, DB_SIZE)){
+static void close_transction_p(void**h){
+   if(!close_transaction(*h)){
       print_all_errors();
    }
 }
+
 int main () {
 
    file_handle_t* handle = malloc(128);
@@ -36,21 +38,53 @@ int main () {
       return EIO;
    }
    
-   void* addr;
-   if(!map_file(handle, 0, DB_SIZE, &addr)){
+   txn_t tx;
+   if(!create_transaction(handle, 0, &tx)){
       print_all_errors();
       return EIO;
    }
-   defer(unmap_mem_p, addr);
+   defer(close_transction_p, &tx);
+
+   page_t page;
+   page.page_num = 0;
+   if(!modify_page(&tx, &page)){
+      print_all_errors();
+      return EIO;
+   }
+
+   void* modified = page.address;
 
    const char msg[] = "Hello Gavran";
-   if(!write_file(handle, 0, msg, sizeof(msg))){
+   memcpy(modified, msg, sizeof(msg));
+
+   page.page_num = 0;
+   if(!modify_page(&tx, &page)){
+      print_all_errors();
+      return EIO;
+   }
+   printf("%p - %p\n", modified, page.address);
+
+   if(!commit_transaction(&tx)){
       print_all_errors();
       return EIO;
    }
 
-   printf("%s\n", addr);
+   if(!close_transaction(&tx)){
+      print_all_errors();
+      return EIO;
+   }
 
+   if(!create_transaction(handle, 0, &tx)){
+      print_all_errors();
+      return EIO;
+   }
+
+   if(!get_page(&tx,&page)){
+      print_all_errors();
+      return EIO;
+   }
+   
+   printf("%s\n%p vs. %p", page.address, page.address, modified);
 
    return 0;
 

@@ -16,6 +16,11 @@
 #define push_error(code, format, ...) push_error_internal(\
 	__FILE__, __LINE__, __func__, code, format, ##__VA_ARGS__)
 
+#define assert_no_existing_errors() \
+   if (get_errors_count()){ \
+      push_error(EINVAL, "Cannot call %s when there are unnoticed errors", __func__); \
+   } 
+
 __attribute__((__format__ (__printf__, 5, 6)))
 void 	push_error_internal(const char* file, uint32_t line, const char *func, int32_t code, const char* format, ...);
 
@@ -29,3 +34,5 @@ const char**
 		get_errors_messages(size_t* number_of_errors);
 		
 int* 	get_errors_codes(size_t* number_of_errors);
+
+size_t get_errors_count(void);

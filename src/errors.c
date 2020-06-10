@@ -32,7 +32,7 @@ void push_error_internal(const char* file, uint32_t line,
     size_t avail = MAX_ERRORS_MSG_BUFFER - _errors_buffer_len;
     int chars = snprintf(msg, avail, "%s()", func);
     chars += snprintf(msg + chars, avail - (size_t)chars, 
-        "%-*c - %s:%i", 18 - chars,' ', file, line);
+        "%-*c - %s:%i", 25 - chars,' ', file, line);
     // safe to call immediately, if OOM, will write 0 bytes
 	chars += snprintf(msg + chars, avail - (size_t)chars, 
         "%*c - %3i - ", 40 - chars, ' ', code);
@@ -102,4 +102,8 @@ void clear_errors(void){
         _errors_buffer_len);
     _errors_buffer_len = 0;
     _errors_count = 0;
+}
+
+size_t get_errors_count(){
+    return _errors_count;
 }

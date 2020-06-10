@@ -17,28 +17,27 @@
 
 struct pal_file_handle{ 
     int fd;
+    char filename[]; // memory past end of buffer
 };
 
 const char* get_file_name(file_handle_t* handle){
-    return ((char*)handle + sizeof(file_handle_t)); 
+    return handle->filename;
 }
 
 MUST_CHECK bool get_file_handle_size(const char* path, size_t* required_size) { 
+    assert_no_existing_errors();
     size_t len = path ? strlen(path) : 0;
     if(!len) {
         push_error(EINVAL, "The provided path was null or empty");
         return false;
     }
 
+    if(*path != '/'){
+        push_error(EINVAL, "The provided file: '%s' is not an absolute path", path);
+    }
+
     *required_size =  sizeof(file_handle_t) + len + 1 /* null terminating*/;
     return true;
-}
-
-static char* set_file_name(const char* path, file_handle_t* handle){
-    size_t path_len = strlen(path);
-    char* filename = (char*)handle + sizeof(file_handle_t);
-    memcpy(filename, path, path_len + 1); 
-    return filename;
 }
 
 static MUST_CHECK bool fsync_parent_directory(char* file){
@@ -119,38 +118,40 @@ static MUST_CHECK bool ensure_file_path(char* file) {
 }
 
 bool create_file(const char* path, file_handle_t* handle) { 
+    
+    assert_no_existing_errors();
 
-    char* filename = set_file_name(path, handle);
+    memcpy(handle->filename, path, strlen(path) + 1); 
     struct stat st;
     int isNew = false;
-    if(stat(filename, &st) == -1){
+    if(stat(handle->filename, &st) == -1){
         if(errno != ENOENT){
-            push_error(errno, "Unable to stat(%s)", filename);
+            push_error(errno, "Unable to stat(%s)", handle->filename);
             return false;
         }
         isNew = true;
-        if(!ensure_file_path(filename)){
+        if(!ensure_file_path(handle->filename)){
                 mark_error();
                 return false;
         }
     }
     else{
          if(S_ISDIR (st.st_mode)){
-            push_error(EISDIR, "The path '%s' is a directory, expected a file", path);
+            push_error(EISDIR, "The path '%s' is a directory, expected a file", handle->filename);
             return false;
         }
     }
 
-    int fd = open(filename, O_CLOEXEC  | O_CREAT | O_RDWR , S_IRUSR | S_IWUSR);
+    int fd = open(handle->filename, O_CLOEXEC  | O_CREAT | O_RDWR , S_IRUSR | S_IWUSR);
     if (fd == -1){
-        push_error(errno, "Unable to open file %s", filename);
+        push_error(errno, "Unable to open file %s", handle->filename);
         return false; 
     }
     if(isNew) {
-        if(!fsync_parent_directory(filename)) {
-            push_error(EIO, "Unable to fsync parent directory after creating new file: %s", filename);
+        if(!fsync_parent_directory(handle->filename)) {
+            push_error(EIO, "Unable to fsync parent directory after creating new file: %s", handle->filename);
             if(!close(fd)){
-                push_error(errno, "Unable to close file (%i) %s", fd, filename);
+                push_error(errno, "Unable to close file (%i) %s", fd, handle->filename);
             }
             return false;
         }
@@ -160,6 +161,7 @@ bool create_file(const char* path, file_handle_t* handle) {
 }
 
 bool get_file_size(file_handle_t* handle, uint64_t* size){
+    assert_no_existing_errors();
     struct stat st;
     int res = fstat(handle->fd, &st);
     if(res != -1){
@@ -171,6 +173,7 @@ bool get_file_size(file_handle_t* handle, uint64_t* size){
 }
 
 bool map_file(file_handle_t* handle, uint64_t offset, uint64_t size, void** address){
+    assert_no_existing_errors();
     void* addr = mmap(0, size, PROT_READ, MAP_SHARED, handle->fd, (off_t)offset);
     if(addr == MAP_FAILED){
         push_error(errno, "Unable to map file %s with size %lu", get_file_name(handle), size);
@@ -202,6 +205,7 @@ bool close_file(file_handle_t* handle){
 }
 
 bool ensure_file_minimum_size(file_handle_t* handle, uint64_t minimum_size){
+    assert_no_existing_errors();
     int rc = posix_fallocate(handle->fd, 0, (off_t)minimum_size);
     const char* filename = get_file_name(handle);
     if(rc)
@@ -226,6 +230,7 @@ bool ensure_file_minimum_size(file_handle_t* handle, uint64_t minimum_size){
 }
  
 MUST_CHECK bool write_file(file_handle_t* handle, uint64_t offset, const char * buffer, size_t len_to_write){
+    assert_no_existing_errors();
     while(len_to_write){
         ssize_t result = pwrite(handle->fd, buffer, len_to_write, (off_t)offset );
         if (result == -1){
