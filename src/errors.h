@@ -2,6 +2,14 @@
 
 #include <stdint.h>
 
+#define CONCAT_(x,y) x##y
+#define CONCAT(x,y) CONCAT_(x,y)
+#define defer(func, var) void* \
+   CONCAT(__defer__, __LINE__) __attribute__ \
+   ((__cleanup__(func))) = var; \
+   (void)CONCAT(__defer__, __LINE__)
+
+
 #define MUST_CHECK __attribute__((warn_unused_result))
 
 #define mark_error() push_error_again(__FILE__, __LINE__, __func__)

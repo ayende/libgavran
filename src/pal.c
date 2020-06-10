@@ -1,4 +1,6 @@
 #include <stdlib.h> 
+#include <limits.h>
+#include <stdio.h>
 #include <errno.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -21,34 +23,25 @@ const char* get_file_name(file_handle_t* handle){
     return ((char*)handle + sizeof(file_handle_t)); 
 }
 
-size_t get_file_handle_size(const char* path, const char* name) { 
-    if(!path || !name)
-        return 0;
+MUST_CHECK bool get_file_handle_size(const char* path, size_t* required_size) { 
+    size_t len = path ? strlen(path) : 0;
+    if(!len) {
+        push_error(EINVAL, "The provided path was null or empty");
+        return false;
+    }
 
-    size_t path_len = strlen(path);
-    size_t name_len = strlen(name);
-
-    if(!path_len || !name_len)
-        return 0;
-
-    return sizeof(file_handle_t) + path_len + 1 /* slash */ + name_len + 1 /* null terminating*/;
+    *required_size =  sizeof(file_handle_t) + len + 1 /* null terminating*/;
+    return true;
 }
 
-static char* set_file_name(const char* path, const char* name, file_handle_t* handle){
-
-    // we rely on the fact that foo/bar == foo//bar on linux
+static char* set_file_name(const char* path, file_handle_t* handle){
     size_t path_len = strlen(path);
-    size_t name_len = strlen(name);
-
     char* filename = (char*)handle + sizeof(file_handle_t);
-
-    memcpy(filename, path, path_len); 
-    *(filename + path_len) = '/';
-    memcpy(filename + path_len + 1, name, name_len + 1); 
+    memcpy(filename, path, path_len + 1); 
     return filename;
 }
 
-static bool fsync_parent_directory(char* file){
+static MUST_CHECK bool fsync_parent_directory(char* file){
     char* last = strrchr(file, '/');
     int fd;
     if(!last){
@@ -73,61 +66,72 @@ static bool fsync_parent_directory(char* file){
         res = false;
     }
     return res;
-
 }
 
-static bool ensure_file_path(char* file) {
+static void restore_slash(void** p){
+    *(char*)(*p) = '/';
+}
+
+static MUST_CHECK bool ensure_file_path(char* file) {
     // already exists?
     struct stat st;
-    if(stat(file, &st)){
+    if(!stat(file, &st)){
         if(S_ISDIR (st.st_mode)){
-            push_error(EISDIR, "The path '%s' is a directory, expected a file", path);
+            push_error(EISDIR, "The path '%s' is a directory, expected a file", file);
             return false;
         }
         return true; // file exists, so we are good
     }
 
-    char* cur = path;
-    while(*cur){
-        char* next_sep = strchr(cur, '/')
-        if(!next_sep)
-            return true; // not more directories
-        
-        *next_sep = 0; // add null sep to cut the string
+    char* cur = file;
+    if(*cur == '/') // rooted path
+        cur++;
 
-        if(stat(file, &st)){ // now we are checking the directory!
+    while(*cur){
+        char* next_sep = strchr(cur, '/');
+        if(!next_sep){
+            return true; // no more directories
+        }
+        *next_sep = 0; // add null sep to cut the string
+        defer(restore_slash, next_sep);
+      
+        if(!stat(file, &st)){ // now we are checking the directory!
             if(!S_ISDIR(st.st_mode)){
-                push_error(ENOTDIR, "The path '%s' is a file, but expected a directory", path);
-                *next_sep = '/';
+                push_error(ENOTDIR, "The path '%s' is a file, but expected a directory", file);
                 return false;
             }
         }
         else { // probably does not exists
             if (mkdir(file, S_IRWXU) == -1 && errno != EEXIST){
                 push_error(errno, "Unable to create directory: %s", file);
-                *next_sep = '/';
                 return false;
             }
             if(!fsync_parent_directory(file)){
                 mark_error();
-                *next_sep = '/';
                 return false;   
             }
         }
 
         cur = next_sep + 1;
     }
+    push_error(EINVAL, "The last char in '%s' is '/', which is not allowed", file);
+    return false;
 }
 
-bool create_file(const char* path, const char* name, file_handle_t* handle) { 
+bool create_file(const char* path, file_handle_t* handle) { 
 
-    char* filename = set_file_name(path, name, handle);
+    char* filename = set_file_name(path, handle);
     struct stat st;
-    bool isNew = !stat(filename, &st);
-    if(isNew){
-        if(!ensure_file_path(filename)){
-            mark_error();
+    int isNew = false;
+    if(stat(filename, &st) == -1){
+        if(errno != ENOENT){
+            push_error(errno, "Unable to stat(%s)", filename);
             return false;
+        }
+        isNew = true;
+        if(!ensure_file_path(filename)){
+                mark_error();
+                return false;
         }
     }
     else{
@@ -166,8 +170,8 @@ bool get_file_size(file_handle_t* handle, uint64_t* size){
     return false;
 }
 
-bool map_file(file_handle_t* handle, uint64_t size, void** address){
-    void* addr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
+bool map_file(file_handle_t* handle, uint64_t offset, uint64_t size, void** address){
+    void* addr = mmap(0, size, PROT_READ, MAP_SHARED, handle->fd, (off_t)offset);
     if(addr == MAP_FAILED){
         push_error(errno, "Unable to map file %s with size %lu", get_file_name(handle), size);
         *address = 0;
@@ -198,11 +202,43 @@ bool close_file(file_handle_t* handle){
 }
 
 bool ensure_file_minimum_size(file_handle_t* handle, uint64_t minimum_size){
-    int res = fallocate (handle->fd, 0, 0, (int64_t)minimum_size);
-    if(res != -1)
-        return true;
-    
-    push_error(errno, "Unable to extend file to size %s to %lu", get_file_name(handle), minimum_size);
-    return false;
+    int rc = posix_fallocate(handle->fd, 0, (off_t)minimum_size);
+    const char* filename = get_file_name(handle);
+    if(rc)
+    {
+        push_error(rc, "Unable to extend file to size %s to %lu", filename, minimum_size);
+        return false;
+    }
+    char filename_mutable[PATH_MAX];
+    size_t name_len = strlen(filename);
+    if(name_len >= PATH_MAX){
+        push_error(ENAMETOOLONG, "The provided name is %zu characters, which is too long", name_len);
+        return false;
+    }
+    memcpy(filename_mutable, filename, name_len+1);
+
+    if(!fsync_parent_directory(filename_mutable)){
+        mark_error();
+        return false;
+    }
+
+    return true;
 }
  
+MUST_CHECK bool write_file(file_handle_t* handle, uint64_t offset, const char * buffer, size_t len_to_write){
+    while(len_to_write){
+        ssize_t result = pwrite(handle->fd, buffer, len_to_write, (off_t)offset );
+        if (result == -1){
+
+            if(errno == EINTR)
+                continue;
+
+            push_error(errno, "Unable to write %zu bytes to file %s", len_to_write, get_file_name(handle));
+            return false;
+        }
+        len_to_write -= (size_t)result;
+        buffer += result;
+        offset += (size_t)result;
+    }
+    return true;
+}
