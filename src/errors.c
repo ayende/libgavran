@@ -13,6 +13,13 @@ _Thread_local static size_t _errors_count;
 _Thread_local static size_t _errors_buffer_len;
 _Thread_local static uint32_t _out_of_memory;
 
+void _try_defer(struct cancel_defer* cd) {
+   if(cd->cancelled)
+      return;
+   cd->action(cd->target);
+}
+
+
 __attribute__((__format__ (__printf__, 5, 6)))
 void push_error_internal(const char* file, uint32_t line, 
     const char *func, int32_t code, const char* format, ...) {
@@ -32,7 +39,7 @@ void push_error_internal(const char* file, uint32_t line,
     size_t avail = MAX_ERRORS_MSG_BUFFER - _errors_buffer_len;
     int chars = snprintf(msg, avail, "%s()", func);
     chars += snprintf(msg + chars, avail - (size_t)chars, 
-        "%-*c - %s:%i", 18 - chars,' ', file, line);
+        "%-*c - %s:%i", 25 - chars,' ', file, line);
     // safe to call immediately, if OOM, will write 0 bytes
 	chars += snprintf(msg + chars, avail - (size_t)chars, 
         "%*c - %3i - ", 40 - chars, ' ', code);
@@ -102,4 +109,8 @@ void clear_errors(void){
         _errors_buffer_len);
     _errors_buffer_len = 0;
     _errors_count = 0;
+}
+
+size_t get_errors_count(){
+    return _errors_count;
 }
