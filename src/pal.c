@@ -14,7 +14,6 @@
 #include "pal.h"
 #include "errors.h"
 
-
 struct pal_file_handle{ 
     int fd;
     char filename[]; // memory past end of buffer

@@ -21,7 +21,30 @@ typedef struct transaction {
     txn_state_t* state;
 } txn_t;
 
-MUST_CHECK bool create_transaction(file_handle_t* handle, uint32_t flags, txn_t* tx);
+#define FILE_HEADER_MAGIC (9410039042695495) // = 'Gavran!\0'
+
+typedef struct file_header {
+    uint64_t magic;
+    uint64_t number_of_pages;
+    uint32_t version;
+    uint32_t page_size;
+
+} file_header_t;
+
+typedef struct database_options{
+    uint64_t minimum_size;
+} database_options_t;
+
+typedef struct database_state db_state_t;
+
+typedef struct database {
+    db_state_t* state;
+} database_t;
+
+MUST_CHECK bool open_database(const char* path, database_options_t* options, database_t* db);
+MUST_CHECK bool close_database(database_t* db);
+
+MUST_CHECK bool create_transaction(database_t* db, uint32_t flags, txn_t* tx);
 
 MUST_CHECK bool get_page(txn_t* tx, page_t* page);
 MUST_CHECK bool modify_page(txn_t* tx, page_t* page);

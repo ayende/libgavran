@@ -13,6 +13,13 @@ _Thread_local static size_t _errors_count;
 _Thread_local static size_t _errors_buffer_len;
 _Thread_local static uint32_t _out_of_memory;
 
+void _try_defer(struct cancel_defer* cd) {
+   if(cd->cancelled)
+      return;
+   cd->action(cd->target);
+}
+
+
 __attribute__((__format__ (__printf__, 5, 6)))
 void push_error_internal(const char* file, uint32_t line, 
     const char *func, int32_t code, const char* format, ...) {

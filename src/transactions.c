@@ -14,13 +14,19 @@ typedef struct page_hash_entry {
 } page_hash_entry_t;
 
 struct transaction_state {
-    file_handle_t* handle;
-    void* address;
+    db_state_t* db;
     size_t allocated_size;
-    uint64_t file_size;
     uint32_t flags;
     uint32_t modified_pages;
     page_hash_entry_t entries[];
+};
+
+struct database_state{
+    database_options_t options;
+    file_header_t header;
+    void* address;
+    uint64_t address_size;
+    file_handle_t* handle;
 };
 
 #define get_number_of_buckets(state) ((state->allocated_size - sizeof(txn_state_t)) / sizeof(page_hash_entry_t))
@@ -33,7 +39,7 @@ bool commit_transaction(txn_t* tx){
         if(!state->entries[i].address)
             continue;
 
-        if(!write_file(state->handle, 
+        if(!write_file(state->db->handle, 
             state->entries[i].page_num * PAGE_SIZE, 
             state->entries[i].address, PAGE_SIZE)) {
                 push_error(EIO, "Unable to write page %lu", state->entries[i].page_num);
@@ -59,48 +65,26 @@ bool commit_transaction(txn_t* tx){
         state->entries[i].address = 0;
     }
 
-   if(!unmap_file(state->address, state->file_size)){
-        mark_error();
-        result = false;
-    }
-
     free(tx->state);
 
     tx->state = 0;
     return result;
  }
 
-bool create_transaction(file_handle_t* handle, uint32_t flags, txn_t* tx){
+bool create_transaction(database_t* db, uint32_t flags, txn_t* tx){
     
     assert_no_existing_errors();
-    
-    uint64_t size;
-    if(!get_file_size(handle, &size)){
-        mark_error();
-        return false;
-    }
-
-    void* addr;
-    if(!map_file(handle, 0, size, &addr)){
-        mark_error();
-        return false;
-    }
 
     size_t initial_size = sizeof(txn_state_t) + sizeof(page_hash_entry_t) * 8;
     txn_state_t* state = calloc(1, initial_size);
     if (!state){
-       if(!unmap_file(addr, size)){
-           mark_error();
-       }
        push_error(ENOMEM, "Unable to allocate memory for transaction state");
        return false;
     }
     memset(state, 0, initial_size);
     state->allocated_size = initial_size;
-    state->handle = handle;
     state->flags = flags;
-    state->file_size = size;
-    state->address = addr;
+    state->db = db->state;
 
     tx->state = state;
     return true;
@@ -146,22 +130,22 @@ static enum hash_resize_status expand_hash_table(txn_state_t** state_ptr, size_t
     new_state->allocated_size = new_size;
 
     for(size_t i = 0; i < number_of_buckets; i++){
-        if(state->entries[i].address){
-            size_t starting_pos = state->entries[i].page_num % new_number_of_buckets;
-            bool located = false;
-            for(size_t j = 0; j < new_number_of_buckets; j++){
-                size_t index = (j + starting_pos) % new_number_of_buckets;
-                if(!new_state->entries[index].address){ // empty
-                    new_state->entries[index] = state->entries[i];
-                    located = true;
-                    break;
-                }
+        if(!state->entries[i].address)
+            continue;
+        size_t starting_pos = state->entries[i].page_num % new_number_of_buckets;
+        bool located = false;
+        for(size_t j = 0; j < new_number_of_buckets; j++){
+            size_t index = (j + starting_pos) % new_number_of_buckets;
+            if(!new_state->entries[index].address){ // empty
+                new_state->entries[index] = state->entries[i];
+                located = true;
+                break;
             }
-            if(!located){
-                push_error(EINVAL, "Failed to find spot for %lu after hash table resize", state->entries[i].page_num);
-                free(new_state);
-                return hash_resize_err_failure;
-            }
+        }
+        if(!located){
+            push_error(EINVAL, "Failed to find spot for %lu after hash table resize", state->entries[i].page_num);
+            free(new_state);
+            return hash_resize_err_failure;
         }
     }
 
@@ -177,13 +161,14 @@ static bool allocate_entry_in_tx(txn_state_t** state_ptr, uint64_t page_num, pag
     // we use linear probing to find a value in case of collisions
     for(size_t i = 0; i < number_of_buckets; i++){
         size_t index = (i + starting_pos) % number_of_buckets;
-        if(state->entries[index].page_num == page_num){
-            *entry = &state->entries[index];
-            return true;
+        if(state->entries[index].page_num == page_num && state->entries[index].address ){
+            push_error(EINVAL, "Attempted to allocate entry for page %lu which already exist in the table", page_num);
+            return false;
         }
 
         if(!state->entries[index].address){
             size_t max_pages = (number_of_buckets * 3/4);
+            // check the load factor
             if(state->modified_pages+1 < max_pages){
                 state->modified_pages++;
                 state->entries[index].page_num = page_num;
@@ -228,13 +213,13 @@ bool get_page(txn_t* tx, page_t* page){
         return true;
     }
     uint64_t offset = page->page_num * PAGE_SIZE;
-    if(offset + PAGE_SIZE > tx->state->file_size){
+    if(offset + PAGE_SIZE > tx->state->db->address_size){
         push_error(ERANGE, "Requests page %lu is outside of the bounds of the file (%lu)", 
-            page->page_num, tx->state->file_size);
+            page->page_num, tx->state->db->address_size);
         return false;
     }
 
-    page->address = ((char*)tx->state->address + offset);
+    page->address = ((char*)tx->state->db->address + offset);
     return true;
 }
 
@@ -248,12 +233,12 @@ bool modify_page(txn_t* tx, page_t* page) {
     }
 
     uint64_t offset = page->page_num * PAGE_SIZE;
-    if(offset + PAGE_SIZE > tx->state->file_size){
+    if(offset + PAGE_SIZE > tx->state->db->address_size){
         push_error(ERANGE, "Requests page %lu is outside of the bounds of the file (%lu)", 
-            page->page_num, tx->state->file_size);
+            page->page_num, tx->state->db->address_size);
         return false;
     }
-    void* original = ((char*)tx->state->address + offset);
+    void* original = ((char*)tx->state->db->address + offset);
     void* modified;
     int rc = posix_memalign(&modified, PAGE_ALIGNMENT, PAGE_SIZE);
     if (rc){
@@ -271,131 +256,187 @@ bool modify_page(txn_t* tx, page_t* page) {
     return true;
 }
 
+static void close_transaction_p(void *p){
+    if(!close_transaction(p)){
+        mark_error();
+    }
+}
 
+static MUST_CHECK bool set_file_headers(database_t * db){
+    txn_t tx;
+    if(!create_transaction(db, 0, &tx)){
+        push_error(EINVAL, "Failed to create a transaction on database init: %s", get_file_name(db->state->handle));
+        return false;
+    }
+    defer(close_transaction_p, &tx);
+    page_t page = {0, 0};
+    if(!modify_page(&tx, &page)){
+        push_error(EINVAL, "Unable to get first page of file: %s", get_file_name(db->state->handle));
+        return false;
+    }
+    memcpy(page.address, &db->state->header, sizeof(file_header_t));
+    memcpy((char*)page.address + PAGE_SIZE/2, &db->state->header, sizeof(file_header_t));
 
-// /*
-// bool modify_page(txn_t* tx, uint64_t page, page_header_t** header, void** page_data) {
-//     if(get_page_map(tx->page_map, page, header, page_data))
-//         return true;
+    if(!commit_transaction(&tx)){
+        push_error(EINVAL, "Unable to commit init transaction on: %s", get_file_name(db->state->handle));
+        return false;
+    }
 
-//     if(page > tx->db->current_file_header.size_in_pages){
-//         push_error(EINVAL, "Attempted to read page %lu but the max page is %lu", page, tx->db->current_file_header.size_in_pages);
-//         return false;
-//     }
+    return true;
+}
 
-//     page_header_t* read_header = _get_page_header(tx->db->mapped_memory, &(tx->db->current_file_header), page);
-//     void* read_data = _get_page_pointer(tx->db->mapped_memory, page);
+static MUST_CHECK bool handle_newly_opened_database(database_t* db){
+    db_state_t* state = db->state;
+    file_header_t* header1 = state->address;
+    file_header_t* header2 = (void*)((char*)state->address + PAGE_SIZE/2);
+    
+    // at this point state->header is zeroed
+    // if both headers are zeroed, we are probably dealing with a new database
+    bool isNew = !memcmp(header1, &state->header, sizeof(file_header_t)) && 
+                 !memcmp(header2, &state->header, sizeof(file_header_t));
 
-//     uint64_t number_of_pages = 1;
+    if(isNew) {
+        // now needs to set it up
+        state->header.magic = FILE_HEADER_MAGIC;
+        state->header.version = 1;
+        state->header.page_size = PAGE_SIZE;
+        state->header.number_of_pages = state->address_size / PAGE_SIZE;
+        if(!set_file_headers(db)){
+            mark_error();
+            return false;
+        }
+    }
+    file_header_t* selected = header1->magic != FILE_HEADER_MAGIC ? header2: header1;
+    if (selected->magic != FILE_HEADER_MAGIC) {
+        push_error(EINVAL, "Unable to find matching header in first page of %s", get_file_name(state->handle));
+        return false;
+    }
+    if(selected->number_of_pages * PAGE_SIZE > state->address_size){
+        push_error(EINVAL, "The size of the file %s is %lu but expected to have %lu pages, file was probably truncated", 
+            get_file_name(state->handle), state->address_size, selected->number_of_pages * PAGE_SIZE 
+        );
+        return false;
+    }
+    if(selected->page_size != PAGE_SIZE){
+        push_error(EINVAL, "File %s page size is %d, expected %d", 
+            get_file_name(state->handle), 
+            selected->page_size,
+            PAGE_SIZE );
+        return false;
+    }
 
-//     if(read_header->flags & PAGE_FLAGS_OVERFLOW) {
-//         number_of_pages = read_header->overflow_size / PAGE_SIZE + (read_header->overflow_size % PAGE_SIZE ? 1 : 0);
-//     }
+    return true;
+}
 
-//     *page_data = allocate_tx_page(tx, number_of_pages);
-//     if(!*page_data){
-//         push_error(errno, "Unable to allocate memory for modifed copy of page %lu (%lu pages)", page, number_of_pages);
-//         return false;
-//     }
-//     *header = allocate_tx_mem(tx, sizeof(page_header_t));
-//     if (!*header){
-//         push_error(ENOMEM, "Unable to allocate memory for modified page header %lu", page);
-//         release_tx_page(tx, *page_data, number_of_pages);
-//         *page_data = 0;
-//         return false;
-//     } 
+static MUST_CHECK bool close_database_state(db_state_t* state){
+    if(!state)
+        return true; // double close?
+    bool result = true;
+    if(state->address){
+        if(unmap_file(state->address, state->address_size)){
+            mark_error();
+            result = false;
+        }
+    }
+    if(!close_file(state->handle)){
+        mark_error();
+        result = false;
+    }
+    free(state);
+    return result;
+}
 
-//     memcpy(*header, read_header, sizeof(page_header_t));
-//     memcpy(*page_data, read_data, PAGE_SIZE * number_of_pages);
+static void close_database_state_p(void* p){
+    if(!close_database_state(p)){
+        mark_error();
+    }
+}
 
-//     if(!set_page_map(tx->page_map, page, *header, *page_data, &read_header, &read_data)){
-//         push_error(ENOMEM, "Unable to allocate memory for transaction's page map");
-//         release_tx_page(tx, *page_data, number_of_pages);
-//         release_tx_mem(tx, *header);
-//         *header = 0;
-//         *page_data = 0;
-//         return false;
-//     }
-//     return true;
-// }
+bool close_database(database_t* db){
+    if(!db->state)
+        return true;// double close?
+    bool result = close_database_state(db->state);
+    db->state = 0;
+    return result;
+}
 
-// file_header_t* get_current_file_header(txn_t* tx){
-//     void* first_page_buffer = get_page_pointer(tx->db->mapped_memory, 0);
-//     file_header_t* fst = (file_header_t*)first_page_buffer;
-//     file_header_t* snd = (file_header_t*)((char*)first_page_buffer + PAGE_SIZE/2);
-//     if (fst->last_txid > snd->last_txid)
-//         return fst;
-//     return snd;
-// }
+static MUST_CHECK bool validate_options(database_options_t* options){
 
-// */
+    if(!options->minimum_size)
+        options->minimum_size = 128*1024;
 
+    if(options->minimum_size < 128*1024){
+        push_error(EINVAL, "The minimum_size cannot be less than %d", 128*1024);
+        return false;
+    }
+        
+    if(options->minimum_size % PAGE_SIZE) { 
+        push_error(EINVAL, "The minimum size must be page aligned (%d)", PAGE_SIZE);
+        return false;
+    }
 
-// void* get_page_pointer(char* base PAGE_ALIGNED, uint64_t page) {
-//     return (void*)(base + page * PAGE_SIZE);
-// }
+    return true;
+}
 
+bool open_database(const char* path, database_options_t* options, database_t* db){
 
-// size_t get_txn_size(void) { 
-//     return sizeof(txn_t);
-// }
+    db_state_t* ptr = 0;
+    // defer is called on the _pointer_ of
+    // ptr, not its value;
+    size_t* cancel;
+    try_defer(close_database_state_p, &ptr, cancel);
 
-// uint64_t get_txn_id(txn_t* tx) {
-//     return tx->txid;
-// }
+    if(!validate_options(options)){
+        mark_error();
+        return false;
+    }
 
-// bool modify_page(txn_t* tx, uint64_t page_number, void**page_buffer, uint32_t* number_of_pages_allocated){
-//     file_header_t* header = &tx->db->current_file_header;
-//     if(page_number >= header->last_allocated_page){
-//         push_error(EINVAL, "Page %lu was not allocated in %s", page_number, get_file_name(tx->db->file_handle));
-//         return false;
-//     }
-//     *page_buffer = get_page_pointer(tx->db->mapped_memory, page_number);
-//     *number_of_pages_allocated = 1;
-//     return true;
-// }
+    size_t db_state_size;
+    if(!get_file_handle_size(path, &db_state_size)){
+        mark_error();
+        return false;
+    }
+    db_state_size += sizeof(db_state_t);
 
-// bool allocate_page(txn_t* tx, uint32_t number_of_pages, uint32_t flags, uint64_t* page_number){
-//     (void)flags; // currently unused
-//     assert(number_of_pages == 1);
-//     file_header_t* header = &tx->db->current_file_header;
-//     if(header->last_allocated_page + number_of_pages >= header->size_in_pages){
-//         push_error(ENOSPC, "Unable to allocate %u page(s) for %s because %lu pages are allocated", number_of_pages,
-//             get_file_name(tx->db->file_handle), header->last_allocated_page);
-//         return false;
-//     }
-//     *page_number  = header->last_allocated_page ;
-//     header->last_allocated_page += number_of_pages;
-//     return true;
-// }
+    ptr = calloc(1, db_state_size);
+    if(!ptr){
+        push_error(ENOMEM, 
+            "Unable to allocate "
+            "database state struct: %s", path);
+        return false;
+    }
+    ptr->handle = (file_handle_t*)(ptr+1);
 
+    if(!create_file(path, ptr->handle)){
+        push_error(EIO, "Unable to create file for %s", path);
+        return false;// cleanup via defer
+    }
 
-// // TEMP impl
+    ptr->options = *options;
+    if(!ensure_file_minimum_size(ptr->handle,   
+            options->minimum_size)){
+        mark_error();
+        return false;// cleanup via defer
+    }
+    if(!get_file_size(ptr->handle, &ptr->address_size)){
+        mark_error();
+        return false;// cleanup via defer
+    }
 
-// void* allocate_tx_mem(txn_t* tx, uint64_t size){
-//     (void)tx;
-//     return malloc(size);
-// }
+    if(!map_file(ptr->handle, 0, 
+            ptr->address_size, &ptr->address)){
+       mark_error();
+       return false;// cleanup via defer
+    }
 
-// void* allocate_tx_page(txn_t* tx, uint64_t number_of_pages){
-//     (void)tx;
-//     void*ptr; 
-//     int rc = posix_memalign(&ptr, PAGE_SIZE, number_of_pages * PAGE_SIZE);
-//     if(!rc)
-//         return ptr;
-//     errno = rc;
-//     return 0;
-// }
+    db->state = ptr;
 
-// void release_tx_mem(txn_t* tx, void* address){
-//     (void)tx;
-//     free(address);
-// }
+    if(!handle_newly_opened_database(db)){
+        mark_error();
+        return false;// cleanup via defer
+    }
 
-// void  release_tx_page(txn_t* tx, void* address, uint64_t number_of_pages){
-//     (void)tx;
-//     (void)number_of_pages;
-//     free(address);
-// }
-
+    *cancel = 1;// ensuring that defer won't clean it
+    return true;
+}
 
