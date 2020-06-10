@@ -1,0 +1,28 @@
+
+
+
+       Linux's file_header_t details:
+
++---------------+-------------------------+
+|               |                         |
+| file_header_t |     char* buffer        |
+|               |                         |
+|    int fd     | file name from the user |
+|               |                         |
+| size: 4 bytes |  size: file len + null  |
+|               |                         |
++---------------+-----------------+-------+
+
+       Example: file "/db/orev", fd 7
+
+         +-----+------------+
+         |     |            |
+         |   7 | /db/orev\0 |
+         |     |            |
+         +-----+------------+
+
+            Size 12 bytes
+
+
+
+

@@ -11,7 +11,7 @@ $output = ".\Output\StorageEngine.$type"
 pandoc --table-of-contents --toc-depth=3 --epub-metadata=metadata.xml --reference-links `
 	--standalone --highlight-style=espresso --self-contained --top-level-division=chapter `
 	--listings --pdf-engine=xelatex --number-sections --css=pandoc.css `
-	-o $output .\ch01\ch01.md .\ch02\ch02.md
+	-o $output .\ch01\ch01.md .\ch02\ch02.md .\ch03\ch03.md
 
 if($start) {
 	start $output
