@@ -5,12 +5,14 @@
     "version": "0.2.0",
     "configurations": [
       {
-        "type": "gdb",
+        "type": "vgdb",
         "request": "launch",
         "name": "Launch Program",
-        "target": "${workspaceRoot}/build/garvan.so",
+        "target": "${workspaceRoot}/build/gavran.so",
+        "program": "${workspaceRoot}/build/gavran.so",
         "cwd": "${workspaceRoot}",
-        "valuesFormatting": "parseText"
+        "valuesFormatting": "parseText",
+        "stopOnEntry": true
       }
     ]
 }

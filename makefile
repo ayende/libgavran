@@ -5,7 +5,7 @@ CC = clang
 #  -g    adds debugging information to the executable file
 #  -Wall turns on most, but not all, compiler warnings
   
-TARGET_EXEC ?= garvan.so
+TARGET_EXEC ?= gavran.so
 
 BUILD_DIR ?= ./build
 SRC_DIRS ?= ./src
