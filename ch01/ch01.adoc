@@ -1,0 +1,602 @@
+
+= Part I
+
+My hope is that this book will take you on the journey of writing a production grade storage engine from scratch. 
+
+
+== Introduction
+
+My name is Oren Eini, and I have been working with (and on) databases for over 15 years. For the past decade or so, I have been
+involved in the creation of https://ravendb.net[RavenDB], a distributed document database. I have also been 
+involved in building other systems of similar nature such as queuing infrastructure, a distributed hash table and the like. 
+
+It turns out that at the bottom of the stack, you need a _good_ way to store data to disk. I have looked into many ways
+to handle this, from simply writing XML or JSON file to a folder to utilizing existing software and libraries such as
+SQLite, LMDB, Esent, LevelDB and RocksDB. For quite some time, it has been my hobby to read through any storage engine
+codebase that I came across. And there have been many of those.
+
+This is a book that is going to cover how to build a database, from the ground up. We aren't going to be talking about
+the appropriate schema or what constraints to use. We are going to build the low level infrastructure that you need in
+order bo _build_ a database engine, from scratch. 
+
+In particular, I want to walk through all the details of building a production quality 
+storage engine with full ACID footnote:[Atomic, consistent, isolated and durable] properties, _real_ transactions and the ability
+to store and operate on data in interesting manner.
+
+[NOTE]
+.Assumptions about the reader
+====
+I'm writing this book for fun, because it kept bouncing in my head and I really need to get it out so I can sleep.
+The target audience are developers who have at least a passing familiarity with system level programming and the C language.
+I'm not going to find the most esoteric pieces of C to use, but you are expected to understand the C, native memeory,
+ data structures and the like. 
+
+I'll reference other resources at times for additional materials, but I'm going to focus on the storage engine rather than
+reiterating existing knowledge. If additional knowledge isn't critical to understanding what is going on, I'll refer you
+elsewhere.
+====
+
+If you are interested in how storage engines work, I have written detailed reviews of my finding on many such projects. 
+The following list contains some of those review, note that they are usually spread over to multiple posts in a series. 
+I went through the code base and wrote my notes as they occurced to me. 
+
+* https://ayende.com/blog/posts/series/3607/reading-erlang[CouchDB] - Document database written in Erlang.
+* https://ayende.com/blog/posts/series/162754/reviewing-lightning-memory-mapped-database-library[LMDB]- Low level 
+  storage engine library written in C.
+* https://ayende.com/blog/posts/series/161410/reviewing-leveldb[LevelDB] - Low level storage engine library from
+  Google. The basis for RocksDB from Facebook. 
+* https://ayende.com/blog/posts/series/184225-A/reviewing-faster[FASTER] - Low level storage engine from Microsoft.
+* https://ayende.com/blog/posts/series/184066-C/reading-the-nsas-codebase[LemonGraph] - Graph database by the NSA.
+* https://ayende.com/blog/posts/series/178497/reviewing-noise-search-engine[Noise] - Full text search engine in Rust.
+* https://ayende.com/blog/posts/series/178945/reviewing-resin[Resin] - Document database written in C#.
+* https://ayende.com/blog/posts/series/186753-A/reviewing-sled[Sled] - Low level storage engine written in Rust.
+
+I've also written my own storage engine library, based on the things that I have learned from these reviews, experience
+in the field and the needs of RavenDB itself. This storage engine is called Voron, we started working on that in 2013
+and has switched all of RavenDB to it completely by late 2015. Voron has been powering all RavenDB production systems 
+for years, with very little trouble.
+
+Voron is written in C# was built to be _high_ performance and has been able to achieve impressive benchmark numbers. 
+We have also built Voron to serve RavenDB and adapted RavenDB to best utilize Voron. That has been a very benefitical 
+relationship for us because it allowed us to make certain that the operations we needed had as little cost as possible. 
+
+
+=== Why this book?
+
+I have written extensively about database building in the past. Again, each of these links is to a _series_ of posts that describe
+certain aspects of building a database. 
+
+* https://ayende.com/blog/posts/series/174337/the-guts-n-glory-of-database-internals[The Guts n' Glory of Database Internals] -
+  A series of posts that walks through the challenges involved in building a proper database and recommendations on how to deal
+  with them.
+* https://ayende.com/blog/posts/series/175041/database-building-101[Database building 101] - Series of posts detailing how to build
+  a graph database. 
+* https://ayende.com/blog/posts/series/175073/voron-internals[Voron internals] - How Voron works behind the curtains.
+* https://ayende.com/blog/posts/series/176961/low-level-voron-optimizations[Low level Voron optimizations] - Discuss some
+  of the tricks we use to get Voron to be faster.
+
+All of my work in Open Source. You can find RavenDB's code at our GitHub repository^[https://github.com/ravendb/ravendb] and the 
+Voron project is the `src/Voron` directory there.
+
+I spent a lot of time on building storage engines and I learned a lot from actual production usage. This book started with me thinking
+about how I would approach building a new storage engine without any existing constraints. Given everything I know and a blank slate, 
+what would be the best storage engine that I could come up with? 
+
+Rather than just throw code over the wall, I wanted _explain_ things and tell the complete story. I'm also using this project as a way to 
+test out some interesting expriments that came to mind do proper research into additional avenues and in general build something cool.
+
+I hope that you'll find this book interesting, it has certainly been interesting to write it. This isn't meant to be a theoretical
+book, however. I'm going to walk through actual code, explain the reasoning behind what I'm doing, the alternatives for the choices
+I made as implemented by other products and the implications of those choices. 
+
+For more theoretical reading, I would recommend:
+
+* https://www.databass.dev/[Database Internals] - Discuss implementation details of database, both storage related and in the context
+  of distributed sytems. I found it facinating to read and I highly recommend it. It puts you in the role of the implementor and go over
+  very important details in an approachable manner.
+* https://dataintensive.net/[Designing data-intensive applications] - Go over similar ground as Database Internals, but it does so from
+  a completely different perspective, the user. This is a great book to understand how to make _use_ of this knowledge. I think that these
+  books completement each other quite nicely.
+
+I'm going to be talking about the road that _was_ taken in this book. Whenever there is a design choice to make, I'm going to call it out
+and reference some of the other options, but I'm going to focus on the decisions that _were_ made, instead of exploring all the various
+options.
+
+[NOTE]
+.Language and platform choices
+====
+I usually write code in C# and .NET, but I decided that I wanted to have the broadest possible appeal for the engine, so I'm going to 
+be writing the engine in C. I _like_ writing C code, because it is generally very straight forward and there is nothing that isn't 
+visible. 
+That said, error handling and resource management in C _sucks_. I spent some time creating just enough infrastructure to be able to
+write much nicer code without going crazy. 
+
+I'm going to target Linux as the first operating system to run the storage engine on, but eventually we'll run it on Linux, Windows
+and Mac a minimum.
+====
+
+=== What is a storage engine? 
+
+A storage engine in the context of this book is a library or API that are used to store data at a very low level. It is the basic
+building block of databases, queuing sytems, distributed architecture and more. You'll usually use a database, rather than a storage
+engine directly, because a database would typically offer more capabilities.
+
+For example, LemonGraph, mentioned above, is a graph database that is using LMDB as its storage engine. RavenDB is a document database
+that is using Voron as its storage engine. You can use a stroage engine directly, of course, if you need to have access to the lowest
+level of the system. RocksDB and LevelDB, for example, are very commonly used as backing store for data for micro services, and LMDB
+is also very well suited for this purpose.
+
+Voron, RavenDB's own storage engine, is written in C#, and as such is typically not something that you can just use inside any application.
+However, if you are running on .NET or CoreCLR, you'll be able to make use of it directly. 
+
+[NOTE]
+.Embedded storage engines vs. Databases
+====
+An embedded storage engine is a library that you add to your application to manage storage details. The capabilities differs between 
+libraries, of course, but the common theme is that they are all running inside your process and invoked directly by your code.
+A database, on the other hand, is usually running in its own process and you'll communicate with it using the network. 
+
+Embedded storage engines tend to offer lower level API than a database, they are one of the basic primitives that you'll use when
+_building_ a database. On the other hand, SQLite is both embedded library and a full database engine, so there is obviously some
+overlap.
+====
+
+Storage engines are typically low level, offering primitive blocks that you can build on. One of the reasons for this book is that 
+if you understand the undelrying primitives, and more importantly, why they exist, you can design far better systems.
+
+A storage engine stores data. The last staement may sounds like tautology, but it is important. The core operations for a storage engine
+are:
+
+* `put(key, val)`
+* `val get(key)`
+* `bool del(key)`
+* `iterator iterate();`
+
+Different storage engines implement these in different fashions, providing guarantees about the data and how it is persisted. You _could_
+write a storage engine that would simply store the each value as a file in a directory. That _works_ and will mean that you have turned 
+the file system into your storage engine. That has issues, however. File systems tend to do poorly with a lot of small values and there 
+are non trivial complexities regarding concurrency and atomicity of the data.
+
+The goal of a storage engine is to take ownership of all those details and let the application focus on doing its own thing. Quite often
+you'll see applications choosing and using a particular storage engine for the additional behavior it provides: Secondary indexes, data
+model that lends itself to merging, transactional guarantees, etc.
+
+=== What will we build?
+
+I have written quite a few storage engines at this point. Voron is obviously one of them, but I have also written storage engines modeled 
+around LevelDB and Lucene as well as various tailored solutions for specific cases. Depending on the scope of the problem, there is no end 
+to the amount of work you can put into a storage engine. There are always more to add and things to improve. A whole team has been working 
+on and with Voron for over half a decade and we still have quite a list of featuers that we want to add, for example.
+
+To avoid such slippage in the book, I'm going to define the goals for the storage engine we'll be building up front. I have chosen the name
+Gavran (Raven, Voron and Gavran are all the same word, in different languages), because typing "storage engine" all the time is quite tiring.
+
+[TIP]
+.Gavran meaning
+====
+Beside meaning raven, Gavran is also a word in Hebrew. It is a term that can be roughtly translated as:
+
+* Very strong
+* Powerful 
+* Overcoming challanges
+
+I find the name highly amusing on several levels.
+====
+
+* Built in C, as it is meant to be embedded in other processes. Should compile with `-Weverything -Werror` (enable _all_ warnings and treat
+  them as errors), pass Valgrind properly, etc.
+* Transactional and concurrent, you can have real ACID transactions with concurrent transactions that allow readers to continue where there
+  are writes without blocking and vice versa.
+* Readable and usable, this is hard to define exactly, I admit. I *care* about the API and the readability of the code, to the point where 
+  I'll jump through hoops to get more readable and understandable code.
+* Give error handling. I'm spoiled, I like my errors to tell me exactly what is going on and what to do about fixing it. That can be hard
+  to do properly in C, so we'll have to tackle this as well. And yes, this is important enough to be in the baseline acceptance criteria.
+* Performant, it should have high enough perfromance that it will not be an issue. My intent is to get it to be placed around the top of 
+  storage engine benchmarks.
+* Zero copy, should make it possible to get the data without copying from the database buffers to the application buffers.
+* Cross platform, should be able to run on Linux, Windows, ARM devices, Android, iOS, etc. Should run on 32 bits and 64 bits.
+* Support complex data structures, such as trees and maps in addition to the usual `get`, `set`, `del` operations.
+* Small, I can't commit to a number of lines of code, but I want it *small*. To compare, LevelDB is about 20,000 lines of code and LMDB
+  is just over 10,000 lines of code. I aim to be somewhere in the middle. 
+
+That is quite a list of features, but these are the _minimum_ requirements, as far as I'm concerned. My hope is that I can make the journey
+there interesting along the way.
+
+=== The structure of this book
+
+Building a storage engine is a non trivial task. There are many interlocked pieces that depend on one another. In order to avoid confusion
+we are going to be building the engine in stages, adding a single aspect at time. It means that we are going to have to build some things 
+multiple times as we add additional functionality. By the same token, it means that you can see the layers of the engine as it is built.
+
+We'll start each chapter with the a new feature to build, show the API that is required to build it and sample and then discuss what is required 
+and the choices that were made at the API level. Then we'll dive to the actual implementation details. There is going to be a _lot_ of (annotated)
+code in this book, as well as deep dives into some aspects of building a storage engine.
+We'll close each chapter with unit tests showing the work that was done.
+
+I'm going to try to show _all_ the code that builds the engine in the book. You should be able to sit down and type it all and get a working 
+storage engine. I'm assuming that you are going to be reading this on an electronic device, not a physical medium, so you can probably make things
+easier on yourself by using the code from the https://github.com/ayende/libgavran[book's GitHub repository].
+
+[TIP]
+.Requirements from the code
+====
+I am creating a new project here froms scratch, which means that I'm not constrained by past decisions. As such, I have decided to make sure that I'm
+doing the best I can. Here are the rules that the codebase will follow:
+
+* The core API is written in C11 (_not_ C++) and must compile with `-Weverything -Werror` enabled. Note that while we want _operating system_ portability
+  there is no hard requirement for _compiler_ portability. I'm going to use some features that are available for GCC and Clang, but not MSVC and likely 
+  not in other C compilers. These features are going to significantly impact the code quality and there are workarounds for other compilers, I'm just not
+  going to bother with these. Building the storage engine is large enough task as it is..
+* Functions and argument names will use `snake_case` formatting. And the naming convention for the function is `<component>_<action>_<object>`. So we'll have `platform_sync_file` or `pager_allocate_page`.
+* All integers should have their width specified, use `uint32_t` or `int64_t` instead of `unsigned long long`. The use of `size_t` is permitted, however.
+* To the greatest extent possible, Gavran should avoid allocating memory. This isn't truly possible, but it is surprising how far we can push it.
+* Pointers should be using `restrict` whenever possible.
+* Functions using more than a few arguments should take a `struct`, instead.
+* The code is automatically formatted using `clang-formatter` with the Mozilla's style code and column limit set so it will fit properly in the book.
+* The storage engine is going to be defined in layers, which each layer leaning on the previous one and isolating it. We'll avoid chatter that cross layer
+  boundary.
+* The code will be unit tested and pass automated tooling such as Valgirnd / ASAN, etc.
+====
+
+One of the greatest weakness of C is in its error handling and the capabilities you have for managing resources. 
+That is left entirely to the developer to manage. And while _technically_ you can write bug free code, it is a _hard_ task.
+
+I started working in Pascal, C and C++ but I spent most of my professional career working in managed languages, mostly C# and .NET. That means that I 
+look at the sheer amount of ceremony to write proper code in C and I cringe. In order to enable both good coding practices and maintain my sanity, 
+I have defined a set of baseline infrastucture that is going to help me write better and safer code. 
+
+I want to first illustrate that with the sample code in Listing 1.1 and then discuss exactly what is going on here. In Listing 1.1 we have a function that
+reads 4 bytes from a file and convert these bytes into a string format. The task itself is nonsensical, meant to just illustrate a point. There are a bunch 
+of things that can go wrong in this kind of code. We may fail to open the file, or allocate memory. We may fail to read from the file, or not read enough, 
+etc. We need to remember to always close the file descriptor and we should always free the allocated buffer on error, but not if the function 
+completed successfully.
+
+That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 1.1 shows a fucntion that has to deal with coordination across merely two
+resources. If we have to deal with more, the situation worsen. Take a look at the code and then we'll break down everything that is new here.
+
+[IMPORTANT]
+.Error handling & resource utilization are critical infrastructures
+====
+We expect to write non trivial amount of code in this project and we'll do a lot of low level work here. In order to ensure that we have a chance of getting
+to the end, we _must_ have a good way to handle errors and manage resources. 
+That is why the very first action I'm making in this book is explaining all about _error handling_. Even before we actually thought about what we'll be 
+building!
+====
+
+Listing 1.1 shows a _lot_ of stuff that won't show up in a C tutorial. I have marked on the side all the interesting tidbits, so we can discuss them at
+length.
+
+
+[source]
+.Listing 1.1: Mostly automatic handling of resource usage and error handling in C
+----
+static result_t 												# <1>
+read_all(int fd, size_t size, void* buffer)
+{
+  size_t read_bytes = 0;
+  while (read_bytes < size) {
+    ssize_t cur =
+      read(fd, (char*)buffer + read_bytes, size - read_bytes);
+
+    if (cur <= 0) {
+      failed(errno,"Failed to read requested data",				// <2>
+             with(read_bytes, "%zu"), with(cur, "%zd"),			// <3>
+             with(size, "%zu"));								// <3>
+    }
+    read_bytes += (size_t)cur;
+  }
+  success();
+}
+
+static result_t 												// <1>
+read_int_to_str_buffer(const char* path, char** buffer)
+{
+  int fd = open(path, O_RDONLY, 0);
+  if (fd == -1) {
+    failed(errno, "Unable to open file", with(path, "%s"));		// <2> <3>
+  }
+  defer(close, &fd); 											// <5>
+
+  char* tmp_buf = malloc(128);
+  ensure(tmp_buf,msg("Unable to allocate buffer"));				// <4> <3>
+
+  size_t cancel_defer;
+  try_defer(free, buffer, cancel_defer);						// <5>
+
+  int val;
+  ensure(read_all(fd, sizeof(int), &val), with(path, "%s"));	// <4> <3>
+
+  int chars = sprintf(tmp_buf, "%d", val);
+  *buffer = realloc(tmp_buf, (size_t)chars + 1);
+  ensure(*buffer, msg("Failed to decrease the buffer size?!")); // <4> <3>
+
+  cancel_defer = 1;												// <5>
+  success();													// <6>
+}
+----
+
+<1> The `result_t` type is the return type for any function that may fail. It is an opaque type that is set to zero on failure and non zero of success. Using C's
+usual rules, we can use boolean operations on this value to test for success / fail. A key factor about `result_t` is that it is a value that _must_ be observed. 
+In other words, ignoring this value will result in a compiler error using our settings. 
+
+<2> The `failed` macro is used to report errors. A call to `failed` will exit the function with a fail status and the parameters to `failed` 
+will be used to generate an error message. It is expected that multiple methods will fail in a sequence, and the infrastructure is setup to handle this and 
+generate appropriate set of errors representing the location in the stack this issue occur on.
+
+<3> You can use `msg` to provide some additional information and `with` to provide more context, such as local parameters. This is how we can see how much the 
+`read_all` was asked to scan, for example. The additional context can make such errors must easier to resolve. It is important to note that they are _not_
+evaluated if the operation completed successfully.
+
+<4> The `ensure` macro will check that a particular operation was successful (has non zero value) and will exit the function with an error if that isn't the
+case. This reduce nesting in the function and make it easier to both read and write.
+
+<5> The `defer` and `try_defer` allow us to register a function to be called when the current scope ends. This capability uses the `__attribute__(cleanup)` feature
+in GCC and Clang and it is how we intend to manage resources in general. Freeing ourselves from having to deal with them at every turn. The `try_defer` macro also
+allows us to _cancel_ this operation. We'll see discuss why this is important shortly.
+
+<6> The `success` macro allows us to exit a method successfully. 
+
+Together, these macros form the basis of error handling and resource management strategy for the upcoming storage engine. Let's see what each of them does and then
+we'll discuss how they all fit together. I'll discuss how they are _implemented_ in the next section.
+
+If we call `read_int_to_str_buffer("/path/to/directory", &buffer);` function (note that we used the path of a directory, not a file) we'll have the following 
+sequence of events:
+
+* The directory is opened.
+* The memory is allocated.
+* The read fails.
+* Everything gets cleaned up.
+* Caller can call `errors_print_all()` to get the following output:
+....
+read_all()                - src/main.c:33  -  21 (Is a directory      ) - Failed to read requested data, read_bytes = 0, cur = -1, size = 4
+read_int_to_str_buffer()  - src/main.c:55  -  22 (Invalid argument    ) - read_all(fd, sizeof(int), &val), path = test
+....
+
+You'll note that we get a _lot_ of information here. This is _almost_ a stack trace and the richness of exceptions, without any of the costs associated with it.
+We are also able to print out the current state at the time of the error, which can be _invaluable_ for debugging and troubleshooting.
+
+There are several things that work together here in order to enable this style of code:
+
+* All the functions return `result_t`, which must be checked.
+* Error reporting is done via `failed`. And completion with no error is marked via `success`. 
+* While you can check explicitly, you'll usually just use `ensure` to exit if the call has failed.
+
+All of those together create a system that operate almost like exceptions. I don't need to manually handle and pass errors up the chain, I don't have to fret
+about how to provide context to an error, etc. 
+
+[SIDEBAR]
+.Inspirations for these ideas
+====
+The errors API cocnepts are very similar to how you deal with errors in https://en.wikibooks.org/wiki/OpenSSL/Error_handling[OpenSSL]. I had the chance
+of building completely new API so I stream-lined a lot of things, but the concepts are very similar.
+
+The `defer` usage comes from Go, although I added the notion of `try_defer` for more complex scenarios.
+====
+
+You'll notice that in the `read_int_to_str_buffer` function we do almost no explicit error checking, this is done for us by the `ensure`. The one case where we do have
+to test a value explicitly is when we are dealing with system code, when we are checking if the `open` was successful, then calling `failed` with the error.
+ings that can fail as deeply as possible, so we'll be able to use the `ensure` macro to reduce the amount of explicit error handling we have to go through.
+
+This style of error handling is problematic in C, because we can't just _exit_ a function, we have to do cleanup first. In pretty much any C project of any 
+complexity you'll see `goto` used for this aproach, to try to centralized error handling in the function. This resource management strategy is brittle and hard
+to use. Instead, we offer `defer` and `try_defer`. 
+
+[CAUTION]
+.Here `goto` is the _good_ option!
+====
+You probably heard about the "GOTO Considered Harmful" paper and likely have an aversion to this keyword. However, in most C projects, the use of a `goto`
+for error handling is the _preferred_ option. Because the other altrenative is much worse, manually maintaining complex and brittle resource & error management code.
+====
+
+The `defer` and `try_defer` are based on `__attribute__((__cleanup__))` extension for both Clang and GCC. This is a way to instruct the compiler to call a method 
+when a variable goes out of scope. We use this approach to ensure that we have proper cleanup. For example, making sure that regardless of how we exit the 
+`read_int_to_str_buffer` function, the file will be properly closed.
+
+In `read_int_to_str_buffer` there is another resource usage pattern that we need to deal with. The buffer we allocate to hold the string must be released in the 
+function fails, but must _not_ be release if the function is successful. 
+In order to handle this kind of scenario, we have `try_defer`, it accepts an additional argument, that of a variable that it will monitor when called. If that variable is set, 
+we'll cancel the deferral call. In other words, we'll be able to cancel the deferrable command in the successful path, but until that point, we'll have automatic cleanup. 
+
+These two approaches together leads to a much cleaner codebase. And now, let's see how I actually built those. 
+
+=== Implementing resource management and error handling infrastructure
+
+I'll start with the `defer` commands, because they are the smaller of the two. Most they just give good syntax over the compiler behavior. You can see how they
+are implmented in Listing 1.2.
+
+
+[source]
+.Listing 1.2: defer.h - Implementation of defer and try_defer using the __attribute__(cleanup)
+```
+include::./code/defer.h[]
+```
+<1> The `cancel_defer` struct allow to capture the state that will be sent through the `defer` call as well as the pointer to the cancellation flag.
+<2> The `defer_close` declaration handles the deferred closing of files. The actual implementation is platform specific, so we'll see it when we get to it.
+<3> The `defer_free` function is a good exmaple of how we implement handling of `try_defer` functions. The captured value will be freed unless the caller has
+cancelled the deferral.
+<4> The actual macro implementing `try_defer`. Note that we set the `cancelled` field to track the marker value provided by the caller.
+<5> The `defer` macro is implemented in the same manner, but without setting the `cancelled` field. 
+
+The idea is that we setup a call to `void defer_<function>(struct cancel_defer* cd)` function. That will be called by the compiler when the scope exits. This
+The caller is responsible for providing this function. I would prefer to avoid it, but trying to do so send us _deep_ into proprocessor magic, and I'm already
+stretching the limits of what I think is acceptable. 
+
+In practice, this is usually not an issue, the number of unique calls is low, so adding this once for a few data types is very easy. Then we just rely on the 
+compiler to do its magic. The last line of both macros is meant to avoid a warning about unused varaible, since I'm compliing will all warnings enabled and we
+would get an unused variable warning otherwise.
+
+> **Skippable section**
+>
+> The rest of this section goes in depth into the error handling strategy. You already know how to _use_ it, so if you want to jump directly into
+> the storage engine internals, feel free to skip this part. I want to go over every line of code, which means that I also have to cover the 
+> uninteresting (yet crucial) parts. More importantly, I want to discuss my reasoning and approach in these areas, because they end up having a
+> major impact on the project as a whole.
+
+Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. 
+
+
+* `errors_push` will create a new error and `errors_append_message` will add additional context to it.
+* `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
+  error propogation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programatically
+  to them. 
+* The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
+
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.  Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
+use to _report_ errors:
+
+* `errors_push` will create a new error and `errors_append_message` will add additional context to it.
+* `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
+  error propogation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programatically
+  to them. 
+* The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
+
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.
+
+[source]
+.Listing 1.3: errors.h - Internal errors API implementation
+----
+include::./code/errors.h[]
+----
+
+A lot is going on in Listing 1.3, allow me to go through this one at a time. We start by forward declaring `op_result_t`. We don't actually _have_ such 
+a struct. We'll be using `result_t`, which is a pointer to an `op_result_t` with the `warn_unused_result` enabled. Because we created a new type, the 
+compiler will warn us about trying to assign it to other data types and the `warn_unused_result` will make sure taht we can't ignore it.
+
+The reason we declare this type is that the compiler will warn us if we are trying to assign this to any other type. It would generate a warning, and in 
+addition to the unused result warning, that ensures that we have a return type that we _have_ to take care of.
+
+The `failed` and `ensure` macros are variadic. They are meant to be used with the `with` and `msg` macros. The idea is that we'll first push a new
+error and then be able to provide more context to it. In the case of `ensure`, if the expression is true, there is no cost and nothing is actually
+being run.
+
+The `errors_push` macro just call to `errors_push_new` with context using`__FILE__`, `__LINE__` and `__func__` builtins to provide additional
+context for our "stack trace". The rest of the functions aren't anything special. The `errors_push` macro is _not_ variadic, we could implement it this
+way, but I would rather have the more explicit usage of `with` and `msg`. 
+The nice thing about `with` is that it capture the expression value as well the expression text. That saves us some keystokes on each error call.
+
+[TIP]
+.Forcing error handling
+====
+Beyond just using `result_t`, we also have the `errors_assert_empty` macro which will can use to check if the caller has previously
+ignored an error. If that is the case, we'll refuse to go on and error immediately.  That has the effect of ensuring that errors are handled, because it 
+will very visibly break stuff if you don't. 
+
+This is meant for _external_ users. If you called an API method and it failed and you didn't check the error, all future operations will also fail.
+That keeps us in the habbit of managing errors properly.
+====
+
+You'll note that unlike most C APIs, that we are missing quite a bit here. Namely, where is the memory handling? In order to reduce as much as possible the
+complexity of the system, I have chosen to avoid memory allocations entirely in the error API. Let's see how this is achieved, we'll start with Listing 1.4, 
+where we define the storage for the actual errors.
+
+[source]
+.Listing 1.4 - errors.c - Storage declaration for the errors API
+----
+include::./code/errors.c[tags=declarations]
+----
+
+We define a number of variables as thread local state. The idea is that instead of allocating the memory at the time of an error, we'll allocate the memory 
+at the time we create the thread. This is done for us automatically, so by the time we get to actually recording an error, we don't have to fear most failure
+modes.
+
+The `_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `_errors_messages_buffer` is an array that stores
+the relevant message for each of recorded array. In other words, the `_errors_messages_buffer` entries will always point to a location inside `_messages_buffer`. 
+The `_errors_messages_codes`, in turn, is a parallal array of the actual error codes that we got. This memory layout is shown in Figure 1.1.
+
+.Figure 1.1 - The actual error messages are stored in a thread local buffer that is pre-allocated
+image::./ch01/img01.png[]
+
+The `_errors_count` value counts the number of errors that are currently recorded while `_errors_buffer_len` counts how much of `_messages_buffer` is in use. 
+The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `_out_of_memory` flag is set if we have too many errors, at which point
+we'll start discarding them. I find that very unlikley to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
+
+If you'll look at the API in Listing 1.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about
+reading the errors or clearing them. The usual method you'll use the `ensure` / `failed` macros to bubble the errors to the callers until we get sometwhere where
+we can make a decision about the issue. The caller will need to read the errors and make a determination and then clear the error state and prepare for the next
+operation. 
+
+A shorthand for printing to the terminal is provided with `errors_print_all()`, typically for debugging purposes. 
+If you need to access the error codes programatically, you can use the `errors_get_codes()` function. 
+
+Because we are doing no memory allocations and working on a fixed buffer, we need to be careful with how we process the messages. I tried doing that directly 
+with the raw C API, but it was too complex to manage. I wrote a couple of utility functions to manage that and if you are interested, I would refer you to 
+Howard Chu, author of LMDB, discussion https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
+
+[source]
+.Listing 1.5 - errors.c - String procesisng routines
+----
+include::./code/errors.c[tags=try_sprintf]
+----
+
+The key about the functions in Listing 1.5 is that they accept a _limit_ to how much they can write, and then do all the checks inside. The end result is that
+our code string processing routine looks much simpler, see for yourself in Listing 1.6.
+
+[source]
+.Listing 1.6 - errors.c - Pushing a new error into the thread's buffer----
+----
+include::./code/errors.c[tags=errors_push_new]
+----
+<1> Check if we have more than the maximum number of errors. This is unlikely, in most use cases.
+<2> Increment the current error counter. Note that we increment this counter even if we don't have enough memory for the error message. In that case, the error
+message will be null, but the error code will be retained.
+<3> We call `try_sprintf` multiple times, formatting the error message. This code is a bit complex, since C's string processing capabilies are... akward. 
+A key factor here is that we can safely call these function even if there isn't enough memory, they do their own check and bail out early. This code was 
+_much_ harder to follow before I introduced the `try_sprintf` helper. 
+
+The fact that we can limit the number of errors we may run into _during_ error handling is important. None of the error handling routines can generate an error
+or require any special treatment. Most of the nastiest issues that I have run into have happened while there was an error in the middle of handling an error.
+Reducing the number of possible failure points is very useful.
+
+Now that you have seen how we push a new error, let's see how we provide more context to the error. The backend of the `with` and `msg` macros is the
+`errors_append_message` function, shown in Listing 1.7.
+
+[source]
+.Listing 1.7 - errors.c - Appending a message to the current error
+----
+include::./code/errors.c[tags=errors_append_message]
+----
+<1> Here we start from one char _before_ the end. This is so the next write will overwrite the null terminator.
+<2> On the other hand, if we wrote to the buffer but hit the end, we'll restore the overwritten null terminator so we won't have an out of bound access on read.
+
+And finally, we have the rest of the errors API implementation in Listing 1.8. 
+
+[source]
+.Listing 1.8 - errors.c - The rest of the implementation
+----
+include::./code/errors.c[tags=errors_append_message]
+----
+
+Thhis is a very powerful API, since it allows us to have good error handling with little ceremony. The `errors_append_message` and `errors_push_new` return 
+a `op_result_t*` because they might be used via the comma operator. That is a done in the `failure` macro, which is called internally from the `enforce` 
+macro.
+
+You may find it strange that the very first thing that I did when starting a storage engine is to build error handling code, but that is a foundation that 
+will serve us for the rest of the project. The fact that we can have good ways to report error can save us _weeks_ of troubleshooting time. And with this
+in place, we can now move to our very first real task, working with files. 
+
+[IMPORTANT]
+.The errors API for external consumers?
+====
+We looked at the error API (and `defer`) in the context of consuming this internally. Gavran, our storage engine, is meant to be an embedded library.
+That means that it is going to be used from other systems. Forcing our error convention on unsuspecting codebases is not something that I would consider
+desriable. 
+====
+
+=== Testing the error API
+
+I intend to close each chapter with a set of unit tests, verifying the functionality of the system that we built so far. Testing C code is a pain, especially
+when we get to the more complex scenarios. In order to handle this, I intent to write the tests in Python, where it is much easier. Along the way, that will
+serve as a way to ensure that we are able to make proper use of the code in an embedded mode.
+
+In order to access a C library from Python, I'm using `ctypes`. I'm not going to cover the Python API for the API, since there is nothing really interesting 
+there. The _tests_, however, are going to be included at the end of every chapter.
+
+[source,python]
+----
+include::./code/tests.py[]
+----
+
+And that is quite enough for one chapter. In the next chapter we'll start dealing with the operating system and build the basics of the platform abstraction
+layer that will help us interact with the rest of the system.

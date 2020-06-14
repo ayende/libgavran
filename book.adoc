@@ -1,0 +1,21 @@
+:doctype: book
+:media: prepress
+
+= Building a storage engine from scratch
+Oren Eini <oren@ravendb.net>
+June 2020
+:sectnums:
+:toc:
+:icons: font
+:source-highlighter: pygments
+:pygments-style: trac
+:pygments-linenums-mode: inline
+:source-language: c
+
+
+[dedication]
+To Rachel, with my love.
+And to Tamar and Shahar, in the hope that you'll grow up and read this book.
+
+
+include::./ch01/ch01.adoc[]

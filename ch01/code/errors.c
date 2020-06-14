@@ -1,3 +1,5 @@
+ // tag::declarations[]
+
 #include "errors.h"
 #include <assert.h>
 #include <stdio.h>
@@ -14,6 +16,9 @@ _Thread_local static size_t _errors_count;
 _Thread_local static size_t _errors_buffer_len;
 _Thread_local static uint32_t _out_of_memory;
 
+// end::declarations[]
+
+// tag::try_sprintf[]
 __attribute__((__format__(__printf__, 4, 0))) static bool
 try_vsprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
              va_list ap) {
@@ -38,45 +43,39 @@ try_sprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
   va_end(ap);
   return ret;
 }
+// end::try_sprintf[]
 
+// tag::errors_push_new[]
 __attribute__((__format__(__printf__, 5, 6))) op_result_t *
-errors_push_new(const char *file, uint32_t line, const char *func, int32_t code,
-                const char *format, ...) {
-  if (_errors_count >= MAX_ERRORS) {
+errors_push_new(const char *file, uint32_t line, const char *func, 
+  int32_t code, const char *user_message) {
+  if (_errors_count >= MAX_ERRORS) {                                // <1>
     // we have no space any longer for errors, ignoring
     _out_of_memory |= 1;
     return 0;
   }
 
-  size_t index = _errors_count++;
+  size_t index = _errors_count++;                                   // <2>
+  _errors_messages_codes[index] = code;                             
 
-  _errors_messages_codes[index] = code;
   char *msg = (_messages_buffer + _errors_buffer_len);
   char *end = _messages_buffer + MAX_ERRORS_MSG_BUFFER;
   char *start = msg;
 
-  char stack_buffer[128];
+  char stack_buffer[128];                             
   int rc = strerror_r(code, stack_buffer, 128);
   if (rc)
     strcpy(stack_buffer, "Unknown code");
 
-  // safe to call immediately, if OOM, will write 0 bytes
-  size_t chars_written;
-
-  if (!try_sprintf(&msg, end, &chars_written, "%s()", func))
-    goto oom;
-  if (!try_sprintf(&msg, end, &chars_written, "%-*c - %s:%i",
-                   (int)(25 - chars_written), ' ', file, line))
-    goto oom;
-  if (!try_sprintf(&msg, end, &chars_written, "%*c - %3i (%-20s) - ",
-                   (int)(40 - chars_written), ' ', code, stack_buffer))
-    goto oom;
-
-  va_list ap;
-  va_start(ap, format);
-  bool ret = try_vsprintf(&msg, end, &chars_written, format, ap);
-  va_end(ap);
-  if (!ret)
+  size_t chars_written;                 
+  if (!try_sprintf(&msg, end, &chars_written, "%s()", func)     || // <3>
+      !try_sprintf(&msg, end, &chars_written, "%-*c - %s:%i",
+                   (int)(25 - chars_written), ' ', file, line)  || 
+      !try_sprintf(&msg, end, &chars_written, "%*c - %3i (%-20s) - ",
+                   (int)(40 - chars_written), ' ', 
+                   code, stack_buffer)                          || 
+      !try_sprintf(&msg, end, &chars_written, "%*c - %3i %s",
+                 (int)(40 - chars_written), ' ', user_message))
     goto oom;
 
   _errors_buffer_len += (size_t)(msg - start);
@@ -87,11 +86,16 @@ oom:
   _errors_messages_buffer[index] = 0;
   return 0;
 }
+// end::errors_push_new[]
 
+// tag::errors_append_message[]
 op_result_t *errors_append_message(const char *format, ...) {
+  if(!_errors_count)
+    return 0;
+
   // should always be called with an error
   assert(_errors_count && _errors_buffer_len);
-  char *msg = (_messages_buffer + _errors_buffer_len) - 1;
+  char *msg = (_messages_buffer + _errors_buffer_len) - 1;      // <1>
   char *end = _messages_buffer + MAX_ERRORS_MSG_BUFFER;
   size_t chars_written;
 
@@ -100,7 +104,7 @@ op_result_t *errors_append_message(const char *format, ...) {
   bool ret = try_vsprintf(&msg, end, &chars_written, format, ap);
   va_end(ap);
   if (!ret) {
-    *msg = 0; // undo possible overwrite of null terminator
+    *msg = 0; // undo possible overwrite of null terminator     // <2>
     _out_of_memory |= 2;
     return 0;
   }
@@ -108,7 +112,10 @@ op_result_t *errors_append_message(const char *format, ...) {
   _errors_buffer_len += chars_written;
   return 0; // simply to allow it to be used in comma operator
 }
+// end::errors_append_message[]
 
+
+// tag::rest[]
 const char **errors_get_messages(size_t *number_of_errors) {
   *number_of_errors = _errors_count;
   return (const char **)_errors_messages_buffer;
@@ -142,3 +149,7 @@ void errors_clear(void) {
 }
 
 size_t errors_get_count() { return _errors_count; }
+
+uint32_t errors_get_oom_flag() { return _out_of_memory; }
+// end::rest[]
+
