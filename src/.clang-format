@@ -3,5 +3,6 @@ Language:        Cpp
 BasedOnStyle:  Mozilla      
 ColumnLimit:     70
 IndentWidth:    2
+AlignTrailingComments: true
 ...
 

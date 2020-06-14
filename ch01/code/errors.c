@@ -1,4 +1,4 @@
- // tag::declarations[]
+// tag::declarations[]
 
 #include "errors.h"
 #include <assert.h>
@@ -46,36 +46,34 @@ try_sprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
 // end::try_sprintf[]
 
 // tag::errors_push_new[]
-__attribute__((__format__(__printf__, 5, 6))) op_result_t *
-errors_push_new(const char *file, uint32_t line, const char *func, 
-  int32_t code, const char *user_message) {
-  if (_errors_count >= MAX_ERRORS) {                                // <1>
+op_result_t *errors_push_new(const char *file, uint32_t line, const char *func,
+                             int32_t code, const char *user_message) {
+  if (_errors_count >= MAX_ERRORS) { // <1>
     // we have no space any longer for errors, ignoring
     _out_of_memory |= 1;
     return 0;
   }
 
-  size_t index = _errors_count++;                                   // <2>
-  _errors_messages_codes[index] = code;                             
+  size_t index = _errors_count++; // <2>
+  _errors_messages_codes[index] = code;
 
   char *msg = (_messages_buffer + _errors_buffer_len);
   char *end = _messages_buffer + MAX_ERRORS_MSG_BUFFER;
   char *start = msg;
 
-  char stack_buffer[128];                             
+  char stack_buffer[128];
   int rc = strerror_r(code, stack_buffer, 128);
   if (rc)
     strcpy(stack_buffer, "Unknown code");
 
-  size_t chars_written;                 
-  if (!try_sprintf(&msg, end, &chars_written, "%s()", func)     || // <3>
+  size_t chars_written;
+  if (!try_sprintf(&msg, end, &chars_written, "%s()", func) || // <3>
       !try_sprintf(&msg, end, &chars_written, "%-*c - %s:%i",
-                   (int)(25 - chars_written), ' ', file, line)  || 
+                   (int)(25 - chars_written), ' ', file, line) ||
       !try_sprintf(&msg, end, &chars_written, "%*c - %3i (%-20s) - ",
-                   (int)(40 - chars_written), ' ', 
-                   code, stack_buffer)                          || 
-      !try_sprintf(&msg, end, &chars_written, "%*c - %3i %s",
-                 (int)(40 - chars_written), ' ', user_message))
+                   (int)(40 - chars_written), ' ', code, stack_buffer) ||
+      !try_sprintf(&msg, end, &chars_written, "%*c - %s",
+                   (int)(40 - chars_written), ' ', user_message))
     goto oom;
 
   _errors_buffer_len += (size_t)(msg - start);
@@ -90,12 +88,12 @@ oom:
 
 // tag::errors_append_message[]
 op_result_t *errors_append_message(const char *format, ...) {
-  if(!_errors_count)
+  if (!_errors_count)
     return 0;
 
   // should always be called with an error
   assert(_errors_count && _errors_buffer_len);
-  char *msg = (_messages_buffer + _errors_buffer_len) - 1;      // <1>
+  char *msg = (_messages_buffer + _errors_buffer_len) - 1; // <1>
   char *end = _messages_buffer + MAX_ERRORS_MSG_BUFFER;
   size_t chars_written;
 
@@ -113,7 +111,6 @@ op_result_t *errors_append_message(const char *format, ...) {
   return 0; // simply to allow it to be used in comma operator
 }
 // end::errors_append_message[]
-
 
 // tag::rest[]
 const char **errors_get_messages(size_t *number_of_errors) {
@@ -152,4 +149,3 @@ size_t errors_get_count() { return _errors_count; }
 
 uint32_t errors_get_oom_flag() { return _out_of_memory; }
 // end::rest[]
-
