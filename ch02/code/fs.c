@@ -15,6 +15,7 @@
 #include "errors.h"
 #include "platform.fs.h"
 
+// tag::handle_impl[]
 struct pal_file_handle {
   int fd;
   char filename[]; // memory past end of buffer
@@ -38,6 +39,7 @@ result_t palfs_compute_handle_size(const char *path, size_t *required_size) {
 const char *palfs_get_filename(file_handle_t *handle) {
   return handle->filename;
 }
+// end::handle_impl[]
 
 void defer_close(struct cancel_defer *cd) {
   if (cd->cancelled && *cd->cancelled)
@@ -48,28 +50,31 @@ void defer_close(struct cancel_defer *cd) {
   }
 }
 
-static result_t fsync_parent_directory(const char *file) {
+// tag::fsync_parent_directory[]
+static result_t fsync_parent_directory(char *file) {
   char *last = strrchr(file, '/');
   int fd;
   if (!last) {
     fd = open(".", O_RDONLY);
   } else {
+    // <1>
     *last = 0;
     fd = open(file, O_RDONLY);
     *last = '/';
   }
+  // <2>
   if (fd == -1) {
     failed(errno, msg("Unable to open parent directory"), with(file, "%s"));
   }
+  // <3>
   defer(close, &fd);
   op_result_t *res = (void *)1;
   if (fsync(fd)) {
-    errors_push(errno, msg("Failed to fsync parent directory"),
-                with(file, "%s"));
-    res = 0;
+    failed(errno, msg("Failed to fsync parent directory"), with(file, "%s"));
   }
-  return (void *)res;
+  success();
 }
+// end::fsync_parent_directory[]
 
 static void defer_restore_slash(struct cancel_defer *cd) {
   char *p = cd->target;

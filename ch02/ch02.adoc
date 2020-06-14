@@ -34,8 +34,8 @@ To a large degree, we make certain assumptions about the system, then we verify 
 more reliable we can make our system.
 ****
 
-LWN has some good articles on the topic of making sure that the https://lwn.net/Articles/457667/[data actually reach the disk and the 
-https://lwn.net/Articles/351422/[complexities involved]. The situation is made more complex by the fact that this is depend on what OS and file system
+LWN has some good articles on the topic of making sure that the https://lwn.net/Articles/457667/[data actually reach the disk] and 
+the https://lwn.net/Articles/351422/[complexities involved]. The situation is made more complex by the fact that this is depend on what OS and file system
  you use and even what _mode_ you used to mount a particular drive. As the author of a storage engine, you have to deal with these details in either of two ways:
 
 * Specify explicitly the support configuration, raise hell if user is attempting to use on non supported configuration.
@@ -49,6 +49,9 @@ platform abstraction layer (PAL). Listing 2.1 shows the core functions that the 
 ----
 include::./code/platform.fs.h[]
 ----
+<1> To enable `defer` and `try_defer` on `palfs_close_file`.
+<2> Provide a way to pass additional details to `defer_palfs_unmap`.
+<3> Use the `struct unmap_defer_ctx` to handle deferal of unmapping of memory.
 
 We define an opaque type `file_handle_t`, which is how we'll communicate about files with the PAL. If you are used to C APIs, you might notice something
 interesting, the API shown in Listing 2.1 is not doing any memory allocations. The API can fail (invalid file name, wrong permissions, etc), but it won't
@@ -92,3 +95,154 @@ Are there any other pieces that are missing from the API that you can see?
 === The file handle
 
 We defined the `file_handle_t` as an opaque type in the header, now let's see how we actually work with this on Linux. Listing 2.3 shows the implementation details.
+
+[source]
+.Listing 2.3 - fs.c - The file handle definition and usage
+----
+include::./code/fs.c[tags=handle_impl]
+----
+
+It turns out that `pal_file_handle`, which is `typedef`-ed to `file_handle_t` is a simple struct to hold a file descriptor (`int`). We use an opaque type like that
+because on Windows, for example, the file handle is a `HANDLE` and isn't equal in size to `int`. 
+
+We are also doing some strange work to compute the size of the handle, how come it isn't always `4`? This is bacuase the `filename` field is defined as zero legnth 
+value and thus points _past the end of the handle_.  Take a look at Figure 2, which shows the structure of `file_handle_t` implmentation on Linux.
+
+.The layout of `file_handle_t` in memory on Linux
+image::./ch02/img01.png[]
+
+
+[WARNING]
+.Beware the paths
+====
+In Listing 2.3, I'm requiring that the provided path will be an absolute path. Why make this requirement? 
+I'm trying to avoid doing things that we don't need to inside the storage engine. The caller can easily provide the full path, and it turns out that this
+matters.
+
+Let's assume that we accept the path "db/phones", which is a relative path. It gets resolved based on the current directory, as expected. However, our 
+storage engine is meant to be _embedded_. What will happen if the parent application decide to change its output directory? That will mean that our
+relative file name will point to a _different_ location, which is going to cause unforeseen issues. Better to stop this early.
+
+That is leaving aside all the sheer complexity that are paths in the first place. There are _many_ vulnerabilties and issue that arose because of 
+improper path handling. By requiring the the path will be rooted, I'm avoiding about 60% of them. 
+====
+
+
+Hopefully Figure 2 gives you a more intuative manner of how we put the name of the file immediately past the `file_handle_t` 
+value. I'm doing it this way to avoid another pointer field or a separate allocation. All I need here is just one buffer and we can put everything inside 
+properly. 
+
+=== Creating a file
+
+One of my primary goals is to build the right primitives that we need and get as far away from the file system as I can get. These primitives will abstract 
+the different nature of file and operating systems. We'll get to the point where we have a small set of actions that we can perform and then build the rest 
+of the system on top of that.
+
+[IMPORTANT]
+.Using a block device instead of bothering with the file system
+====
+Technically speaking, the model that I intend to use will work just as well for raw block devices as it would do for files. Indeed, there are some
+real benefits of bypassing the file system for a storage engine. What I most want from a file system as a storage engine is that it will 
+_get out of my way_. There are also some performance benefits, avoiding the need for data fragmentation, overhead of the file system, etc.  
+
+That said, working with files is _ever so much_ easier. Yes, you can use commands such as `dd` to move data between blocks and files, but that
+tend to be much more awkward than if the data reside in a file. In fact, we are going to try hard to get to the point where we have as few files
+as we can get away with and do all our work internally inside our file. 
+
+That would allow us to switch to a block device at a later point in time, but having direct access to the file is just too convenient to give up, 
+leaving aside the other issue. A database server can expect to have the right kind of permissions to allow opening a raw block device. But an 
+embedded storage engine needs to deal with limited rights on behalf of its processes.
+====
+
+The act of creating a file is a non trivial operation, since we need to make sure that the file creation is atomic and durable. Beyond what was already 
+mentioned, you need to take into account users who pass invalid values (file name containing `/`, for example), _all_ the intricacies of soft and
+hard links, size quotas, etc. https://lwn.net/Articles/686789/[The LWN post] about this will probably turn your hair gray. 
+To keep the code size small and not overburden ourself with validation code, I'm going to state that I'm trusting the 
+callers of the API to have already done the validation of the data. As you can see in Listing 2.3, we are only doing minimal validations to prevent
+accidents, not trying to protect against malicious input.
+
+On Linux, once you opened a file, you no longer have access to its name. It may have multiple names (hard links) or non (anonymous or have been deleted). 
+As such, the `palfs_compute_handle_size` requests enough space to store the name that the called passed us as part of the same allocation of `file_handle_t`.
+
+[NOTE]
+.The file system abstraction and the shoe on the other foot
+====
+On Linux, `file_handle_t` is defined as a struct containing a single `int` and followed by a `char*` buffer holding the null terminated string of 
+the file. On Windows, on the other handle, the definition will use a `HANDLE` instead (which is `void*`, and we'll get the file name using 
+`GetFinalPathNameByHandle` or `GetMappedFileName` instead. The reason that this is defined as an opaque type is that I'm trying to keep to an API 
+that I can use on all platforms.
+====
+
+After calling `palfs_compute_handle_size` the caller is expected to allocate enough memory to store the data and then call `palfs_create_file` to actually 
+create the handle. I'm going to talk about the functions in the same way the C compiler process them, so we'll start from the leafs first and build up our
+understanding for the big finish when we actually create the file. 
+
+Listing 2.4 deals with a fairly nasty problem with Linux, management of file metadata. In particular, adding a file or changing the size of a file will
+cause changes not to the file itself, but to its parent directory. This isn't _actually_ true, but it is a fairly good lie in the sense that it gives you
+enough information to have a mostly correct gut feeling about how things work. 
+
+Metadata updates not being part of `fsync` make it possible for you to make changes to a file (incidently increasing its size), calling `fsync()` on the 
+file and then losing data because the _size_ of the file wasn't properly persist to stable medium. I'll refer you to 
+https://lwn.net/Articles/457667/[LWN again for the gory details]. 
+
+[source]
+.Listing 2.4 - fs.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
+----
+include::./code/fs.c[tags=fsync_parent_directory]
+----
+<1> We need to find the name of the _parent_ directory, we add a null in the right location to find it. 
+<2> Checking that fhe file was opened successfully or `failed` otherwise.
+<3> Setting up `defer` to close the file descriptor. 
+
+
+Listing 2.4 has quite a lot of error handling, but most of it isn't visible, hidden in the `defer` call which simplify the overall system logic.
+Why am I being so paranoid about error handling? To the point I defined a whole infrastructure for managing that before writing my first file?
+
+The answer is simple, we aim to create an ACID storage engine, one which will take data and _keep_ it. As such, we have to be aware that the 
+underlying system can fail in interesting ways. The ALICE paper has found numerous issue is projects that 
+have been heavily battle tested. And a few years ago that have been a case of data loss in Postgres that has been track down to not checking the 
+return value of an `fsync()` call. This LWN article summrize https://lwn.net/Articles/752063/[the incident] quite well. 
+If we aim to build a robust system, we _must_ assume that anything can fail, and react accordingly.
+
+[WARNING]
+.What happens if `close` fail from the `defer`?
+====
+In Listing 2.4, we setup `close` to be invoked automatically by the compiler when the function ends. However, what happens if there is an error
+in the `close` ? That happens after the `return` statement, so the return value was already selected. We handle this by pushing an error from a
+deferred operation and checking `errors_get_count()` to validate that there are no surprises.
+
+And while it may seem funny, `close` _can_ fail. Here is the https://lwn.net/Articles/576478/[LWN discussion on the topic ]. We are going to handle
+this differently, though. Errors during cleanup routines are already very hard to deal with. If we have to deal with them routinely that would be
+a pain. Instead, we are going to try to set things up so this doesn't happen.
+
+Our strategy is to ensure that there is no harm in managing failures. If a `close` failed, then the data was already flushed to disk or it doesn't
+matter. Use of temporary files (which we intend to discard) and calling `fsync` appropriately will mean that an unexpected failure is not going
+to have an impact on our system.
+====
+
+What Listing 2.4 does, essentially, is to `open` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This
+instructs the file system to properly persist the directory information and protect us from losing a new file.  Note that we rely on the fact that
+strings are mutable in C to truncate the `file` value by adding a null terminator for the parent directory (we restore it immediately afterward).
+This trick allows us to avoid allocating memory during these operations.
+
+It is safe to make this change in memory because the buffer that this string is located on is the one belonging to the `handle`. So that is our own 
+memory and we are fine to modify it.
+
+[TIP]
+.The cost of `fsync`
+====
+Using `fsync()`, we can ensure that writes to the disk has actually reached a stable medium. In other words, after `fsync()` was called, we can 
+rest assured that a power failure won't wipe our data. For a storage engine that, as you can imagine, this is a highly desirable property. 
+ 
+The issue is that `fysnc()` usage, however, has a *very* high cost. To the point where we'll spend considerable time and effort down the line
+to _reduce_ the number of times we have to call `fsync()`. The primary issue with `fsync()` is that it needs to clear not just the data in our
+file but to effectively flush the entire disk cache. If you have a lot of pending I/O, you will _wait_ until this is completed, and that can
+take a while.
+====
+
+The reason we need to call `fsync_parent_directory` is that to make the life of the user easier, we are going to create the file if it does not
+exists, including the parent directory. And if we are creating these directories, we need to ensure that they won't go away because of file 
+system metadata issues. 
+
+This is a small thing, but it adds up measurably to the ease of use of the system. Sadly, this is also a somewhat tedius task. You can see how we 
+approach it in Listing 2.5, where quite a lot is going on.
