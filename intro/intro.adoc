@@ -1,0 +1,234 @@
+
+= Part I
+
+My hope is that this book will take you on the journey of writing a production grade storage engine from scratch. 
+
+
+== Introduction
+
+My name is Oren Eini, and I have been working with (and on) databases for over 15 years. For the past decade or so, I have been
+involved in the creation of https://ravendb.net[RavenDB], a distributed document database. I have also been 
+involved in building other systems of similar nature such as queuing infrastructure, a distributed hash table and the like. 
+
+It turns out that at the bottom of the stack, you need a _good_ way to store data to disk. I have looked into many ways
+to handle this, from simply writing XML or JSON file to a folder to utilizing existing software and libraries such as
+SQLite, LMDB, Esent, LevelDB and RocksDB. For quite some time, it has been my hobby to read through any storage engine
+codebase that I came across. And there have been many of those.
+
+This is a book that is going to cover how to build a database, from the ground up. We aren't going to be talking about
+the appropriate schema or what constraints to use. We are going to build the low level infrastructure that you need in
+order bo _build_ a database engine, from scratch. 
+
+In particular, I want to walk through all the details of building a production quality 
+storage engine with full ACID footnote:[Atomic, consistent, isolated and durable] properties, _real_ transactions and the ability
+to store and operate on data in interesting manner.
+
+.Assumptions about the reader
+****
+I'm writing this book for fun, because it kept bouncing in my head and I really need to get it out so I can sleep.
+The target audience are developers who have at least a passing familiarity with system level programming and the C language.
+I'm not going to find the most esoteric pieces of C to use, but you are expected to understand the C, native memeory,
+ data structures and the like. 
+
+I'll reference other resources at times for additional materials, but I'm going to focus on the storage engine rather than
+reiterating existing knowledge. If additional knowledge isn't critical to understanding what is going on, I'll refer you
+elsewhere.
+****
+
+If you are interested in how storage engines work, I have written detailed reviews of my finding on many such projects. 
+The following list contains some of those review, note that they are usually spread over to multiple posts in a series. 
+I went through the code base and wrote my notes as they occurced to me. 
+
+* https://ayende.com/blog/posts/series/3607/reading-erlang[CouchDB] - Document database written in Erlang.
+* https://ayende.com/blog/posts/series/162754/reviewing-lightning-memory-mapped-database-library[LMDB]- Low level 
+  storage engine library written in C.
+* https://ayende.com/blog/posts/series/161410/reviewing-leveldb[LevelDB] - Low level storage engine library from
+  Google. The basis for RocksDB from Facebook. 
+* https://ayende.com/blog/posts/series/184225-A/reviewing-faster[FASTER] - Low level storage engine from Microsoft.
+* https://ayende.com/blog/posts/series/184066-C/reading-the-nsas-codebase[LemonGraph] - Graph database by the NSA.
+* https://ayende.com/blog/posts/series/178497/reviewing-noise-search-engine[Noise] - Full text search engine in Rust.
+* https://ayende.com/blog/posts/series/178945/reviewing-resin[Resin] - Document database written in C#.
+* https://ayende.com/blog/posts/series/186753-A/reviewing-sled[Sled] - Low level storage engine written in Rust.
+
+I've also written my own storage engine library, based on the things that I have learned from these reviews, experience
+in the field and the needs of RavenDB itself. This storage engine is called Voron, we started working on that in 2013
+and has switched all of RavenDB to it completely by late 2015. Voron has been powering all RavenDB production systems 
+for years, with very little trouble.
+
+Voron is written in C# was built to be _high_ performance and has been able to achieve impressive benchmark numbers. 
+We have also built Voron to serve RavenDB and adapted RavenDB to best utilize Voron. That has been a very benefitical 
+relationship for us because it allowed us to make certain that the operations we needed had as little cost as possible. 
+
+
+=== Why this book?
+
+I have written extensively about database building in the past. Again, each of these links is to a _series_ of posts that describe
+certain aspects of building a database. 
+
+* https://ayende.com/blog/posts/series/174337/the-guts-n-glory-of-database-internals[The Guts n' Glory of Database Internals] -
+  A series of posts that walks through the challenges involved in building a proper database and recommendations on how to deal
+  with them.
+* https://ayende.com/blog/posts/series/175041/database-building-101[Database building 101] - Series of posts detailing how to build
+  a graph database. 
+* https://ayende.com/blog/posts/series/175073/voron-internals[Voron internals] - How Voron works behind the curtains.
+* https://ayende.com/blog/posts/series/176961/low-level-voron-optimizations[Low level Voron optimizations] - Discuss some
+  of the tricks we use to get Voron to be faster.
+
+All of my work in Open Source. You can find RavenDB's code at our https://github.com/ravendb/ravendb[GitHub repository] and the 
+Voron project is the `src/Voron` directory there.
+
+I spent a lot of time on building storage engines and I learned a lot from actual production usage. This book started with me thinking
+about how I would approach building a new storage engine without any existing constraints. Given everything I know and a blank slate, 
+what would be the best storage engine that I could come up with? 
+
+Rather than just throw code over the wall, I wanted _explain_ things and tell the complete story. I'm also using this project as a way to 
+test out some interesting expriments that came to mind do proper research into additional avenues and in general build something cool.
+
+I hope that you'll find this book interesting, it has certainly been interesting to write it. This isn't meant to be a theoretical
+book, however. I'm going to walk through actual code, explain the reasoning behind what I'm doing, the alternatives for the choices
+I made as implemented by other products and the implications of those choices. 
+
+For more theoretical reading, I would recommend:
+
+* https://www.databass.dev/[Database Internals] - Discuss implementation details of database, both storage related and in the context
+  of distributed sytems. I found it facinating to read and I highly recommend it. It puts you in the role of the implementor and go over
+  very important details in an approachable manner.
+* https://dataintensive.net/[Designing data-intensive applications] - Go over similar ground as Database Internals, but it does so from
+  a completely different perspective, the user. This is a great book to understand how to make _use_ of this knowledge. I think that these
+  books completement each other quite nicely.
+
+I'm going to be talking about the road that _was_ taken in this book. Whenever there is a design choice to make, I'm going to call it out
+and reference some of the other options, but I'm going to focus on the decisions that _were_ made, instead of exploring all the various
+options.
+
+.Language and platform choices
+****
+I usually write code in C# and .NET, but I decided that I wanted to have the broadest possible appeal for the engine, so I'm going to 
+be writing the engine in C. I _like_ writing C code, because it is generally very straight forward and there is nothing that isn't 
+visible. 
+That said, error handling and resource management in C _sucks_. I spent some time creating just enough infrastructure to be able to
+write much nicer code without going crazy. 
+
+I'm going to target Linux as the first operating system to run the storage engine on, but eventually we'll run it on Linux, Windows
+and Mac a minimum.
+****
+
+=== What is a storage engine? 
+
+A storage engine in the context of this book is a library or API that are used to store data at a very low level. It is the basic
+building block of databases, queuing sytems, distributed architecture and more. You'll usually use a database, rather than a storage
+engine directly, because a database would typically offer more capabilities.
+
+For example, LemonGraph, mentioned above, is a graph database that is using LMDB as its storage engine. RavenDB is a document database
+that is using Voron as its storage engine. You can use a stroage engine directly, of course, if you need to have access to the lowest
+level of the system. RocksDB and LevelDB, for example, are very commonly used as backing store for data for micro services, and LMDB
+is also very well suited for this purpose.
+
+Voron, RavenDB's own storage engine, is written in C#, and as such is typically not something that you can just use inside any application.
+However, if you are running on .NET or CoreCLR, you'll be able to make use of it directly. 
+
+[NOTE]
+.Embedded storage engines vs. Databases
+====
+An embedded storage engine is a library that you add to your application to manage storage details. The capabilities differs between 
+libraries, of course, but the common theme is that they are all running inside your process and invoked directly by your code.
+A database, on the other hand, is usually running in its own process and you'll communicate with it using the network. 
+
+Embedded storage engines tend to offer lower level API than a database, they are one of the basic primitives that you'll use when
+_building_ a database. On the other hand, SQLite is both embedded library and a full database engine, so there is obviously some
+overlap.
+====
+
+Storage engines are typically low level, offering primitive blocks that you can build on. One of the reasons for this book is that 
+if you understand the undelrying primitives, and more importantly, why they exist, you can design far better systems.
+
+A storage engine stores data. The last staement may sounds like tautology, but it is important. The core operations for a storage engine
+are:
+
+* `put(key, val)`
+* `val get(key)`
+* `bool del(key)`
+* `iterator iterate();`
+
+Different storage engines implement these in different fashions, providing guarantees about the data and how it is persisted. You _could_
+write a storage engine that would simply store the each value as a file in a directory. That _works_ and will mean that you have turned 
+the file system into your storage engine. That has issues, however. File systems tend to do poorly with a lot of small values and there 
+are non trivial complexities regarding concurrency and atomicity of the data.
+
+The goal of a storage engine is to take ownership of all those details and let the application focus on doing its own thing. Quite often
+you'll see applications choosing and using a particular storage engine for the additional behavior it provides: Secondary indexes, data
+model that lends itself to merging, transactional guarantees, etc.
+
+=== What will we build?
+
+I have written quite a few storage engines at this point. Voron is obviously one of them, but I have also written storage engines modeled 
+around LevelDB and Lucene as well as various tailored solutions for specific cases. Depending on the scope of the problem, there is no end 
+to the amount of work you can put into a storage engine. There are always more to add and things to improve. A whole team has been working 
+on and with Voron for over half a decade and we still have quite a list of featuers that we want to add, for example.
+
+To avoid such slippage in the book, I'm going to define the goals for the storage engine we'll be building up front. I have chosen the name
+Gavran (Raven, Voron and Gavran are all the same word, in different languages), because typing "storage engine" all the time is quite tiring.
+
+
+* Built in C, as it is meant to be embedded in other processes. Should compile with `-Weverything -Werror` (enable _all_ warnings and treat
+  them as errors), pass Valgrind properly, etc.
+* Transactional and concurrent, you can have real ACID transactions with concurrent transactions that allow readers to continue where there
+  are writes without blocking and vice versa.
+* Readable and usable, this is hard to define exactly, I admit. I *care* about the API and the readability of the code, to the point where 
+  I'll jump through hoops to get more readable and understandable code.
+* Give error handling. I'm spoiled, I like my errors to tell me exactly what is going on and what to do about fixing it. That can be hard
+  to do properly in C, so we'll have to tackle this as well. And yes, this is important enough to be in the baseline acceptance criteria.
+* Performant, it should have high enough perfromance that it will not be an issue. My intent is to get it to be placed around the top of 
+  storage engine benchmarks.
+* Zero copy, should make it possible to get the data without copying from the database buffers to the application buffers.
+* Cross platform, should be able to run on Linux, Windows, ARM devices, Android, iOS, etc. Should run on 32 bits and 64 bits.
+* Support complex data structures, such as trees and maps in addition to the usual `get`, `set`, `del` operations.
+* Small, I can't commit to a number of lines of code, but I want it *small*. To compare, LevelDB is about 20,000 lines of code and LMDB
+  is just over 10,000 lines of code. I aim to be somewhere in the middle. 
+
+That is quite a list of features, but these are the _minimum_ requirements, as far as I'm concerned. My hope is that I can make the journey
+there interesting along the way.
+
+=== The structure of this book
+
+Building a storage engine is a non trivial task. There are many interlocked pieces that depend on one another. In order to avoid confusion
+we are going to be building the engine in stages, adding a single aspect at time. It means that we are going to have to build some things 
+multiple times as we add additional functionality. By the same token, it means that you can see the layers of the engine as it is built.
+
+We'll start each chapter with the a new feature to build, show the API that is required to build it and sample and then discuss what is required 
+and the choices that were made at the API level. Then we'll dive to the actual implementation details. There is going to be a _lot_ of (annotated)
+code in this book, as well as deep dives into some aspects of building a storage engine.
+We'll close each chapter with unit tests showing the work that was done.
+
+I'm going to try to show _all_ the code that builds the engine in the book. You should be able to sit down and type it all and get a working 
+storage engine. I'm assuming that you are going to be reading this on an electronic device, not a physical medium, so you can probably make things
+easier on yourself by using the code from the https://github.com/ayende/libgavran[book's GitHub repository].
+
+.Requirements from the code
+****
+I am creating a new project here froms scratch, which means that I'm not constrained by past decisions. As such, I have decided to make sure that I'm
+doing the best I can. Here are the rules that the codebase will follow:
+
+* The core API is written in C11 (_not_ C++) and must compile with `-Weverything -Werror` enabled. Note that while we want _operating system_ portability
+  there is no hard requirement for _compiler_ portability. I'm going to use some features that are available for GCC and Clang, but not MSVC and likely 
+  not in other C compilers. These features are going to significantly impact the code quality and there are workarounds for other compilers, I'm just not
+  going to bother with these. Building the storage engine is large enough task as it is..
+* Functions and argument names will use `snake_case` formatting. And the naming convention for the function is `<component>_<action>_<object>`. So we'll have `platform_sync_file` or `pager_allocate_page`.
+* All integers should have their width specified, use `uint32_t` or `int64_t` instead of `unsigned long long`. The use of `size_t` is permitted, however.
+* To the greatest extent possible, Gavran should avoid allocating memory. This isn't truly possible, but it is surprising how far we can push it.
+* Pointers should be using `restrict` whenever possible.
+* Functions using more than a few arguments should take a `struct`, instead.
+* The code is automatically formatted using `clang-formatter` with the Mozilla's style code and column limit set so it will fit properly in the book.
+* The storage engine is going to be defined in layers, which each layer leaning on the previous one and isolating it. We'll avoid chatter that cross layer
+  boundary.
+* The code will be unit tested and pass automated tooling such as Valgirnd / ASAN, etc.
+****
+
+One of the greatest weakness of C is in its error handling and the capabilities you have for managing resources. 
+That is left entirely to the developer to manage. And while _technically_ you can write bug free code, it is a _hard_ task.
+
+I started working in Pascal, C and C++ but I spent most of my professional career working in managed languages, mostly C# and .NET. That means that I 
+look at the sheer amount of ceremony to write proper code in C and I cringe. In order to enable both good coding practices and maintain my sanity, 
+I have defined a set of baseline infrastucture that is going to help me write better and safer code. 
+
+Therefor, the very first thing that we'll do in this book is setup the appropriate infrastructure to enable good resource management and error handling.

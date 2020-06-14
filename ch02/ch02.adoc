@@ -1,0 +1,94 @@
+== At the file system level
+
+Files are a wonderful abstraction, a stream of bytes that reside under name, sorted in a hierarchy. Simple enough that a child can use it, powerful enough to be
+the motto of an the entire set of operating systems. "Everything is a file" is one of the defining features of Unix, but it is also an abstraction, and as such, 
+it is https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/[leaky].
+
+When building a storage engine, we need to have a pretty good idea about how to manage files. As it turns out, there is a lot of things that are 
+https://yakking.branchable.com/posts/falsehoods-programmers-believe-about-file-paths/[just wrong] about how we think about files. 
+The https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-pillai.pdf["All File Systems Are Not Created Equal: On the Complexity of Crafting Crash-Consistent 
+Applications"] paper tested ten applications (from SQLite to Git to PostgreSQL)
+to find whatever they are properly writing to files. This paper is usually referred to as the ALICE (Application-Level Intelligent Crash Explorer) paper, after 
+the name of the tool created to explore failures in file system usage. 
+
+There are a _lot_ of details that you need to take into account. For example, you may consider that changing a file and then calling `fsync()` will ensure that
+the changes to the file are made durable, and that is correct, if you haven't changed the file size. Because while the file data has been flushed, the file 
+_metadata_ was not. Which may mean some fun times in the future with the debugger.
+
+.Testing actual behavior is _hard_, and the real world isn't cooperative
+****
+If you want to build a reliable storage engine, you are going to need to develop some paranoid tendencies. Because the fact that the documentation
+says something is possible or not doesn't translate to how things really are. When you care about reliability, the file system abstraction leaks
+badly. And it is hard to find a way around that. 
+
+You can simulate some errors, but the sheer variety and scope involved makes thing hard. Especially because the error that hit you may come not from 
+the code that you are using but several layers down. If you test errors from the file system, but the _file system_ didn't check for errors from
+the block device you may end up in a funny state. And in 99.999% of the cases, it won't matter, but you are _going_ to hit that one in a billion
+chance of an actual error at just the wrong time and see a broken system.
+
+There have been a number of studies made on the topic and I think that https://danluu.com/filesystem-errors/[Daniel Luu's summary] of the topic 
+lays a lot of the issues on the table. There is not a _single_ storage hardware solution that doesn't have failure conditions that can cause 
+data corruption. And file systems don't always handle it properly. 
+
+To a large degree, we make certain assumptions about the system, then we verify them constantly. The less we demand from the bottom layers, the 
+more reliable we can make our system.
+****
+
+LWN has some good articles on the topic of making sure that the https://lwn.net/Articles/457667/[data actually reach the disk and the 
+https://lwn.net/Articles/351422/[complexities involved]. The situation is made more complex by the fact that this is depend on what OS and file system
+ you use and even what _mode_ you used to mount a particular drive. As the author of a storage engine, you have to deal with these details in either of two ways:
+
+* Specify explicitly the support configuration, raise hell if user is attempting to use on non supported configuration.
+* Make it work across the board. Plan for failure and when it happens, have the facilities in place to recover from it.
+
+Because working with files is such a huge complex mess, and because it is _different_ across operating systems, we'll hide this complexity behind a
+platform abstraction layer (PAL). Listing 2.1 shows the core functions that the PAL expose.
+
+[source]
+.Listing 2.1 - platform.fs.h - The file system interface that we'll consume for our storage engine
+----
+include::./code/platform.fs.h[]
+----
+
+We define an opaque type `file_handle_t`, which is how we'll communicate about files with the PAL. If you are used to C APIs, you might notice something
+interesting, the API shown in Listing 2.1 is not doing any memory allocations. The API can fail (invalid file name, wrong permissions, etc), but it won't
+have to deal with memory issues. Instead, we ask that the _caller_ will provide us with the memory for the `file_handle_t`. Typical usage of the API 
+is shown in Listing 2.2.
+
+[source]
+.Listing 2.2 - Using the file API to create a file of minimum size
+----
+result_t create_and_set_file() {
+  size_t size;
+  ensure(palfs_compute_handle_size("/db/phones", &size));
+  defer(palfs_close_file, handle);
+
+  file_handle_t* handle = malloc(size);
+  ensure(handle);
+  defer(free, handle);
+
+  ensure(palfs_create_file("/db/phones", handle));
+  ensure(palfs_set_file_minsize(handle, 128*1024));
+
+  success();
+}
+----
+
+The code in Listing 2.2 should ensure that at the end of the way, we have a file that has a minimum size of 128KB which will retain its size even in the case of an error or
+a system crash. That sounds easy enough to do in theory, but require some dancing around to get to it. Right now I'm going to focus on Linux as the implementation
+system, but we'll get to other systems down the line. 
+
+.Reflections on low level API and system design
+****
+The API in Listing 2.1 is interesting is several ways. You can see that we are exposing some operations (create, set size, mmap) but totally ignoring others. 
+For example, we don't have any way of _reading_ data through the API.
+
+I mentioned that I'm going to showcase the road that was taken. Gavran as a storage engine is going to be based on memory mapped memroy in lieu of manual 
+`read` calls. We'll discuss exactly how that plays into the design of the storage engine in a bit. 
+
+Are there any other pieces that are missing from the API that you can see?
+****
+
+=== The file handle
+
+We defined the `file_handle_t` as an opaque type in the header, now let's see how we actually work with this on Linux. Listing 2.3 shows the implementation details.

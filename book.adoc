@@ -16,5 +16,8 @@ June 2020
 To Rachel, with my love.
 And to Tamar and Shahar, in the hope that you'll grow up and read this book.
 
+include::./intro/intro.adoc[]
 
 include::./ch01/ch01.adoc[]
+
+include::./ch02/ch02.adoc[]

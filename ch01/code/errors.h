@@ -8,18 +8,13 @@ typedef struct operation_result op_result_t;
 
 #define result_t __attribute__((warn_unused_result)) op_result_t *
 
-#define failed(CODE, MSG, ...)                                                 \
-  push_error(CODE, MSG);                                                       \
-  __VA_ARGS__;                                                                 \
+#define failed(CODE, ...)                                                      \
+  errors_push(CODE, ##__VA_ARGS__);                                            \
   return (op_result_t *)(void *)0;
 
-#define failure(CODE, MSG, ...)                                                \
-  (push_error_internal(__FILE__, __LINE__, __func__, CODE, MSG),               \
-   ##__VA_ARGS__, (op_result_t *)(void *)0)
-
 #define ensure(CALL, ...)                                                      \
-  if (!CALL) {                                                                 \
-    return failure(EINVAL, #CALL, ##__VA_ARGS__);                              \
+  if (!CALL || errors_get_count()) {                                           \
+    return failed(EINVAL, msg(#CALL), ##__VA_ARGS__);                          \
   }
 
 #define msg(MSG) errors_append_message(MSG)
@@ -28,17 +23,18 @@ typedef struct operation_result op_result_t;
 
 #define success() return (op_result_t *)(void *)1
 
-#define errors_push(CODE, MSG)                                                 \
-  errors_push_new(__FILE__, __LINE__, __func__, CODE, MSG);
+#define errors_push(CODE, ...)                                                 \
+  errors_push_new(__FILE__, __LINE__, __func__, CODE);                         \
+  (void)(__VA_ARGS__);
 
 #define errors_assert_empty()                                                  \
-  if (get_errors_count()) {                                                    \
-    push_error(EINVAL, "Cannot call %s when there are unnoticed errors",       \
-               __func__);                                                      \
+  if (errors_get_count()) {                                                    \
+    errors_push(EINVAL, msg("Invalid state when there are unnoticed errors"),  \
+                with(__func__, "%s"));                                         \
   }
 
 op_result_t *errors_push_new(const char *file, uint32_t line, const char *func,
-                             int32_t code, const char *user_message);
+                             int32_t code);
 
 __attribute__((__format__(__printf__, 1, 2))) op_result_t *
 errors_append_message(const char *format, ...);

@@ -25,7 +25,7 @@
                 "${fileDirname}/${fileBasenameNoExtension}"
             ],
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}/ch02/code"
             },
             "problemMatcher": [
                 "$gcc"

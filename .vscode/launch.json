@@ -8,7 +8,7 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/ch01/code/build/gavran",
+      "program": "${workspaceRoot}/ch02/code/build/gavran.so",
       "args": [
         "131072",
         "35225"
