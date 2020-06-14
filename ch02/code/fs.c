@@ -43,7 +43,7 @@ void defer_close(struct cancel_defer *cd) {
   if (cd->cancelled && *cd->cancelled)
     return;
   int *fdp = cd->target;
-  if (!close(*fdp)) {
+  if (close(*fdp) == -1) {
     errors_push(errno, msg("Failed to close file"), with(*fdp, "%i"));
   }
 }
@@ -232,13 +232,15 @@ result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size) {
 
 static result_t create_and_set_file() {
   size_t size;
-  ensure(palfs_compute_handle_size("test", &size));
+  ensure(palfs_compute_handle_size(
+      "/home/ayende/projects/libgavran/ch02/code/test", &size));
 
   file_handle_t *handle = malloc(size);
   ensure(handle);
   defer(free, handle);
 
-  ensure(palfs_create_file("test", handle));
+  ensure(palfs_create_file("/home/ayende/projects/libgavran/ch02/code/test",
+                           handle));
   defer(palfs_close_file, handle);
 
   ensure(palfs_set_file_minsize(handle, 128 * 1024));

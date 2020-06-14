@@ -17,8 +17,7 @@ void defer_close(struct cancel_defer *cd);
 static inline void defer_free(struct cancel_defer *cd) {
   if (cd->cancelled && *cd->cancelled)
     return;
-  void *p = *(void **)cd->target;
-  free(p);
+  free(cd->target);
 }
 
 #define CONCAT_(x, y) x##y
