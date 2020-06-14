@@ -8,8 +8,11 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/build/gavran.so",
-      "args": [],
+      "program": "${workspaceRoot}/ch01/code/build/gavran",
+      "args": [
+        "131072",
+        "35225"
+      ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],

@@ -1,7 +1,6 @@
-/build
+build
 /db
 /test/db
 /Output
 /tex2pdf.*
-/pygavran/db
-/pygavran/__pycache__
+__pycache__
