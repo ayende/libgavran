@@ -598,5 +598,18 @@ there. The _tests_, however, are going to be included at the end of every chapte
 include::./code/tests.py[]
 ----
 
+And the ouput:
+
+....
+===================== test session starts ============================
+platform linux -- Python 3.6.9, pytest-5.4.1, py-1.8.1, pluggy-0.13.1
+rootdir: /home/ayende/projects/libgavran/ch01/code
+collected 7 items
+
+tests.py .......                                                [100%]
+
+===================== 7 passed in 0.05s ==============================
+....
+
 And that is quite enough for one chapter. In the next chapter we'll start dealing with the operating system and build the basics of the platform abstraction
 layer that will help us interact with the rest of the system.
