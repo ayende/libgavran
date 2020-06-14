@@ -23,9 +23,8 @@ In particular, I want to walk through all the details of building a production q
 storage engine with full ACID footnote:[Atomic, consistent, isolated and durable] properties, _real_ transactions and the ability
 to store and operate on data in interesting manner.
 
-[NOTE]
 .Assumptions about the reader
-====
+****
 I'm writing this book for fun, because it kept bouncing in my head and I really need to get it out so I can sleep.
 The target audience are developers who have at least a passing familiarity with system level programming and the C language.
 I'm not going to find the most esoteric pieces of C to use, but you are expected to understand the C, native memeory,
@@ -34,7 +33,7 @@ I'm not going to find the most esoteric pieces of C to use, but you are expected
 I'll reference other resources at times for additional materials, but I'm going to focus on the storage engine rather than
 reiterating existing knowledge. If additional knowledge isn't critical to understanding what is going on, I'll refer you
 elsewhere.
-====
+****
 
 If you are interested in how storage engines work, I have written detailed reviews of my finding on many such projects. 
 The following list contains some of those review, note that they are usually spread over to multiple posts in a series. 
@@ -75,7 +74,7 @@ certain aspects of building a database.
 * https://ayende.com/blog/posts/series/176961/low-level-voron-optimizations[Low level Voron optimizations] - Discuss some
   of the tricks we use to get Voron to be faster.
 
-All of my work in Open Source. You can find RavenDB's code at our GitHub repository^[https://github.com/ravendb/ravendb] and the 
+All of my work in Open Source. You can find RavenDB's code at our https://github.com/ravendb/ravendb[GitHub repository] and the 
 Voron project is the `src/Voron` directory there.
 
 I spent a lot of time on building storage engines and I learned a lot from actual production usage. This book started with me thinking
@@ -102,9 +101,8 @@ I'm going to be talking about the road that _was_ taken in this book. Whenever t
 and reference some of the other options, but I'm going to focus on the decisions that _were_ made, instead of exploring all the various
 options.
 
-[NOTE]
 .Language and platform choices
-====
+****
 I usually write code in C# and .NET, but I decided that I wanted to have the broadest possible appeal for the engine, so I'm going to 
 be writing the engine in C. I _like_ writing C code, because it is generally very straight forward and there is nothing that isn't 
 visible. 
@@ -113,7 +111,7 @@ write much nicer code without going crazy.
 
 I'm going to target Linux as the first operating system to run the storage engine on, but eventually we'll run it on Linux, Windows
 and Mac a minimum.
-====
+****
 
 === What is a storage engine? 
 
@@ -171,17 +169,6 @@ on and with Voron for over half a decade and we still have quite a list of featu
 To avoid such slippage in the book, I'm going to define the goals for the storage engine we'll be building up front. I have chosen the name
 Gavran (Raven, Voron and Gavran are all the same word, in different languages), because typing "storage engine" all the time is quite tiring.
 
-[TIP]
-.Gavran meaning
-====
-Beside meaning raven, Gavran is also a word in Hebrew. It is a term that can be roughtly translated as:
-
-* Very strong
-* Powerful 
-* Overcoming challanges
-
-I find the name highly amusing on several levels.
-====
 
 * Built in C, as it is meant to be embedded in other processes. Should compile with `-Weverything -Werror` (enable _all_ warnings and treat
   them as errors), pass Valgrind properly, etc.
@@ -217,9 +204,8 @@ I'm going to try to show _all_ the code that builds the engine in the book. You 
 storage engine. I'm assuming that you are going to be reading this on an electronic device, not a physical medium, so you can probably make things
 easier on yourself by using the code from the https://github.com/ayende/libgavran[book's GitHub repository].
 
-[TIP]
 .Requirements from the code
-====
+****
 I am creating a new project here froms scratch, which means that I'm not constrained by past decisions. As such, I have decided to make sure that I'm
 doing the best I can. Here are the rules that the codebase will follow:
 
@@ -236,7 +222,7 @@ doing the best I can. Here are the rules that the codebase will follow:
 * The storage engine is going to be defined in layers, which each layer leaning on the previous one and isolating it. We'll avoid chatter that cross layer
   boundary.
 * The code will be unit tested and pass automated tooling such as Valgirnd / ASAN, etc.
-====
+****
 
 One of the greatest weakness of C is in its error handling and the capabilities you have for managing resources. 
 That is left entirely to the developer to manage. And while _technically_ you can write bug free code, it is a _hard_ task.
@@ -364,14 +350,14 @@ There are several things that work together here in order to enable this style o
 All of those together create a system that operate almost like exceptions. I don't need to manually handle and pass errors up the chain, I don't have to fret
 about how to provide context to an error, etc. 
 
-[SIDEBAR]
+
 .Inspirations for these ideas
-====
+****
 The errors API cocnepts are very similar to how you deal with errors in https://en.wikibooks.org/wiki/OpenSSL/Error_handling[OpenSSL]. I had the chance
 of building completely new API so I stream-lined a lot of things, but the concepts are very similar.
 
 The `defer` usage comes from Go, although I added the notion of `try_defer` for more complex scenarios.
-====
+****
 
 You'll notice that in the `read_int_to_str_buffer` function we do almost no explicit error checking, this is done for us by the `ensure`. The one case where we do have
 to test a value explicitly is when we are dealing with system code, when we are checking if the `open` was successful, then calling `failed` with the error.
@@ -425,12 +411,16 @@ In practice, this is usually not an issue, the number of unique calls is low, so
 compiler to do its magic. The last line of both macros is meant to avoid a warning about unused varaible, since I'm compliing will all warnings enabled and we
 would get an unused variable warning otherwise.
 
-> **Skippable section**
->
-> The rest of this section goes in depth into the error handling strategy. You already know how to _use_ it, so if you want to jump directly into
-> the storage engine internals, feel free to skip this part. I want to go over every line of code, which means that I also have to cover the 
-> uninteresting (yet crucial) parts. More importantly, I want to discuss my reasoning and approach in these areas, because they end up having a
-> major impact on the project as a whole.
+[NOTE]
+.Skippable section
+====
+The rest of this section goes in depth into the error handling strategy. You already know how to _use_ it, so if you want to jump directly into
+the storage engine internals, feel free to skip this part. 
+
+I want to go over every line of code, which means that I also have to cover the 
+uninteresting (yet crucial) parts. More importantly, I want to discuss my reasoning and approach in these areas, because they end up having a
+major impact on the project as a whole.
+====
 
 Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. 
 
@@ -471,6 +461,14 @@ The `failed` and `ensure` macros are variadic. They are meant to be used with th
 error and then be able to provide more context to it. In the case of `ensure`, if the expression is true, there is no cost and nothing is actually
 being run.
 
+[NOTE]
+.The difference between `op_result_t*` and `result_t`
+====
+As far as the C compiler is concerned, `result_t` and `op_result_t*` are one and the same. After all `resul_t` is a macro that resolves to
+`op_result_t*`. The diffence between them is that the `result_t` macro also specifies `warn_unused_result`. This is how we forece the 
+compiler to validate that our errors are not discarded.
+====
+
 The `errors_push` macro just call to `errors_push_new` with context using`__FILE__`, `__LINE__` and `__func__` builtins to provide additional
 context for our "stack trace". The rest of the functions aren't anything special. The `errors_push` macro is _not_ variadic, we could implement it this
 way, but I would rather have the more explicit usage of `with` and `msg`. 
@@ -503,9 +501,9 @@ modes.
 
 The `_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `_errors_messages_buffer` is an array that stores
 the relevant message for each of recorded array. In other words, the `_errors_messages_buffer` entries will always point to a location inside `_messages_buffer`. 
-The `_errors_messages_codes`, in turn, is a parallal array of the actual error codes that we got. This memory layout is shown in Figure 1.1.
+The `_errors_messages_codes`, in turn, is a parallal array of the actual error codes that we got. This memory layout is shown in Figure 1.
 
-.Figure 1.1 - The actual error messages are stored in a thread local buffer that is pre-allocated
+.The actual error messages are stored in a thread local buffer that is pre-allocated
 image::./ch01/img01.png[]
 
 The `_errors_count` value counts the number of errors that are currently recorded while `_errors_buffer_len` counts how much of `_messages_buffer` is in use. 
@@ -522,7 +520,7 @@ If you need to access the error codes programatically, you can use the `errors_g
 
 Because we are doing no memory allocations and working on a fixed buffer, we need to be careful with how we process the messages. I tried doing that directly 
 with the raw C API, but it was too complex to manage. I wrote a couple of utility functions to manage that and if you are interested, I would refer you to 
-Howard Chu, author of LMDB, discussion https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
+Howard Chu's (author of LMDB) discussion of https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
 
 [source]
 .Listing 1.5 - errors.c - String procesisng routines
@@ -576,7 +574,7 @@ You may find it strange that the very first thing that I did when starting a sto
 will serve us for the rest of the project. The fact that we can have good ways to report error can save us _weeks_ of troubleshooting time. And with this
 in place, we can now move to our very first real task, working with files. 
 
-[IMPORTANT]
+[WARNING]
 .The errors API for external consumers?
 ====
 We looked at the error API (and `defer`) in the context of consuming this internally. Gavran, our storage engine, is meant to be an embedded library.

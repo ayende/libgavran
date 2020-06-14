@@ -12,7 +12,6 @@ June 2020
 :pygments-linenums-mode: inline
 :source-language: c
 
-
 [dedication]
 To Rachel, with my love.
 And to Tamar and Shahar, in the hope that you'll grow up and read this book.
