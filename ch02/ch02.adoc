@@ -443,3 +443,28 @@ and read from it using the memory mapped address. The code reads nearly as well 
 
 This may seem like a humble beginning, but we are currently building the foundation of our storage engine. In the next chapter, we are going to 
 start talking about how we are going to make _use_ of this functionality.
+
+=== Tests
+
+In order to make sure that we are producing good software, and that means tests. Now that the chapter is over, it is time to see its tests. I'm not going
+to deeply into the testing side of the pool, but I have found them to be invaluable to ensure that the software does what you _think_ it does.
+
+[source,python]
+.Listing 2.12 - Testing the file API
+----
+include::./code/tests02.py[]
+----
+
+.A note on testing
+****
+On each chapter, I'm going to create a set of unit tests that will verify the functionality on the system. Each chapter conclude with a system that pass
+all its (and previous) tests. That is important to ensure that any change that I'm making isn't going to break the system.
+
+That said, be aware that you can spend a lot of time tying yourself to a particular implementation choices using tests. I'm testing my code in Python
+and there is a very small Python layer to isolate the tests from the C code. That means that any changes that I make are going to be easier to adapt to.
+
+Right now I'm writing fairly silly tests, mostly because I'm not going to try to test that we are writing durably to disk. That requires a lab with a
+UPS that I can trigger via an API and a machine that I don't mind frying.
+****
+
+And now we are ready to see how we are going to be _using_ the files.

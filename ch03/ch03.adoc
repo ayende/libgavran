@@ -1,0 +1,139 @@
+== At the paging layer
+
+We have gotten to the point where we can read and write data to a file. It will take a while to understand why we didn't simply call `write` or `read` directly and call
+it a day. We'll discuss that in detail when we implement transactions. Right now, I want to focus on how we are going to lay out the data on the file. 
+
+Files are typically thought of as sequence of bytes. Consider the text file shown below. It shows a simple text file consisting of several lines. 
+
+----
+One
+Three
+Four
+----
+
+If I want to add `Two` to the file in the right location, what do I have to do? There is no easy way to add data in the middle of the file. I have to write out
+what I want and then continue writing to the end of the file (extending it along the way). There actually _are_ ways to extend a file in such a manner, in turns
+out. It isn't very useful for most scenarios, but I want to discuss that a bit so you'll understand how that works.
+
+You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of blocks in the middle of a file. That works because while the file system present
+you with the illusion of a sequence of bytes, the reality is very different. Take a look at Figure 3, which shows the physical outline of the text file above.
+
+image::./ch03/img01.png[]
+
+Any file that is smaller than 512 bytes will fit on a single block one block (sometimes called sector). A block is 512B - 4KB in size, in most cases and you can
+assume that it will be 4KB on pretty much any modern disk. And by modern, I'm talking anything anything made in the past _decade_. 
+
+Pretend that the file is actually large enough to reside on multiple blogs. You can use the `filefrag` command to view the blocks on the file. This is _exactly_ 
+what happens when we talk about fragmentation of files. The physical layout of the file is made up of blocks, which reside on a block device (the disk drive).
+It is the job of the file system to map those blocks into a file and present us with the file stream abstraction. 
+
+With `FALLOC_FL_INSERT_RANGE`, we can tell the file system that we want to add new blocks to the file, somewhere in the middle. That is a cheap operation, because
+we aren't actually moving anything. We simply change the list of blocks that are assigned to the file and write new data to the block. You can see how that looks
+on Figure 4.
+
+image::./ch03/img02.png[]
+
+So we can add data cheaply in the middle of a file, although it requires somewhat unusual API calls. The problem is that we can do that only on block boundary. On 
+most modern systems, that is 4KB in size. We can also only insert data in increments of 4KB, so this approach isn't generally usable.
+
+At the same time, we are going to think about how we are going to manage the data we put into storage. We need to consider how we read and write data. As it 
+turns out, there are quite a few common methods to handle this scenario:
+
+* Append only - we always write at the end of the file, and the file format ensures that new values are found before old values. This has the benefit of being 
+  simple to start with, since there is very little to manage, but you'll very quickly end up with most of your space being used by values that has been 
+  overwritten. Getting rid of these old values require you to _compact_ the file, which may take twice as much space as the original file take and introduce
+  a _lot_ of load on the I/O system.
+* Fixed size records - in this model, we define the size of a record upfront (64 bytes, for example) and then we can treat the file as an array of those records.
+  This is how many applications stored their data and it is a very simple method that is surprisingly powerful. It has the downside, of course, that you are 
+  forced to pick a set size and use it for the life time of the data.
+* Page model - the file is divided into pages (4KB - 4MB) in size that are treated as independent buffers. We are always working on a the page level, which is
+  a buffer that is read and written to in an atomic fashion. In other words, we replicate exactly how the file system think of the world. This is similar to the 
+  fixed size records option, but instead of storing fixed size records, we have fixed size pages and we are free to manage their internal structure as we see
+  fit. The page size is also large enough that we don't usually need to 
+
+=== Getting to grips with paging
+
+For our storage engine, we are going to use the paging model. That allows the most flexibility and is the most common choice for storage engines. I'm not going to
+go too deeply into the design choices, you might want to refer the https://www.databass.dev/[Database Internals] book for details. In particular, the terms you
+are looking for are Log Structure Merge vs Page Structure. 
+
+The next question to ask is what will be the page size we'll select. The page size is of great important for the storage engine. That is the atomic unit on which
+all operations are made. The page size must be a multiple of the file system block size. In practice, that means that it should be a multiple of 4KB these days. 
+When building Voron (RavenDB's storage engine) we have run a whole bunch of benchmarks and the sweet spot for our needs was a page size that was 8KB. I'm going
+to use that value again and maybe we'll play with the size when we get to writing benchmark code (which is still very far away).
+
+[TIP]
+.Always work _with_ the hardware
+====
+One additional factor for using pages as the manner in which we manage the data in the file is that this means that all our I/O is now going to be page based.
+This in turn means that drives such as SSD or NVMe are going to have easier time, because we are never going to issue a read or a write the crosses a page
+boundary. This also tend to allow you to get better lifetime from your hardware, since you are reduce the amount of work it needs to do.
+Writing on page boundary has been shown to increase the longevity of the hard drives and can also allow the disk to optimize the data access better.
+====
+
+The API that we wrote so far isn't really suitable for working with pages. That is intentional, we are now building another layer in the storage engine. On top
+of our PAL code (which deals with files) we now have a paging layer. I'm going to need to jump ahead a little bit and declare a few things that will not make 
+_any_ sense now. I'm going to define types for database and a transaction. You can see them in Listing 3.1.
+
+[source]
+.Listing 3.1 - db.h - The declarations of db_t and txn_t
+----
+include::./code/db.h[]
+----
+
+The reason that I'm defining them now is that there is going to be a strong association between the paging layer, which manages the pages on the file and the 
+transaction layer. In fact, the only _way_ for us to work with pages at all is in the context of a transaction. In the hope of avoiding duplicate work, I'm 
+going to forward declare these and move on. We'll flesh these down the line.
+
+Listing 3.2 shows the API we'll have for dealing with pages.
+
+[source]
+.Listing 3.2 - paging.h - The initial paging API
+----
+include::./code/paging.h[]
+----
+
+In Listing 3.2, we define the `PAGE_SIZE` constant and the `page_t` struct. There isn't much there at this point, we simply have the page number and
+the mapped address for the page. We can use that to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the 
+same read & write operation as we did in Listing 2.11. 
+One caveat we have to take into account is that we _can't_ modify the result of the `pages_get` directly. This is because the memory is mapped as readonly. Attempts
+to write to it will result in a segmentation fault. In order to deal with that, we'll copy the page to our own buffer and use the `pages_write` to update its content.
+
+We are working with pages, so we want to use page aligned memory, which usually means that we want to make use of `posix_memalign`. That function, however, has awkward
+usage within our API, so we'll wrap it in `txn_allocate_page`, shown on Listing 3.3.
+
+[source]
+.Listing 3.3 - mem.c - Allocating memory in chunks of pages
+----
+include::./code/mem.c[tags=palmem_allocate_pages]
+----
+
+The `txn_allocate_page` is pretty bare boned, but that is sufficient for now. With that at hand, let's see how we can make use of the API to read and write from the file.
+
+[source]
+.Listing 3.3 - main.c - Reading and writing using the paging API
+----
+include::./code/main.c[]
+----
+<1> Changes from Listing 2.11 start here.
+<2> We ask to get a (read only) page 0.
+<3> We allocate a (mutable) page from memory (unrelated to the file).
+<4> We copy the data from page 0 to the mutable page.
+<5> We copy a string to mutable page.
+<6> We write the modified page back to the file.
+<7> Using memory mapped I/O, we read the values we just wrote to the file.
+
+We get the page, copy it to our own buffer, modify our own copy and then write it back. This technique is called Copy On Write and it has some highly desirable
+properties. For example, until I call `pages_write`, there has been no change to the file. That means that I can abort an operation midway through, free the 
+copy of the memory I used and move on without need to write compensation logic to restore things to the way it was.
+
+Listing 3.3 also present us with another problem. Where are we going to write the data? Right now, I'm using the first page, but obviously that isn't something
+that we can really do for long. We need some way to manage pages. The following basic operations are required:
+
+* `pages_modify` - which will give us a _clone_ of the data in the page, so we won't have to write the copy code all the time.
+* `pages_` - which will allocate a new page for our needs.
+* `free_page` - mark that page as free (and avaiable for allocations).
+
+We'll start with `modify_page`, because that present a significant challange. In particular, who is going to be the owner of this memory, and how are we going
+to be able to work with it? If I call `modify_page` on the same page twice, I don't want to have another copy, for example. That all leads us to the realization
+that we need a scope. 

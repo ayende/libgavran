@@ -11,7 +11,7 @@ methods = [
     ("errors_clear", [], None),
     ("errors_print_all", [], None),
     ("errors_append_message", [c_char_p] , c_void_p),
-    ("errors_push_new", [c_char_p,c_int, c_char_p, c_int], c_void_p)
+    ("errors_push_new", [c_char_p,c_int, c_char_p, c_int, c_char_p], c_void_p)
 ]
 
 for method in methods:
@@ -55,8 +55,8 @@ class Errors:
         return msgs
 
     @staticmethod
-    def push(file, line, func, code):
-        gvn.errors_push_new(file, line, func, code)
+    def push(file, line, func, code, format):
+        gvn.errors_push_new(file, line, func, code, format)
 
     @staticmethod
     def append(format):

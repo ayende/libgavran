@@ -341,7 +341,7 @@ there. The _tests_, however, are going to be included at the end of every chapte
 
 [source,python]
 ----
-include::./code/tests.py[]
+include::./code/tests01.py[]
 ----
 
 And the ouput:
