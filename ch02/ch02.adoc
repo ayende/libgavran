@@ -244,5 +244,12 @@ The reason we need to call `fsync_parent_directory` is that to make the life of 
 exists, including the parent directory. And if we are creating these directories, we need to ensure that they won't go away because of file 
 system metadata issues. 
 
-This is a small thing, but it adds up measurably to the ease of use of the system. Sadly, this is also a somewhat tedius task. You can see how we 
+.Reducing user frustration
+----
+Automatically creating a directory when given a path is a _small_ feature. Call `mkdir` before `open`, pretty much. Doing that reliably_ is more
+complex, but not too hard. There are things you need to consider when doing this, what permissions should you give, 
+----
+
+This is a small thing, but it adds up measurably to the ease of use of the system. 
+Sadly, this is also a somewhat tedius task. You can see how we 
 approach it in Listing 2.5, where quite a lot is going on.
