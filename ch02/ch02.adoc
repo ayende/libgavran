@@ -109,7 +109,7 @@ We are also doing some strange work to compute the size of the handle, how come 
 value and thus points _past the end of the handle_.  Take a look at Figure 2, which shows the structure of `file_handle_t` implementation on Linux.
 
 .The layout of `file_handle_t` in memory on Linux
-image::./ch02/img01.png[]
+image::{img-src}/img2-1.png[]
 
 
 [WARNING]

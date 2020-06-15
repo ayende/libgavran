@@ -206,7 +206,9 @@ error and then be able to provide more context to it. In the case of `ensure`, i
 being run. Note that for `ensure`, we also check if `errors_get_count()` is non zero. This is to handle a scenario where we had a `defer` that run
 and _failed_ after the function itself was successful. We want to treat this as an error and fail as usual. 
 
-Because we use the `##\\__VA_ARGS__` inside the `ensure` and `failed` macros, we also have to define `-Wno-gnu-zero-variadic-macro-arguments` to 
+:VA_ARG: ##__VA_ARGS__
+
+Because we use the `{VA_ARG}`  inside the `ensure` and `failed` macros, we also have to define `-Wno-gnu-zero-variadic-macro-arguments` to 
 suppress the warning Clang emits about GNU specific code.
 
 [NOTE]
@@ -247,15 +249,15 @@ We define a number of variables as thread local state. The idea is that instead 
 at the time we create the thread. This is done for us automatically, so by the time we get to actually recording an error, we don't have to fear most failure
 modes.
 
-The `_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `_errors_messages_buffer` is an array that stores
-the relevant message for each of recorded array. In other words, the `_errors_messages_buffer` entries will always point to a location inside `_messages_buffer`. 
-The `_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 1.
+The `\_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `\_errors_messages_buffer` is an array that stores
+the relevant message for each of recorded array. In other words, the `\_errors_messages_buffer` entries will always point to a location inside `\_messages_buffer`. 
+The `\_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 1.
 
 .The actual error messages are stored in a thread local buffer that is pre-allocated
-image::./ch01/img01.png[]
+image::{img-src}/img1-1.png[]
 
-The `_errors_count` value counts the number of errors that are currently recorded while `_errors_buffer_len` counts how much of `_messages_buffer` is in use. 
-The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `_out_of_memory` flag is set if we have too many errors, at which point
+The `\_errors_count` value counts the number of errors that are currently recorded while `\_errors_buffer_len` counts how much of `\_messages_buffer` is in use. 
+The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `\_out_of_memory` flag is set if we have too many errors, at which point
 we'll start discarding them. I find that very unlikely to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
 
 If you'll look at the API in Listing 1.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about

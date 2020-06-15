@@ -4,4 +4,4 @@
 #include "errors.h"
 #include "paging.h"
 
-result_t txn_allocate_page(txn_t* tx, page_t* p);
+result_t palmem_allocate_pages(size_t num_of_pages, void** buffer);
