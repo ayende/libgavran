@@ -4,3 +4,5 @@ build
 /Output
 /tex2pdf.*
 __pycache__
+/book.html
+/book.pdf

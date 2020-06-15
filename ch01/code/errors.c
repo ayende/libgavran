@@ -1,6 +1,7 @@
 // tag::declarations[]
 
 #include "errors.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,13 +21,12 @@ _Thread_local static uint32_t _out_of_memory;
 
 // tag::try_sprintf[]
 __attribute__((__format__(__printf__, 4, 0))) static bool
-try_vsprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
-             va_list ap) {
-
+try_vsprintf(char **buffer, char *buffer_end, size_t *chars,
+             const char *format, va_list ap) {
   size_t sz = (size_t)(buffer_end - *buffer);
   int rc = vsnprintf(*buffer, sz, format, ap);
-  if (rc < 0 ||         // encoding
-      (size_t)rc >= sz) // space
+  if (rc < 0 ||          // encoding
+      (size_t)rc >= sz)  // space
     return false;
 
   *buffer += rc;
@@ -34,9 +34,9 @@ try_vsprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
   return true;
 }
 
-__attribute__((__format__(__printf__, 4, 5))) static bool
-try_sprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
-            ...) {
+__attribute__((__format__(__printf__, 4, 5))) static bool try_sprintf(
+    char **buffer, char *buffer_end, size_t *chars,
+    const char *format, ...) {
   va_list ap;
   va_start(ap, format);
   bool ret = try_vsprintf(buffer, buffer_end, chars, format, ap);
@@ -46,8 +46,8 @@ try_sprintf(char **buffer, char *buffer_end, size_t *chars, const char *format,
 // end::try_sprintf[]
 
 // tag::errors_push_new[]
-op_result_t *errors_push_new(const char *file, uint32_t line, const char *func,
-                             int32_t code) {
+op_result_t *errors_push_new(const char *file, uint32_t line,
+                             const char *func, int32_t code) {
   // <1>
   if (_errors_count >= MAX_ERRORS) {
     // we have no space any longer for errors, ignoring
@@ -65,8 +65,7 @@ op_result_t *errors_push_new(const char *file, uint32_t line, const char *func,
 
   char stack_buffer[128];
   int rc = strerror_r(code, stack_buffer, 128);
-  if (rc)
-    strcpy(stack_buffer, "Unknown code");
+  if (rc) strcpy(stack_buffer, "Unknown code");
 
   size_t chars_written = 0;
   // <3>
@@ -74,7 +73,8 @@ op_result_t *errors_push_new(const char *file, uint32_t line, const char *func,
       !try_sprintf(&msg, end, &chars_written, "%-*c - %s:%i",
                    (int)(30 - chars_written), ' ', file, line) ||
       !try_sprintf(&msg, end, &chars_written, "%*c - %3i %-20s |  ",
-                   (int)(50 - chars_written), ' ', code, stack_buffer))
+                   (int)(50 - chars_written), ' ', code,
+                   stack_buffer))
     goto oom;
 
   _errors_buffer_len += (size_t)(msg - start);
@@ -89,8 +89,7 @@ oom:
 
 // tag::errors_append_message[]
 op_result_t *errors_append_message(const char *format, ...) {
-  if (!_errors_count && _errors_buffer_len)
-    return 0;
+  if (!_errors_count && _errors_buffer_len) return 0;
 
   // <1>
   char *msg = (_messages_buffer + _errors_buffer_len) - 1;
@@ -103,13 +102,13 @@ op_result_t *errors_append_message(const char *format, ...) {
   va_end(ap);
   if (!ret) {
     // <2>
-    *msg = 0; // undo possible overwrite of null terminator
+    *msg = 0;  // undo possible overwrite of null terminator
     _out_of_memory |= 2;
     return 0;
   }
 
   _errors_buffer_len += chars_written;
-  return 0; // simply to allow it to be used in comma operator
+  return 0;  // simply to allow it to be used in comma operator
 }
 // end::errors_append_message[]
 
@@ -130,8 +129,9 @@ void errors_print_all(void) {
   }
 
   if (_out_of_memory) {
-    const char *msg = "Too many errors, "
-                      "additional errors were discarded";
+    const char *msg =
+        "Too many errors, "
+        "additional errors were discarded";
     printf("%s (%d)\n", msg, -(int32_t)_out_of_memory);
   }
   errors_clear();
@@ -139,7 +139,8 @@ void errors_print_all(void) {
 
 void errors_clear(void) {
   _out_of_memory = 0;
-  memset(_errors_messages_codes, 0, sizeof(int32_t *) * _errors_count);
+  memset(_errors_messages_codes, 0,
+         sizeof(int32_t *) * _errors_count);
   memset(_errors_messages_buffer, 0, sizeof(char *) * _errors_count);
   memset(_messages_buffer, 0, _errors_buffer_len);
   _errors_buffer_len = 0;

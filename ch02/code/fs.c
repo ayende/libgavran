@@ -18,10 +18,11 @@
 // tag::handle_impl[]
 struct pal_file_handle {
   int fd;
-  char filename[]; // memory past end of buffer
+  char filename[];  // memory past end of buffer
 };
 
-result_t palfs_compute_handle_size(const char *path, size_t *required_size) {
+result_t palfs_compute_handle_size(const char* path,
+                                   size_t* required_size) {
   errors_assert_empty();
   size_t len = path ? strlen(path) : 0;
   if (!len) {
@@ -29,30 +30,31 @@ result_t palfs_compute_handle_size(const char *path, size_t *required_size) {
   }
 
   if (*path != '/') {
-    failed(EINVAL, msg("The path is not an absolute path"), with(path, "%s"));
+    failed(EINVAL, msg("The path is not an absolute path"),
+           with(path, "%s"));
   }
 
-  *required_size = sizeof(file_handle_t) + len + 1 /* null termination*/;
+  *required_size =
+      sizeof(file_handle_t) + len + 1 /* null termination*/;
   success();
 }
 
-const char *palfs_get_filename(file_handle_t *handle) {
+const char* palfs_get_filename(file_handle_t* handle) {
   return handle->filename;
 }
 // end::handle_impl[]
 
-void defer_close(struct cancel_defer *cd) {
-  if (cd->cancelled && *cd->cancelled)
-    return;
-  int *fdp = cd->target;
+void defer_close(struct cancel_defer* cd) {
+  if (cd->cancelled && *cd->cancelled) return;
+  int* fdp = cd->target;
   if (close(*fdp) == -1) {
     errors_push(errno, msg("Failed to close file"), with(*fdp, "%i"));
   }
 }
 
 // tag::fsync_parent_directory[]
-static result_t fsync_parent_directory(char *file) {
-  char *last = strrchr(file, '/');
+static result_t fsync_parent_directory(char* file) {
+  char* last = strrchr(file, '/');
   int fd;
   if (!last) {
     fd = open(".", O_RDONLY);
@@ -64,24 +66,21 @@ static result_t fsync_parent_directory(char *file) {
   }
   // <2>
   if (fd == -1) {
-    failed(errno, msg("Unable to open parent directory"), with(file, "%s"));
+    failed(errno, msg("Unable to open parent directory"),
+           with(file, "%s"));
   }
   // <3>
   defer(close, &fd);
-  op_result_t *res = (void *)1;
   if (fsync(fd)) {
-    failed(errno, msg("Failed to fsync parent directory"), with(file, "%s"));
+    failed(errno, msg("Failed to fsync parent directory"),
+           with(file, "%s"));
   }
   success();
 }
 // end::fsync_parent_directory[]
 
-static void defer_restore_slash(struct cancel_defer *cd) {
-  char *p = cd->target;
-  *p = '/';
-}
-
-static result_t ensure_file_path(char *file) {
+// tag::ensure_file_path[]
+static result_t ensure_file_path(char* file) {
   // already exists?
   struct stat st;
   if (!stat(file, &st)) {
@@ -89,40 +88,45 @@ static result_t ensure_file_path(char *file) {
       failed(EISDIR, msg("The path is a directory, expected a file"),
              with(file, "%s"));
     }
-    success(); // file exists, so we are good
+    success();  // file exists, so we are good
   }
 
-  char *cur = file;
-  if (*cur == '/') // rooted path
+  char* cur = file;
+  if (*cur == '/')  // rooted path
     cur++;
 
   while (*cur) {
-    char *next_sep = strchr(cur, '/');
+    char* next_sep = strchr(cur, '/');
     if (!next_sep) {
-      success();
+      success();  // no more directories in path
     }
-    *next_sep = 0; // add null sep to cut the string
-    defer(restore_slash, next_sep);
+    *next_sep = 0;  // add null sep to cut the string
 
-    if (!stat(file, &st)) { // now we are checking the directory!
+    if (!stat(file, &st)) {  // now we are checking the directory!
       if (!S_ISDIR(st.st_mode)) {
-        failed(ENOTDIR, msg("The path is a file, but expected a directory"),
+        failed(ENOTDIR,
+               msg("The path is a file, but expected a directory"),
                with(file, "%s"));
       }
-    } else { // probably does not exists
+    } else {  // probably does not exists
       if (mkdir(file, S_IRWXU) == -1 && errno != EEXIST) {
-        failed(errno, msg("Unable to create directory"), with(file, "%s"));
+        failed(errno, msg("Unable to create directory"),
+               with(file, "%s"));
       }
       ensure(fsync_parent_directory(file));
     }
-
+    *next_sep = '/';
     cur = next_sep + 1;
   }
-  failed(EINVAL, msg("The last char in the path is '/', which is not allowed"),
-         with(file, "%s"));
+  failed(
+      EINVAL,
+      msg("The last char in the path is '/', which is not allowed"),
+      with(file, "%s"));
 }
+// end::ensure_file_path[]
 
-result_t palfs_create_file(const char *path, file_handle_t *handle) {
+// tag::palfs_create_file[]
+result_t palfs_create_file(const char* path, file_handle_t* handle) {
   errors_assert_empty();
 
   memcpy(handle->filename, path, strlen(path) + 1);
@@ -130,7 +134,8 @@ result_t palfs_create_file(const char *path, file_handle_t *handle) {
   int isNew = false;
   if (stat(handle->filename, &st) == -1) {
     if (errno != ENOENT) {
-      failed(errno, msg("Unable to stat "), with(handle->filename, "%s"));
+      failed(errno, msg("Unable to stat "),
+             with(handle->filename, "%s"));
     }
     isNew = true;
     ensure(ensure_file_path(handle->filename));
@@ -141,22 +146,25 @@ result_t palfs_create_file(const char *path, file_handle_t *handle) {
     }
   }
 
-  int fd =
-      open(handle->filename, O_CLOEXEC | O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+  int fd = open(handle->filename, O_CLOEXEC | O_CREAT | O_RDWR,
+                S_IRUSR | S_IWUSR);
   if (fd == -1) {
-    failed(errno, msg("Unable to open file "), with(handle->filename, "%s"));
+    failed(errno, msg("Unable to open file "),
+           with(handle->filename, "%s"));
   }
-  size_t cancel_defer = 0;
-  try_defer(close, &fd, cancel_defer);
   if (isNew) {
-    ensure(fsync_parent_directory(handle->filename));
+    if (!fsync_parent_directory(handle->filename)) {
+      failed(EIO,
+             msg("Failed to fsync parent dir on new file creation"),
+             with(handle->filename, "%s"));
+    }
   }
-  cancel_defer = 1;
   handle->fd = fd;
   success();
 }
+// end::palfs_create_file[]
 
-result_t palfs_get_filesize(file_handle_t *handle, uint64_t *size) {
+result_t palfs_get_filesize(file_handle_t* handle, uint64_t* size) {
   errors_assert_empty();
   struct stat st;
   int res = fstat(handle->fd, &st);
@@ -167,60 +175,72 @@ result_t palfs_get_filesize(file_handle_t *handle, uint64_t *size) {
   failed(errno, msg("Unable to stat"), palfs_get_filename(handle));
 }
 
-result_t palfs_mmap(file_handle_t *handle, uint64_t offset, uint64_t size,
-                    void **address) {
+// tag::palfs_mmap[]
+
+result_t palfs_mmap(file_handle_t* handle, uint64_t offset,
+                    struct mmap_args* m) {
   errors_assert_empty();
-  void *addr = mmap(0, size, PROT_READ, MAP_SHARED, handle->fd, (off_t)offset);
-  if (addr == MAP_FAILED) {
+  m->address = mmap(0, m->size, PROT_READ, MAP_SHARED, handle->fd,
+                    (off_t)offset);
+  if (m->address == MAP_FAILED) {
     failed(errno, msg("Unable to map file"),
-           with(palfs_get_filename(handle), "%s"), with(size, "%lu"));
-  }
-  *address = addr;
-  success();
-}
-
-result_t palfs_unmap(void *address, uint64_t size) {
-  if (munmap(address, size) == -1) {
-    failed(EINVAL, msg("Unable to unmap"), with(address, "%p"));
+           with(palfs_get_filename(handle), "%s"),
+           with(m->size, "%lu"));
   }
   success();
 }
 
-result_t palfs_close_file(file_handle_t *handle) {
+result_t palfs_unmap(struct mmap_args* m) {
+  if (munmap(m->address, m->size) == -1) {
+    failed(EINVAL, msg("Unable to unmap"), with(m->address, "%p"));
+  }
+  m->address = 0;
+  success();
+}
+// end::palfs_mmap[]
+
+// tag::palfs_close_file[]
+result_t palfs_close_file(file_handle_t* handle) {
   if (close(handle->fd) == -1) {
     failed(errno, msg("Failed to close file"),
-           with(palfs_get_filename(handle), "%s"), with(handle->fd, "%i"));
+           with(palfs_get_filename(handle), "%s"),
+           with(handle->fd, "%i"));
   }
   success();
 }
+// end::palfs_close_file[]
 
-void defer_palfs_close_file(struct cancel_defer *cd) {
-  if (cd->cancelled && *cd->cancelled)
-    return;
+// tag::defer_palfs_close_file[]
+
+void defer_palfs_close_file(struct cancel_defer* cd) {
+  if (cd->cancelled && *cd->cancelled) return;
   if (!palfs_close_file(cd->target)) {
     errors_push(EINVAL, msg("Failure to close file during defer"));
   }
 }
 
-void defer_palfs_unmap(struct cancel_defer *cd) {
-  if (cd->cancelled && *cd->cancelled)
-    return;
-  struct unmap_defer_ctx *ctx = cd->target;
-  if (!palfs_unmap(ctx->addr, ctx->size)) {
-    errors_push(EINVAL, msg("Failure to close file during defer"));
+void defer_palfs_unmap(struct cancel_defer* cd) {
+  if (cd->cancelled && *cd->cancelled) return;
+  struct mmap_args* ctx = cd->target;
+  if (!palfs_unmap(ctx)) {
+    errors_push(EINVAL, msg("Failure to close file during defer"),
+                with(ctx->address, "%p"));
   }
 }
+// end::defer_palfs_close_file[]
 
-result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size) {
+// tag::palfs_set_file_minsize[]
+result_t palfs_set_file_minsize(file_handle_t* handle,
+                                uint64_t minimum_size) {
   errors_assert_empty();
 
-  const char *filename = palfs_get_filename(handle);
+  const char* filename = palfs_get_filename(handle);
 
   int rc = posix_fallocate(handle->fd, 0, (off_t)minimum_size);
 
   if (rc) {
-    failed(rc, msg("Unable to extend file to size"), with(filename, "%s"),
-           with(minimum_size, "%lu"));
+    failed(rc, msg("Unable to extend file to size"),
+           with(filename, "%s"), with(minimum_size, "%lu"));
   }
   char filename_mutable[PATH_MAX];
   size_t name_len = strlen(filename);
@@ -234,28 +254,26 @@ result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size) {
 
   success();
 }
+// end::palfs_set_file_minsize[]
 
-static result_t create_and_set_file() {
-  size_t size;
-  ensure(palfs_compute_handle_size(
-      "/home/ayende/projects/libgavran/ch02/code/test", &size));
+// tag::palfs_write_file[]
+result_t palfs_write_file(file_handle_t* handle, uint64_t offset,
+                          const char* buffer, size_t len_to_write) {
+  errors_assert_empty();
+  while (len_to_write) {
+    ssize_t result =
+        pwrite(handle->fd, buffer, len_to_write, (off_t)offset);
+    if (result == -1) {
+      if (errno == EINTR) continue;  // repeat on signal
 
-  file_handle_t *handle = malloc(size);
-  ensure(handle);
-  defer(free, handle);
-
-  ensure(palfs_create_file("/home/ayende/projects/libgavran/ch02/code/test",
-                           handle));
-  defer(palfs_close_file, handle);
-
-  ensure(palfs_set_file_minsize(handle, 128 * 1024));
-
+      failed(errno, msg("Unable to write bytes to file"),
+             with(len_to_write, "%lu"),
+             with(palfs_get_filename(handle), "%s"));
+    }
+    len_to_write -= (size_t)result;
+    buffer += result;
+    offset += (size_t)result;
+  }
   success();
 }
-
-int main() {
-  if (!create_and_set_file()) {
-    errors_print_all();
-  }
-  return 1;
-}
+// end::palfs_write_file[]

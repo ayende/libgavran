@@ -7,7 +7,7 @@ of things that can go wrong in this kind of code. We may fail to open the file, 
 etc. We need to remember to always close the file descriptor and we should always free the allocated buffer on error, but not if the function 
 completed successfully.
 
-That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 1.1 shows a fucntion that has to deal with coordination across merely two
+That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 1.1 shows a function that has to deal with coordination across merely two
 resources. If we have to deal with more, the situation worsen. Take a look at the code and then we'll break down everything that is new here.
 
 [IMPORTANT]
@@ -26,51 +26,8 @@ length.
 [source]
 .Listing 1.1: Mostly automatic handling of resource usage and error handling in C
 ----
-static result_t 												# <1>
-read_all(int fd, size_t size, void* buffer)
-{
-  size_t read_bytes = 0;
-  while (read_bytes < size) {
-    ssize_t cur =
-      read(fd, (char*)buffer + read_bytes, size - read_bytes);
-
-    if (cur <= 0) {
-      failed(errno,"Failed to read requested data",				// <2>
-             with(read_bytes, "%zu"), with(cur, "%zd"),			// <3>
-             with(size, "%zu"));								// <3>
-    }
-    read_bytes += (size_t)cur;
-  }
-  success();
-}
-
-static result_t 												// <1>
-read_int_to_str_buffer(const char* path, char** buffer)
-{
-  int fd = open(path, O_RDONLY, 0);
-  if (fd == -1) {
-    failed(errno, "Unable to open file", with(path, "%s"));		// <2> <3>
-  }
-  defer(close, &fd); 											// <5>
-
-  char* tmp_buf = malloc(128);
-  ensure(tmp_buf,msg("Unable to allocate buffer"));				// <4> <3>
-
-  size_t cancel_defer;
-  try_defer(free, buffer, cancel_defer);						// <5>
-
-  int val;
-  ensure(read_all(fd, sizeof(int), &val), with(path, "%s"));	// <4> <3>
-
-  int chars = sprintf(tmp_buf, "%d", val);
-  *buffer = realloc(tmp_buf, (size_t)chars + 1);
-  ensure(*buffer, msg("Failed to decrease the buffer size?!")); // <4> <3>
-
-  cancel_defer = 1;												// <5>
-  success();													// <6>
-}
+include::./code/main.c[tags=read_int_to_str_buffer]
 ----
-
 <1> The `result_t` type is the return type for any function that may fail. It is an opaque type that is set to zero on failure and non zero of success. Using C's
 usual rules, we can use boolean operations on this value to test for success / fail. A key factor about `result_t` is that it is a value that _must_ be observed. 
 In other words, ignoring this value will result in a compiler error using our settings. 
@@ -78,19 +35,18 @@ In other words, ignoring this value will result in a compiler error using our se
 <2> The `failed` macro is used to report errors. A call to `failed` will exit the function with a fail status and the parameters to `failed` 
 will be used to generate an error message. It is expected that multiple methods will fail in a sequence, and the infrastructure is setup to handle this and 
 generate appropriate set of errors representing the location in the stack this issue occur on.
-
-<3> You can use `msg` to provide some additional information and `with` to provide more context, such as local parameters. This is how we can see how much the 
+You can use `msg` to provide some additional information and `with` to provide more context, such as local parameters. This is how we can see how much the 
 `read_all` was asked to scan, for example. The additional context can make such errors must easier to resolve. It is important to note that they are _not_
 evaluated if the operation completed successfully.
+
+<3> The `defer` and `try_defer` allow us to register a function to be called when the current scope ends. This capability uses the `__attribute__(cleanup)` feature
+in GCC and Clang and it is how we intend to manage resources in general. Freeing ourselves from having to deal with them at every turn. The `try_defer` macro also
+allows us to _cancel_ this operation. We'll see discuss why this is important shortly.
 
 <4> The `ensure` macro will check that a particular operation was successful (has non zero value) and will exit the function with an error if that isn't the
 case. This reduce nesting in the function and make it easier to both read and write.
 
-<5> The `defer` and `try_defer` allow us to register a function to be called when the current scope ends. This capability uses the `__attribute__(cleanup)` feature
-in GCC and Clang and it is how we intend to manage resources in general. Freeing ourselves from having to deal with them at every turn. The `try_defer` macro also
-allows us to _cancel_ this operation. We'll see discuss why this is important shortly.
-
-<6> The `success` macro allows us to exit a method successfully. 
+<5> The `success` macro allows us to exit a method successfully. 
 
 Together, these macros form the basis of error handling and resource management strategy for the upcoming storage engine. Let's see what each of them does and then
 we'll discuss how they all fit together. I'll discuss how they are _implemented_ in the next section.
@@ -104,8 +60,8 @@ sequence of events:
 * Everything gets cleaned up.
 * Caller can call `errors_print_all()` to get the following output:
 ....
-read_all()                - src/main.c:33  -  21 (Is a directory      ) - Failed to read requested data, read_bytes = 0, cur = -1, size = 4
-read_int_to_str_buffer()  - src/main.c:55  -  22 (Invalid argument    ) - read_all(fd, sizeof(int), &val), path = test
+read_all()                     - main.c:29         -  21 Is a directory       | Failed to read requested data, read_bytes = 0, cur = -1, size = 4
+read_int_to_str_buffer()       - main.c:53         -  22 Invalid argument     | read_all(fd, sizeof(int), &val), path = /tmp
 ....
 
 You'll note that we get a _lot_ of information here. This is _almost_ a stack trace and the richness of exceptions, without any of the costs associated with it.
@@ -123,7 +79,7 @@ about how to provide context to an error, etc.
 
 .Inspirations for these ideas
 ****
-The errors API cocnepts are very similar to how you deal with errors in https://en.wikibooks.org/wiki/OpenSSL/Error_handling[OpenSSL]. I had the chance
+The errors API concepts are very similar to how you deal with errors in https://en.wikibooks.org/wiki/OpenSSL/Error_handling[OpenSSL]. I had the chance
 of building completely new API so I stream-lined a lot of things, but the concepts are very similar.
 
 The `defer` usage comes from Go, although I added the notion of `try_defer` for more complex scenarios.
@@ -131,17 +87,18 @@ The `defer` usage comes from Go, although I added the notion of `try_defer` for 
 
 You'll notice that in the `read_int_to_str_buffer` function we do almost no explicit error checking, this is done for us by the `ensure`. The one case where we do have
 to test a value explicitly is when we are dealing with system code, when we are checking if the `open` was successful, then calling `failed` with the error.
-ings that can fail as deeply as possible, so we'll be able to use the `ensure` macro to reduce the amount of explicit error handling we have to go through.
+We want to push the things that can fail in this manner as deeply as possible, so we'll be able to use the `ensure` macro to reduce the amount of 
+explicit error handling we have to go through.
 
 This style of error handling is problematic in C, because we can't just _exit_ a function, we have to do cleanup first. In pretty much any C project of any 
-complexity you'll see `goto` used for this aproach, to try to centralized error handling in the function. This resource management strategy is brittle and hard
+complexity you'll see `goto` used for this approach, to try to centralized error handling in the function. This resource management strategy is brittle and hard
 to use. Instead, we offer `defer` and `try_defer`. 
 
 [CAUTION]
 .Here `goto` is the _good_ option!
 ====
 You probably heard about the "GOTO Considered Harmful" paper and likely have an aversion to this keyword. However, in most C projects, the use of a `goto`
-for error handling is the _preferred_ option. Because the other altrenative is much worse, manually maintaining complex and brittle resource & error management code.
+for error handling is the _preferred_ option. Because the other alternative is much worse, manually maintaining complex and brittle resource & error management code.
 ====
 
 The `defer` and `try_defer` are based on `__attribute__((__cleanup__))` extension for both Clang and GCC. This is a way to instruct the compiler to call a method 
@@ -158,7 +115,7 @@ These two approaches together leads to a much cleaner codebase. And now, let's s
 === Implementing resource management and error handling infrastructure
 
 I'll start with the `defer` commands, because they are the smaller of the two. Most they just give good syntax over the compiler behavior. You can see how they
-are implmented in Listing 1.2.
+are implemented in Listing 1.2.
 
 
 [source]
@@ -168,13 +125,13 @@ include::./code/defer.h[]
 ```
 <1> The `cancel_defer` struct allow to capture the state that will be sent through the `defer` call as well as the pointer to the cancellation flag.
 <2> The `defer_close` declaration handles the deferred closing of files. The actual implementation is platform specific, so we'll see it when we get to it.
-<3> The `defer_free` function is a good exmaple of how we implement handling of `try_defer` functions. The captured value will be freed unless the caller has
+<3> The `defer_free` function is a good example of how we implement handling of `try_defer` functions. The captured value will be freed unless the caller has
 cancelled the deferral.
 <4> The actual macro implementing `try_defer`. Note that we set the `cancelled` field to track the marker value provided by the caller.
 <5> The `defer` macro is implemented in the same manner, but without setting the `cancelled` field. 
 
 The idea is that we setup a call to `void defer_<function>(struct cancel_defer* cd)` function. That will be called by the compiler when the scope exits. This
-The caller is responsible for providing this function. I would prefer to avoid it, but trying to do so send us _deep_ into proprocessor magic, and I'm already
+The caller is responsible for providing this function. I would prefer to avoid it, but trying to do so send us _deep_ into preprocessor magic, and I'm already
 stretching the limits of what I think is acceptable. 
 
 It is actually easy enough to provide a macro that would generate the appropriate deferring function. Consider the following code:
@@ -191,11 +148,11 @@ It is actually easy enough to provide a macro that would generate the appropriat
 register_defer(free, void*);
 ----
 
-That (or something similar) would be sufficent. And for `free`, this actually works. After all, `free` can't fail. But closing a file can, and we _need_
+That (or something similar) would be sufficient. And for `free`, this actually works. After all, `free` can't fail. But closing a file can, and we _need_
 to be able to report this information _somewhere_. That is why we require that the user would provide these functions and the associated error handling.
 
 In practice, this is usually not an issue, the number of unique calls is low, so adding this once for a few data types is very easy. Then we just rely on the 
-compiler to do its magic. The last line of both macros is meant to avoid a warning about unused varaible, since I'm compliing will all warnings enabled and we
+compiler to do its magic. The last line of both macros is meant to avoid a warning about unused variable, since I'm compiling will all warnings enabled and we
 would get an unused variable warning otherwise.
 
 [NOTE]
@@ -214,8 +171,8 @@ Moving on to the error handling, we actually have a few levels inside the error 
 
 * `errors_push` will create a new error and `errors_append_message` will add additional context to it.
 * `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
-  error propogation. 
-* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programatically
+  error propagation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programmatically
   to them. 
 * The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
 
@@ -224,8 +181,8 @@ use to _report_ errors:
 
 * `errors_push` will create a new error and `errors_append_message` will add additional context to it.
 * `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
-  error propogation. 
-* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programatically
+  error propagation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programmatically
   to them. 
 * The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
 
@@ -256,14 +213,14 @@ suppress the warning Clang emits about GNU specific code.
 .The difference between `op_result_t*` and `result_t`
 ====
 As far as the C compiler is concerned, `result_t` and `op_result_t*` are one and the same. After all `resul_t` is a macro that resolves to
-`op_result_t*`. The diffence between them is that the `result_t` macro also specifies `warn_unused_result`. This is how we forece the 
+`op_result_t*`. The difference between them is that the `result_t` macro also specifies `warn_unused_result`. This is how we force the 
 compiler to validate that our errors are not discarded.
 ====
 
-The `errors_push` macro just call to `errors_push_new` with context using`__FILE__`, `__LINE__` and `__func__` builtins to provide additional
+The `errors_push` macro just call to `errors_push_new` with context using`__FILE__`, `__LINE__` and `__func__` built-ins to provide additional
 context for our "stack trace". The rest of the functions aren't anything special. The `errors_push` macro is _not_ variadic, we could implement it this
 way, but I would rather have the more explicit usage of `with` and `msg`. 
-The nice thing about `with` is that it capture the expression value as well the expression text. That saves us some keystokes on each error call.
+The nice thing about `with` is that it capture the expression value as well the expression text. That saves us some keystrokes on each error call.
 
 [TIP]
 .Forcing error handling
@@ -273,7 +230,7 @@ ignored an error. If that is the case, we'll refuse to go on and error immediate
 will very visibly break stuff if you don't. 
 
 This is meant for _external_ users. If you called an API method and it failed and you didn't check the error, all future operations will also fail.
-That keeps us in the habbit of managing errors properly.
+That keeps us in the habit of managing errors properly.
 ====
 
 You'll note that unlike most C APIs, that we are missing quite a bit here. Namely, where is the memory handling? In order to reduce as much as possible the
@@ -292,29 +249,29 @@ modes.
 
 The `_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `_errors_messages_buffer` is an array that stores
 the relevant message for each of recorded array. In other words, the `_errors_messages_buffer` entries will always point to a location inside `_messages_buffer`. 
-The `_errors_messages_codes`, in turn, is a parallal array of the actual error codes that we got. This memory layout is shown in Figure 1.
+The `_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 1.
 
 .The actual error messages are stored in a thread local buffer that is pre-allocated
 image::./ch01/img01.png[]
 
 The `_errors_count` value counts the number of errors that are currently recorded while `_errors_buffer_len` counts how much of `_messages_buffer` is in use. 
 The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `_out_of_memory` flag is set if we have too many errors, at which point
-we'll start discarding them. I find that very unlikley to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
+we'll start discarding them. I find that very unlikely to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
 
 If you'll look at the API in Listing 1.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about
-reading the errors or clearing them. The usual method you'll use the `ensure` / `failed` macros to bubble the errors to the callers until we get sometwhere where
+reading the errors or clearing them. The usual method you'll use the `ensure` / `failed` macros to bubble the errors to the callers until we get somewhere where
 we can make a decision about the issue. The caller will need to read the errors and make a determination and then clear the error state and prepare for the next
 operation. 
 
 A shorthand for printing to the terminal is provided with `errors_print_all()`, typically for debugging purposes. 
-If you need to access the error codes programatically, you can use the `errors_get_codes()` function. 
+If you need to access the error codes programmatically, you can use the `errors_get_codes()` function. 
 
 Because we are doing no memory allocations and working on a fixed buffer, we need to be careful with how we process the messages. I tried doing that directly 
 with the raw C API, but it was too complex to manage. I wrote a couple of utility functions to manage that and if you are interested, I would refer you to 
 Howard Chu's (author of LMDB) discussion of https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
 
 [source]
-.Listing 1.5 - errors.c - String procesisng routines
+.Listing 1.5 - errors.c - String processing routines
 ----
 include::./code/errors.c[tags=try_sprintf]
 ----
@@ -330,7 +287,7 @@ include::./code/errors.c[tags=errors_push_new]
 <1> Check if we have more than the maximum number of errors. This is unlikely, in most use cases.
 <2> Increment the current error counter. Note that we increment this counter even if we don't have enough memory for the error message. In that case, the error
 message will be null, but the error code will be retained.
-<3> We call `try_sprintf` multiple times, formatting the error message. This code is a bit complex, since C's string processing capabilies are... akward. 
+<3> We call `try_sprintf` multiple times, formatting the error message. This code is a bit complex, since C's string processing capabilities are... awkward. 
 A key factor here is that we can safely call these function even if there isn't enough memory, they do their own check and bail out early. This code was 
 _much_ harder to follow before I introduced the `try_sprintf` helper. 
 
@@ -369,8 +326,8 @@ in place, we can now move to our very first real task, working with files.
 .The errors API for external consumers?
 ====
 We looked at the error API (and `defer`) in the context of consuming this internally. Gavran, our storage engine, is meant to be an embedded library.
-That means that it is going to be used from other systems. Forcing our error convention on unsuspecting codebases is not something that I would consider
-desriable. 
+That means that it is going to be used from other systems. Forcing our error convention on unsuspecting code bases is not something that I would consider
+desirable. 
 ====
 
 === Testing the error API
