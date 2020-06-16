@@ -1,7 +1,8 @@
+#include "db.h"
+
 #include <errno.h>
 #include <string.h>
 
-#include "db.h"
 #include "errors.h"
 #include "pal.h"
 #include "platform.fs.h"
@@ -14,7 +15,7 @@ struct database_state {
 
 static result_t handle_newly_opened_database(db_t *db) {
   // for now, nothing to do here.
-  success();
+  return success();
 }
 
 static result_t validate_options(database_options_t *options) {

@@ -32,7 +32,7 @@ static result_t create_and_write_file() {
 
   printf("%s\n", m.address);
 
-  success();
+  return success();
 }
 
 int main() {

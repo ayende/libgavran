@@ -23,6 +23,7 @@ struct transaction_state {
 };
 // end::transaction_state[]
 
+// tag::txn_commit[]
 result_t txn_commit(txn_t *tx) {
   errors_assert_empty();
   txn_state_t *state = tx->state;
@@ -42,9 +43,11 @@ result_t txn_commit(txn_t *tx) {
   }
   return true;
 }
+// end::txn_commit[]
 
+// tag::txn_close[]
 result_t txn_close(txn_t *tx) {
-  if (!tx->state) success();  // probably double close?
+  if (!tx->state) return success();  // probably double close?
   txn_state_t *state = tx->state;
   size_t number_of_buckets = get_number_of_buckets(state);
   for (size_t i = 0; i < number_of_buckets; i++) {
@@ -58,8 +61,9 @@ result_t txn_close(txn_t *tx) {
   free(tx->state);
 
   tx->state = 0;
-  success();
+  return success();
 }
+// end::txn_close[]
 
 // tag::txn_create[]
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
@@ -112,6 +116,7 @@ enum hash_resize_status {
   hash_resize_err_failure,
 };
 
+// tag::expand_hash_table[]
 static enum hash_resize_status expand_hash_table(
     txn_state_t **state_ptr, size_t number_of_buckets) {
   size_t new_number_of_buckets = number_of_buckets * 2;
@@ -144,8 +149,8 @@ static enum hash_resize_status expand_hash_table(
     if (!located) {
       push_error(
           EINVAL,
-          "Failed to find spot for %lu after hash table resize",
-          entry->page_num);
+          msg("Failed to find spot for page after hash table resize"),
+          with(entry->page_num, "%lu"));
       free(new_state);
       return hash_resize_err_failure;
     }
@@ -155,11 +160,12 @@ static enum hash_resize_status expand_hash_table(
   free(state);
   return hash_resize_success;
 }
+// end::expand_hash_table[]
 
 // tag::allocate_entry_in_tx[]
-static bool allocate_entry_in_tx(txn_state_t **state_ptr,
-                                 uint64_t page_num,
-                                 page_hash_entry_t **entry) {
+static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
+                                     uint64_t page_num,
+                                     page_hash_entry_t **entry) {
   txn_state_t *state = *state_ptr;
   size_t number_of_buckets = get_number_of_buckets(state);
   size_t starting_pos = (size_t)(page_num % number_of_buckets);
@@ -168,11 +174,10 @@ static bool allocate_entry_in_tx(txn_state_t **state_ptr,
     size_t index = (i + starting_pos) % number_of_buckets;
     if (state->entries[index].page_num == page_num &&
         state->entries[index].address) {
-      fault(EINVAL,
-            "Attempted to allocate entry for page_header %lu "
-            "which already exist "
-            "in the table",
-            page_num);
+      failed(EINVAL,
+             msg("Attempted to allocate entry for page "
+                 "which already exist in the table"),
+             with(page_num, "%s"));
     }
 
     if (!state->entries[index].address) {
@@ -182,7 +187,7 @@ static bool allocate_entry_in_tx(txn_state_t **state_ptr,
         state->modified_pages++;
         state->entries[index].page_num = page_num;
         *entry = &state->entries[index];
-        return true;
+        return success();
       }
       switch (expand_hash_table(state_ptr, number_of_buckets)) {
         case hash_resize_success:
@@ -193,11 +198,10 @@ static bool allocate_entry_in_tx(txn_state_t **state_ptr,
           // load factor
           break;
         case hash_resize_err_failure:
-          push_error(
+          failed(
               EINVAL,
-              "Failed to add page_header %lu to the transaction "
-              "hash table",
-              page_num);
+              msg("Failed to add page to the transaction hash table"),
+              with(page_num, "%lu"));
           return false;
       }
     }
@@ -209,15 +213,15 @@ static bool allocate_entry_in_tx(txn_state_t **state_ptr,
       return allocate_entry_in_tx(state_ptr, page_num, entry);
     case hash_resize_err_no_mem:
       // we are at 100% capacity, can't recover, will error now
-      fault(ENOMEM,
-            "Can't allocate to add page_header %lu to the "
-            "transaction hash table",
-            page_num);
+      failed(ENOMEM,
+             msg("Can't allocate to add page to the "
+                 "transaction hash table"),
+             with(page_num, "%lu"));
     case hash_resize_err_failure:
-      fault(EINVAL,
-            "Failed to add page_header %lu to the transaction "
-            "hash table",
-            page_num);
+      failed(EINVAL,
+             msg("Failed to add page_header %lu to the transaction "
+                 "hash table"),
+             with(page_num, "%s"));
   }
 }
 // end::allocate_entry_in_tx[]

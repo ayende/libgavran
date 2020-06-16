@@ -36,7 +36,7 @@ result_t palfs_compute_handle_size(const char* path,
 
   *required_size =
       sizeof(file_handle_t) + len + 1 /* null termination*/;
-  success();
+  return success();
 }
 
 const char* palfs_get_filename(file_handle_t* handle) {
@@ -75,7 +75,7 @@ static result_t fsync_parent_directory(char* file) {
     failed(errno, msg("Failed to fsync parent directory"),
            with(file, "%s"));
   }
-  success();
+  return success();
 }
 // end::fsync_parent_directory[]
 
@@ -88,7 +88,7 @@ static result_t ensure_file_path(char* file) {
       failed(EISDIR, msg("The path is a directory, expected a file"),
              with(file, "%s"));
     }
-    success();  // file exists, so we are good
+    return success();  // file exists, so we are good
   }
 
   char* cur = file;
@@ -98,7 +98,7 @@ static result_t ensure_file_path(char* file) {
   while (*cur) {
     char* next_sep = strchr(cur, '/');
     if (!next_sep) {
-      success();  // no more directories in path
+      return success();  // no more directories in path
     }
     *next_sep = 0;  // add null sep to cut the string
 
@@ -160,7 +160,7 @@ result_t palfs_create_file(const char* path, file_handle_t* handle) {
     }
   }
   handle->fd = fd;
-  success();
+  return success();
 }
 // end::palfs_create_file[]
 
@@ -170,7 +170,7 @@ result_t palfs_get_filesize(file_handle_t* handle, uint64_t* size) {
   int res = fstat(handle->fd, &st);
   if (res != -1) {
     *size = (uint64_t)st.st_size;
-    success();
+    return success();
   }
   failed(errno, msg("Unable to stat"), palfs_get_filename(handle));
 }
@@ -187,7 +187,7 @@ result_t palfs_mmap(file_handle_t* handle, uint64_t offset,
            with(palfs_get_filename(handle), "%s"),
            with(m->size, "%lu"));
   }
-  success();
+  return success();
 }
 
 result_t palfs_unmap(struct mmap_args* m) {
@@ -195,7 +195,7 @@ result_t palfs_unmap(struct mmap_args* m) {
     failed(EINVAL, msg("Unable to unmap"), with(m->address, "%p"));
   }
   m->address = 0;
-  success();
+  return success();
 }
 // end::palfs_mmap[]
 
@@ -206,7 +206,7 @@ result_t palfs_close_file(file_handle_t* handle) {
            with(palfs_get_filename(handle), "%s"),
            with(handle->fd, "%i"));
   }
-  success();
+  return success();
 }
 // end::palfs_close_file[]
 
@@ -252,7 +252,7 @@ result_t palfs_set_file_minsize(file_handle_t* handle,
 
   ensure(fsync_parent_directory(filename_mutable));
 
-  success();
+  return success();
 }
 // end::palfs_set_file_minsize[]
 
@@ -274,6 +274,6 @@ result_t palfs_write_file(file_handle_t* handle, uint64_t offset,
     buffer += result;
     offset += (size_t)result;
   }
-  success();
+  return success();
 }
 // end::palfs_write_file[]

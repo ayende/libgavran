@@ -12,6 +12,6 @@ result_t palmem_allocate_pages(size_t num_of_pages, void** address) {
     failed(ENOMEM, "Unable to allocate memory for page",
            with(num_of_pages, "%lu"));
   }
-  success();
+  return success();
 }
 // end::palmem_allocate_pages[]

@@ -1,5 +1,3 @@
-#include "defer.h"
-#include "errors.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,32 +12,30 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "defer.h"
+#include "errors.h"
+
 // //#include "pal.h"
 // //#include "transactions.h"
 
-static result_t
-read_all(int fd, size_t size, void* buffer)
-{
+static result_t read_all(int fd, size_t size, void* buffer) {
   size_t read_bytes = 0;
   while (read_bytes < size) {
     ssize_t cur =
-      read(fd, (char*)buffer + read_bytes, size - read_bytes);
+        read(fd, (char*)buffer + read_bytes, size - read_bytes);
 
     if (cur <= 0) {
-      failed(errno,
-             "Failed to read requested data",
-             with(read_bytes, "%zu"),
-             with(cur, "%zd"),
+      failed(errno, "Failed to read requested data",
+             with(read_bytes, "%zu"), with(cur, "%zd"),
              with(size, "%zu"));
     }
     read_bytes += (size_t)cur;
   }
-  success();
+  return success();
 }
 
-static result_t
-read_int_to_str_buffer(const char* path, char** buffer)
-{
+static result_t read_int_to_str_buffer(const char* path,
+                                       char** buffer) {
   int fd = open(path, O_RDONLY, 0);
   if (fd == -1) {
     failed(errno, "Unable to open file", with(path, "%s"));
@@ -59,12 +55,10 @@ read_int_to_str_buffer(const char* path, char** buffer)
   ensure(*buffer, msg("Failed to decrease the buffer size?!"));
 
   cancel_defer = 1;
-  success();
+  return success();
 }
 
-int
-main()
-{
+int main() {
   char* bu;
   if (!read_int_to_str_buffer("test", &bu)) {
     print_all_errors();

@@ -73,7 +73,7 @@ result_t create_and_set_file() {
 
   ensure(palfs_set_file_minsize(handle, 128*1024));
 
-  success();
+  return success();
 }
 ----
 

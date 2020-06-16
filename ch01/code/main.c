@@ -29,7 +29,7 @@ static result_t read_all(int fd, size_t size, void* buffer) {
     }
     read_bytes += (size_t)cur;
   }
-  success();
+  return success();
 }
 
 // tag::read_int_to_str_buffer[]
@@ -61,7 +61,7 @@ static result_t read_int_to_str_buffer(const char* path,
 
   cancel_defer = 1;
   // <5>
-  success();
+  return success();
 }
 // end::read_int_to_str_buffer[]
 

@@ -19,7 +19,7 @@ You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of bloc
 you with the illusion of a sequence of bytes, the reality is very different. Take a look at Figure 3, which shows the physical outline of the text file above.
 
 .Physical layout of a file on disk
-image::{img-src}/img01.png[]
+image::{img-src}/img3-1.png[]
 
 Any file that is smaller than 512 bytes will fit on a single block one block (sometimes called sector). A block is 512B - 4KB in size, in most cases and you can
 assume that it will be 4KB on pretty much any modern disk. And by modern, I'm talking anything anything made in the past _decade_. 
@@ -127,7 +127,7 @@ The `txn_allocate_page` is pretty bare boned, but that is sufficient for now. Wi
 [source]
 .Listing 3.3 - main.c - Reading and writing using the paging API
 ----
-include::./code/main.c[]
+include::./code/main.c[tags=create_and_write_file]
 ----
 <1> Changes from Listing 2.11 start here.
 <2> We ask to get a (read only) page 0.
@@ -334,4 +334,129 @@ operation because we may need to resize the hash table if the load factor grows 
 [source]
 .Listing 3.9 - txn.c - Adding an entry to the hash table, potentially resizing it
 ----
+include::./code/txn.c[tags=allocate_entry_in_tx]
 ----
+
+The code in Listing 3.9 starts out in the same manner as `lookup_entry_in_tx` does, by doing a scan on the buckets from the starting position based on the
+modulus of the page number with the number of buckets. We are searching for one of two cases:
+
+* A bucket that has the same page number, which we error on, because after the page has been allocated, there should never be any overwrites.
+* An empty bucket, which we can reuse. The way I implemented this hash table, we will write to the first empty bucket. That means that if we find any
+  empty bucket during a scan, we know that the page number we search can't be on a later bucket.
+
+Once we found an empty slot of put the value in, we check the load factor on the table. If it is lower than 75%, we can assign the bucket to the page
+and return successfully. But if we are over the 75% mark, we need to resize the hash table. This is done in `expand_hash_table`, which we will explore
+shortly. 
+
+There are three possible return values for `expand_hash_table`:
+
+* Success, in which case we increased the size of the hash table and will recurse to add the page in the right location.
+* Failure, the function has run into unrecoverable problem. 
+* Unable to resize because of memory pressure. In this case, we have two separate behaviors. If there isn't enough memory, but there is still room in 
+  the hash table we'll allow the load factor to grow as needed. We'll only raise an error when the load factor reach 100% and we cannot complete the 
+  allocation at all.
+
+The idea behind this behavior is to be robust to temporary conditions. We don't *have* to resize the hash table if there is memory pressure right now.
+We can increase the load factor and gain more time. Maybe the transaction will complete and we can throw away the entire table, for example.
+
+.Memory management in Linux
+****
+By default, Linux will never fail a `malloc`. In other words, when calling `malloc`, you'll never get `NULL` back. If you care to know more about 
+this behavior, search for https://lwn.net/Articles/317814/[over commit and the OOM killer]. A good paper on why over commit is required is 
+https://www.microsoft.com/en-us/research/publication/a-fork-in-the-road/["A fork() in the road"]. 
+
+In essence, too much software simply assume that all memory allocations will succeed. Even the Linux kernel has this an issue with
+https://lwn.net/Articles/627419/[this kind of expectation]. 
+
+The problem with not failing `malloc` is that Linux cannot just magic some more RAM, and even with swap, you'll eventually run out. The issue
+is how it _handles_ this scenario. And the way Linux work is that when you use too much memory, Linux will select a victim process and _kill_ it
+to reutilize the memory it uses. The situation is worse because the triggering event that would cause the OOM killer to run and select a victim
+to kill can be a totally unrelated process.
+
+That has serious implications for people building robust software. I can't catch a `SIGKILL` and ignore it, after all. But I could change
+my system behavior to handle memory allocation failure. There are configuration flag that you can use to avoid this behavior, but they 
+have their own side effects and they are global. In other words, they impact the whole system. If you are running a single process, or
+as we are doing now, a library, that isn't going to be useful for you.
+
+The code I'm writing here assume that it is possible to get memory allocation failures and handle them appropriately. We are currently
+allocating directly from the system, but that is likely to change as the implementation proceeds. We'll start managing the memory much
+more closely and will be able to react properly to low memory events.
+****
+
+The last piece of the puzzle for the hash table is the `expand_hash_table` function, which is covered in Listing 3.10. Inside this function you
+can find the reason we use the `state` pointer inside `txn_t`. 
+
+[source]
+.Listing 3.10 - txn.c - Expanding the hash table
+----
+include::./code/txn.c[tags=expand_hash_table]
+----
+
+The code in Listing 3.10 allocates a new bucket buffer, double the size of the old one (plus the size of the `txn_state_t`). If we fail this allocation, we let the 
+caller know about this and they can decide how to handle it. You saw the two behaviors we have for this error mode in Listing 3.9.
+
+We then copy the `txn_state_t` and then copy all the existing values from the existing table to the new one, placing them in their new location. 
+I'm handling an impossible scenario as well (`located` being `false`), just to be on the safe side. The key here is that there really isn't much that is
+interesting here. This function does the work, and that is it.
+
+There is a catch here. We allocate a _new_ buffer for the hash table and the transaction state. But the caller points to the old one. That is why we use
+the `txn_t` that holds a `state` field. The caller can keep using the same value, but we replace the internal state of the system. There are other
+important properties that we result from this behavior:
+
+* The memory is always allocated as a single buffer, aiding locality.
+* Doubling the size of the hash table means that we'll very quickly reach the appropriate size.
+* When we'll start managing memory directly, instead of using `malloc`, we'll be able to reuse this buffer across transaction calls. Meaning that allocations
+  will only need to happen on the _first_ transaction.
+
+=== Committing and closing the transaction
+
+Now that we have a way to keep track of the modified pages in the transaction, the next stage is to figure out how to commit those changes to disk. It turns out 
+that most of the work was already done for us. Listing 3.11 shows how to "commit" a transaction.
+I'm using commit in quotes here because this is not respecting any of the transaction properties, but we are laying down the foundation for actual transactions.
+
+.Listing 3.11 - txn.c - Committing the modified pages to disk
+----
+include::./code/txn.c[tags=txn_commit]
+----
+
+There really isn't much to do in Listing 3.11, to be honest. We scan through the table of modified pages and write them to the file using the `palfs_write_file` function
+we looked at in the previous chapter. If there is an error, we return, and that is about it. Note that we don't have any attempt to for durability, 
+atomicity, etc. 
+
+As we run through the modified pages, we are freeing them. If there is an error, nothing bad will happen, they will get cleaned up properly in `txn_close`. 
+After the transaction is committed, we can close it. Alternatively, we can close the transaction without committing it to as a rollback. Listing 3.12 shows the
+relevant code.
+
+.Listing 3.12 - txn.c - Closing the transaction and freeing resources
+----
+include::./code/txn.c[tags=txn_close]
+----
+
+Closing the transaction in Listing 3.12 means that we iterate over the modified pages and free them, then we are done. 
+
+A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the
+future. Get it working, get it working _right_ and only then get it working fast.
+
+=== Using the transaction API
+
+The last thing that we'll do in this chapter is put everything together. Listing 3.12 shows how we can now write Listing 3.3 using the new API.
+
+[source]
+.Listing 3.12 - main.c - Reading and writing using the paging API
+----
+include::./code/main.c[tags=create_and_use_database]
+----
+<1> Function to read from the first page in a transaction
+<2> Start a transaction and modify a page
+<3> Read before committing the transaction
+<4> Read after transaction commit
+
+In Listing 3.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
+of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to make sure show
+how we are starting to get real features. 
+The reason the code in Listing 3.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
+_copy_ of the page and the act of committing the transaction make it apparent to the next transaction.
+
+=== Unit tests
+
+

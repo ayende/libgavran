@@ -9,6 +9,7 @@
 #include "platform.fs.h"
 #include "platform.mem.h"
 
+// tag::create_and_write_file[]
 #define DB_SIZE (128 * 1024)
 
 static result_t create_and_write_file() {
@@ -46,8 +47,51 @@ static result_t create_and_write_file() {
   // <7>
   printf("%s\n", p.address);
 
-  success();
+  return success();
 }
+// end::create_and_write_file[]
+
+// tag::create_and_use_database[]
+// <1>
+static result_t print_msg(db_t* db) {
+  txn_t read_tx;
+  ensure(txn_create(&db, 0, &read_tx));
+  defer(txn_close, &read_tx);
+  page_t page = {.page_num = 0};
+  ensure(txn_get_page(&read_tx, &page));
+
+  printf("%s\n", page.address);
+  return success();
+}
+
+static result_t create_and_use_database() {
+  size_t size;
+  db_t db;
+  database_options_t options = {.minimum_size = DB_SIZE};
+  ensure(db_create("/db/phones", &options, &db));
+  defer(db_close, &db);
+
+  // <2>
+  txn_t write_tx;
+  ensure(txn_create(&db, 0, &write_tx));
+  defer(txn_close, &write_tx);
+
+  page_t page = {.page_num = 0};
+  ensure(txn_modify_page(&write_tx, &page));
+
+  strncpy(page.address, "Hello Gavran!", PAGE_SIZE);
+
+  // <3>
+  print_msg(&db);
+
+  ensure(txn_commit(&write_tx));
+
+  // <4>
+  print_msg(&db);
+
+  return success();
+}
+// end::create_and_use_database[]
 
 int main() {
   if (!create_and_write_file()) {
