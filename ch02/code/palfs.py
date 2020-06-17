@@ -64,7 +64,7 @@ class Errors:
         size = c_size_t()
         codes_ptr = gvn.errors_get_codes(pointer(size))
         msgs_ptr = gvn.errors_get_messages(pointer(size))
-        return [(codes_ptr[i], None if msgs_ptr[i] is None else str(msgs_ptr[i])) for i in range(size.value)]
+        return [(codes_ptr[i], None if msgs_ptr[i] is None else msgs_ptr[i].decode('utf-8')) for i in range(size.value)]
 
     @staticmethod
     def get_codes():
@@ -77,7 +77,7 @@ class Errors:
     def get_messages():
         size = c_size_t()
         msgs_ptr = gvn.errors_get_messages(pointer(size))
-        msgs = [str(msgs_ptr[i]) for i in range(size.value)]
+        msgs = [msgs_ptr[i].decode('utf-8') for i in range(size.value)]
         return msgs
 
     @staticmethod
@@ -123,7 +123,7 @@ class PalFS:
         return size.value
 
     def name(self):
-        return str(gvn.palfs_get_filename(self.handle))
+        return gvn.palfs_get_filename(self.handle).decode('utf-8')
 
     def set_size(self, len):
         if not gvn.palfs_set_file_minsize(self.handle, c_long(len)):

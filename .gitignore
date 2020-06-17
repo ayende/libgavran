@@ -6,3 +6,4 @@ build
 __pycache__
 /book.html
 /book.pdf
+/output

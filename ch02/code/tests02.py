@@ -40,7 +40,7 @@ def test_can_write_and_read_memory():
         file.set_size(1024)
         file.write(0, b'Hello Gavran\0')
         with file.map(0, 1024) as ptr:
-            s = ctypes.string_at(ptr)
+            s = ctypes.string_at(ptr).decode('utf-8')
             assert s == "Hello Gavran"
 
 def test_will_get_error_on_opening_a_dir():
