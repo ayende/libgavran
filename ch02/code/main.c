@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "defer.h"
 #include "errors.h"

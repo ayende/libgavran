@@ -43,5 +43,3 @@ static inline void defer_free(struct cancel_defer* cd) {
   void enable_semicolon_after_macro_##__LINE__(void)
 
 #define enable_defer(func) enable_defer_imp(func, 0, (void*), "%p")
-
-enable_defer_imp(close, -1, *(int*), "%d");

@@ -12,9 +12,10 @@ do
     cd $DIR_CODE
     echo "Building $DIR_CODE"
 
+    make clean
     make
 
-    pytest *.py
+    ./test.sh
 
     pwd
     cd $CUR

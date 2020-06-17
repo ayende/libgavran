@@ -15,6 +15,8 @@
 #include "errors.h"
 #include "platform.fs.h"
 
+enable_defer_imp(close, -1, *(int*), "%d");
+
 // tag::handle_impl[]
 struct pal_file_handle {
   int fd;

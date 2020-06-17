@@ -8,13 +8,7 @@
 #include "defer.h"
 #include "errors.h"
 
-void defer_close(struct cancel_defer* cd) {
-  if (cd->cancelled && *cd->cancelled) return;
-  int* fdp = cd->target;
-  if (close(*fdp) == -1) {
-    errors_push(errno, msg("Unable to close file"), with(*fdp, "%d"));
-  }
-}
+enable_defer_imp(close, -1, *(int*), "%d");
 
 static result_t read_all(int fd, size_t size, void* buffer) {
   size_t read_bytes = 0;
