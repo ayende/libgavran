@@ -147,6 +147,7 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
   txn_state_t *state = *state_ptr;
   size_t number_of_buckets = get_number_of_buckets(state);
   size_t starting_pos = (size_t)(page_num % number_of_buckets);
+  bool placed_successfully = false;
   // we use linear probing to find a value in case of collisions
   for (size_t i = 0; i < number_of_buckets; i++) {
     size_t index = (i + starting_pos) % number_of_buckets;
@@ -159,37 +160,32 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
     }
 
     if (!state->entries[index].address) {
-      size_t max_pages = (number_of_buckets * 3 / 4);
+      state->entries[index].page_num = page_num;
+      memcpy(&state->entries[index], page, sizeof(page_t));
+      state->modified_pages++;
+
       // check the load factor
+      size_t max_pages = (number_of_buckets * 3 / 4);
       if (state->modified_pages + 1 < max_pages) {
-        state->modified_pages++;
-        state->entries[index].page_num = page_num;
-        memcpy(&state->entries[index], page, sizeof(page_t));
         return success();
       }
-      switch (expand_hash_table(state_ptr, number_of_buckets)) {
-        case hash_resize_success:
-          // try again, now we'll have enough room
-          return allocate_entry_in_tx(state_ptr, page);
-        case hash_resize_err_no_mem:
-          // we'll accept it here and just have higher
-          // load factor
-          break;
-        case hash_resize_err_failure:
-          failed(
-              EINVAL,
-              msg("Failed to add page to the transaction hash table"),
-              with(page_num, "%lu"));
-          return false;
-      }
+      placed_successfully = true;
+      break;
     }
   }
 
   switch (expand_hash_table(state_ptr, number_of_buckets)) {
     case hash_resize_success:
-      // try again, now we'll have enough room
+      if (placed_successfully) {
+        return success();
+      }
+      // try again after expansion
       return allocate_entry_in_tx(state_ptr, page);
     case hash_resize_err_no_mem:
+      // we already placed the current value, so can ignore
+      if (placed_successfully) {
+        return success();
+      }
       // we are at 100% capacity, can't recover, will error now
       failed(ENOMEM,
              msg("Can't allocate to add page to the "

@@ -175,6 +175,14 @@ Look at Listing 3.4, which shows the API we are going to expose for our users.
 ----
 include::./code/db.h[tags=tx_api]
 ----
+<1> Forward declaration of opaque data types holding the state that the engine will need to manage its work.
+<2> The publicly defined structs that users will use to hold the data about databases and transactions.
+<3> The database options as strongly typed values. Currently very minimal.
+<4> Database create and close APIs.
+<5> Enabling `defer` support for closing a database.
+<6> Transaction create and close APIs.
+<7> Enabling `defer` support for closing a transaction.
+<8> Page modifications API.
 
 The idea in Listing 3.4 is that we want to do _everything_ within the scope of a transaction. Note that if you want to get or modify a page, you must provide a 
 valid transaction to do so. The functions are also named `txn_low_get_page`, the `low` part of the name indicates that they are low level interface. I don't 
@@ -204,12 +212,14 @@ This is where we start to put together the skeleton of Gavran. Let's take a look
 include::./code/db.c[]
 ----
 
-A `db_t` is a simple structure that holds a single opaque pointer. I'm using the same approach in `txn_t` as well and it means that I have both encapsulation as well
+I'm sorry for the code dump, but I assume that it is best to show everything as a single unit rather than tease and reveal them one piece at a time. 
+
+A `db_t` is a simple structure that holds a single opaque pointer. I'm using the same approach in `txn_t` as well and it means that I have encapsulation as well
 as a way to modify the state of the object without needing to change the value that holds it. We'll see how useful that is when we get to building transactions.
 
-The `struct database_state` itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), the file handle
-and the memory map result. As times goes by, we'll see more and more data being managed at the database level, but it is important to start with the proper structure
-now, to avoid extra work later.
+The `struct database_state` (shown in Listing 3.1) itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), 
+the file handle and the memory map result. As times goes by, we'll see more and more data being managed at the database level, but it is important to start with the
+proper structure now, to avoid extra work later.
 
 We check and validate the options, then we use our existing PAL file system API to create a file, set it to the right size and map it. With the use of `ensure` and
 `try_defer`, the entire thing reads as if we had no error handling. Note that we use multiple `try_defer` statements to setup resource cleanup in the event of a 
@@ -229,10 +239,10 @@ you and eventually commit them.
 The overall structure can be seen in Figure 4. 
 
 .The layout of a transaction with 2 modified pages
-images::{img-src}/img3-3.png
+image::{img-src}/img3-3.png[]
 
 Using the Copy On Write mode tha we discussed earlier, whenever we want to modify a page, we'll copy it to the side and make the modifications. Once all the changes 
-in the transaction are completed, we'll persist them all at once. Consider the implications of such aa system. How would a rollback look in this case? 
+in the transaction are completed, we'll persist them all at once. Consider the implications of such a system. How would a rollback look in this case? 
 Simply free the copies, no one else had any access to them, so nothing needs to be done. 
 
 As for commit, once all the changes has been written to the file, we are done. We saw in the previous chapter that it takes significant effort to make sure that a
@@ -278,11 +288,13 @@ The good news here is that this hash table only need to support `put` and `get`,
 
 Given that the readers of this book are likely interested, I'm going to go for an open addressing with linear probing model. And one of the 
 key features that I care about is avoiding the usual pointer caching that you'll typically see in hash tables. That is why the actual 
-`entries` buffer is placed after the `txn_state_t`. Data locality. 
+`entries` buffer is placed after the `txn_state_t`. Data locality is a huge performance boost and I want some of that.
 
 I'm using the actual values (`page_t`) as the hash table entries, since they already contain their key. That means that I have to deal with no 
 extra space and the cost of lookup is likely very small. That might seems strange if you are coming from a language where you'll have more
-separation between the data containers and the values. `Dictionary<K,V>` is a prime example of that. You have the container data and the data
+separation between the data containers and the values. 
+
+`Dictionary<K,V>` is a prime example of that. You have the container data and the data
 held by the container and they can live very far apart. That is not the case here, we always keep them very close by.
 ====
 
@@ -302,13 +314,13 @@ then register it in the hash table.
 This is called Copy On Write (COW) and it will serve as the basis for implementing one of the core ACID properties, Isolation.
 
 .Memory alignment
-====
-In Listing 3.5 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
+****
+In Listing 3.7 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
 to give me 8KB buffer with 8KB alignment.
 
 This is a match to how the operating system manage pages in memory (on 4KB alignment). It means that for the rest of my system, I can safely assume that 
 the page buffer is properly align for anything that I want to do. This is important for performance and correctness reasons, especially outside of the x64/x86 world.
-====
+****
 
 === Managing the transaction state with a hash table
 
@@ -340,12 +352,10 @@ There are a few other things to consider for this case:
   is free. In other words, the worst case scenario for this sort of hash table is having to scan through all the buckets. 
 * This is where the load factor comes into play. Given that the page numbers are likely to cluster around specific values, the
   empty buckets that remain act as backstop to avoid iterating through all the buckets. 
-* A `page_hash_entry_t` is 16 bytes in size of x64, which means that we can fit 4 of them on a cache line. A sequential reading
-  through the buckets is likely to generate highly predictable access pattern which can be optimized by the compiler and CPU
-  significantly. 
 
-Now that we know how to get an entry from the hash table, let's look at the other side, how can we put one in? This is the more complex
-operation because we may need to resize the hash table if the load factor grows big enough. The details are in Listing 3.9.
+Now that we know how to get an entry from the hash table, let's look at the other side, how can we put a value in the table?
+This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. 
+The details are in Listing 3.9.
 
 [source]
 .Listing 3.9 - txn.c - Adding an entry to the hash table, potentially resizing it
@@ -432,8 +442,15 @@ Checking Listing 3.12, where we show how to get a page for read only operations.
 [source]
 .Listing 3.12 - txn.c - Getting a page from the transaction for read only purposes
 ----
-include::./code/txn.c[txn_get_page]
+include::./code/txn.c[tags=txn_get_page]
 ----
+
+This code is built so if you modified the page and then another part got the same page in the same transaction, you'll get the _modified_ page, not the 
+original one. That allows us to a unified view on the data inside a transaction.
+
+On the other hand, a sequence of `txn_get_page` (get the original), `txn_modify_page` (copy and create a new one) and then `txn_get_page` is something
+that you need to be aware of. The first and last `txn_get_page` will return _different_ values. I haven't found this a real issue in practice, but something
+that you might want to keep in mind.
 
 === Committing and closing the transaction
 
@@ -479,11 +496,22 @@ include::./code/main.c[tags=create_and_use_database]
 <4> Read after transaction commit
 
 In Listing 3.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
-of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to make sure show
+of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to show
 how we are starting to get real features. 
 The reason the code in Listing 3.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
 _copy_ of the page and the act of committing the transaction make it apparent to the next transaction.
 
 === Unit tests
 
+Finally, before we close this chapter, we need to make sure that the software _works_. 
+
+[source,python]
+.Listing 3.13 - Unit testing the transaction API
+----
 include::../pyapi/tests03.py[]
+----
+
+The actual Python API I'm using here is not mirroring the C API directly, mind you. I'm trying to get a more realistic API that wraps some C code. It also
+makes for a far simpler system to setup more complex scenarios, which is where we are heading.
+
+Our next topic is going to be... managing the pages and disk space.

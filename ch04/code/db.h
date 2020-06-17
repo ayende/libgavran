@@ -18,14 +18,11 @@ typedef struct page {
 // end::paging_api[]
 
 // tag::tx_api[]
+// <1>
 typedef struct database_state db_state_t;
-
 typedef struct transaction_state txn_state_t;
 
-typedef struct database_options {
-  uint64_t minimum_size;
-} database_options_t;
-
+// <2>
 typedef struct database {
   db_state_t* state;
 } db_t;
@@ -34,19 +31,28 @@ typedef struct transaction {
   txn_state_t* state;
 } txn_t;
 
+// <3>
+typedef struct database_options {
+  uint64_t minimum_size;
+} database_options_t;
+
+// <4>
 result_t db_create(const char* filename, database_options_t* options,
                    db_t* db);
 
 result_t db_close(db_t* db);
+// <5>
 enable_defer(db_close);
 
+// <6>
 result_t txn_create(db_t* db, uint32_t flags, txn_t* tx);
 
 result_t txn_close(txn_t* tx);
+// <7>
 enable_defer(txn_close);
 
 result_t txn_commit(txn_t* tx);
-
+// <8>
 result_t txn_get_page(txn_t* tx, page_t* page);
 result_t txn_modify_page(txn_t* tx, page_t* page);
 // end::tx_api[]
