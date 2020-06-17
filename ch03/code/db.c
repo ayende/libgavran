@@ -1,10 +1,8 @@
-#include "db.h"
-
 #include <errno.h>
 #include <string.h>
 
+#include "db.h"
 #include "errors.h"
-#include "pal.h"
 #include "platform.fs.h"
 
 struct database_state {
@@ -14,6 +12,7 @@ struct database_state {
 };
 
 static result_t handle_newly_opened_database(db_t *db) {
+  (void)db;
   // for now, nothing to do here.
   return success();
 }
@@ -33,7 +32,7 @@ static result_t validate_options(database_options_t *options) {
            with(PAGE_SIZE, "%d"));
   }
 
-  return true;
+  return success();
 }
 
 result_t db_create(const char *path, database_options_t *options,
@@ -50,7 +49,7 @@ result_t db_create(const char *path, database_options_t *options,
   }
 
   size_t db_state_size;
-  ensure(get_file_handle_size(path, &db_state_size));
+  ensure(palfs_compute_handle_size(path, &db_state_size));
   db_state_size += sizeof(db_state_t);
 
   ptr = calloc(1, db_state_size);
@@ -75,5 +74,27 @@ result_t db_create(const char *path, database_options_t *options,
   ensure(handle_newly_opened_database(db));
 
   done = 1;  // no need to do resource cleanup
-  return true;
+  return success();
+}
+
+result_t db_close(db_t *db) {
+  if (!db->state) return success();  // double close?
+
+  // even if we failed, need to handle
+  // disposal of rest of the system
+  bool failure = !palfs_unmap(&db->state->mmap);
+  failure |= !palfs_close_file(db->state->handle);
+
+  if (failure) {
+    errors_push(EIO, msg("Unable to properly close the database"),
+                with(palfs_get_filename(db->state->handle), "%s"));
+  }
+
+  free(db->state);
+  db->state = 0;
+
+  if (failure) {
+    return failure_code();
+  }
+  return success();
 }

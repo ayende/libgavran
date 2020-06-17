@@ -10,7 +10,7 @@ typedef struct operation_result op_result_t;
 
 #define failed(CODE, ...)           \
   errors_push(CODE, ##__VA_ARGS__); \
-  return (op_result_t*)(void*)0
+  return failure_code()
 
 #define ensure(CALL, ...)                        \
   do {                                           \
@@ -23,6 +23,8 @@ typedef struct operation_result op_result_t;
 
 #define with(EXPR, FORMAT) \
   errors_append_message(", " #EXPR " = " FORMAT, EXPR)
+
+#define failure_code() (op_result_t*)(void*) 0
 
 #define success() (op_result_t*)(void*) 1
 

@@ -4,24 +4,32 @@
 #include "db.h"
 #include "errors.h"
 #include "impl.h"
-#include "pal.h"
 #include "platform.fs.h"
 #include "platform.mem.h"
 
-// tag::transaction_state[]
-typedef struct page_hash_entry {
-  uint64_t page_num;
-  void *address;
-} page_hash_entry_t;
+// tag::lookup_entry_in_tx[]
+#define get_number_of_buckets(state) \
+  ((state->allocated_size - sizeof(txn_state_t)) / sizeof(page_t))
 
-struct transaction_state {
-  db_state_t *db;
-  size_t allocated_size;
-  uint32_t flags;
-  uint32_t modified_pages;
-  page_hash_entry_t entries[];
-};
-// end::transaction_state[]
+static bool lookup_entry_in_tx(txn_state_t *state, page_t *page) {
+  uint64_t page_num = page->page_num;
+  size_t number_of_buckets = get_number_of_buckets(state);
+  size_t starting_pos = (size_t)(page_num % number_of_buckets);
+  // we use linear probing to find a value in case of collisions
+  for (size_t i = 0; i < number_of_buckets; i++) {
+    size_t index = (i + starting_pos) % number_of_buckets;
+    if (!state->entries[index].address) {
+      // empty value, so there is no match
+      return false;
+    }
+    if (state->entries[index].page_num == page_num) {
+      memcpy(page, &state->entries[index], sizeof(page_t));
+      return true;
+    }
+  }
+  return false;
+}
+// end::lookup_entry_in_tx[]
 
 // tag::txn_commit[]
 result_t txn_commit(txn_t *tx) {
@@ -30,18 +38,15 @@ result_t txn_commit(txn_t *tx) {
   size_t number_of_buckets = get_number_of_buckets(state);
 
   for (size_t i = 0; i < number_of_buckets; i++) {
-    page_hash_entry_t *entry = &state->entries[i];
+    page_t *entry = &state->entries[i];
     if (!entry->address) continue;
 
-    ensure(palfs_write_file(state->db->handle,
-                            entry->page_num * PAGE_SIZE,
-                            entry->address, PAGE_SIZE),
-           msg("Unable to write page"), with(entry->page_num, "%lu"));
+    ensure(pages_write(state->db, entry));
 
     free(entry->address);
     entry->address = 0;
   }
-  return true;
+  return success();
 }
 // end::txn_commit[]
 
@@ -51,7 +56,7 @@ result_t txn_close(txn_t *tx) {
   txn_state_t *state = tx->state;
   size_t number_of_buckets = get_number_of_buckets(state);
   for (size_t i = 0; i < number_of_buckets; i++) {
-    page_hash_entry_t *entry = &state->entries[i];
+    page_t *entry = &state->entries[i];
     if (!entry->address) continue;
 
     free(entry->address);
@@ -69,46 +74,19 @@ result_t txn_close(txn_t *tx) {
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
 
-  size_t initial_size =
-      sizeof(txn_state_t) + sizeof(page_hash_entry_t) * 8;
+  size_t initial_size = sizeof(txn_state_t) + sizeof(page_t) * 8;
   txn_state_t *state = calloc(1, initial_size);
-  failed(!state,
+  ensure(state,
          msg("Unable to allocate memory for transaction state"));
 
-  memset(state, 0, initial_size);
   state->allocated_size = initial_size;
   state->flags = flags;
   state->db = db->state;
 
   tx->state = state;
-  return true;
+  return success();
 }
 // end::txn_create[]
-
-// tag::lookup_entry_in_tx[]
-#define get_number_of_buckets(state)               \
-  ((state->allocated_size - sizeof(txn_state_t)) / \
-   sizeof(page_hash_entry_t))
-
-static bool lookup_entry_in_tx(txn_state_t *state, uint64_t page_num,
-                               page_hash_entry_t **entry) {
-  size_t number_of_buckets = get_number_of_buckets(state);
-  size_t starting_pos = (size_t)(page_num % number_of_buckets);
-  // we use linear probing to find a value in case of collisions
-  for (size_t i = 0; i < number_of_buckets; i++) {
-    size_t index = (i + starting_pos) % number_of_buckets;
-    if (!state->entries[index].address) {
-      // empty value, so there is no match
-      return false;
-    }
-    if (state->entries[index].page_num == page_num) {
-      *entry = &state->entries[index];
-      return true;
-    }
-  }
-  return false;
-}
-// end::lookup_entry_in_tx[]
 
 enum hash_resize_status {
   hash_resize_success,
@@ -120,8 +98,8 @@ enum hash_resize_status {
 static enum hash_resize_status expand_hash_table(
     txn_state_t **state_ptr, size_t number_of_buckets) {
   size_t new_number_of_buckets = number_of_buckets * 2;
-  size_t new_size = sizeof(txn_state_t) + (new_number_of_buckets *
-                                           sizeof(page_hash_entry_t));
+  size_t new_size =
+      sizeof(txn_state_t) + (new_number_of_buckets * sizeof(page_t));
   txn_state_t *state = *state_ptr;
   txn_state_t *new_state = calloc(1, new_size);
   if (!new_state) {
@@ -134,7 +112,7 @@ static enum hash_resize_status expand_hash_table(
   new_state->allocated_size = new_size;
 
   for (size_t i = 0; i < number_of_buckets; i++) {
-    page_hash_entry_t *entry = &state->entries[i];
+    page_t *entry = &state->entries[i];
     if (!entry->address) continue;
     size_t starting_pos = entry->page_num % new_number_of_buckets;
     bool located = false;
@@ -147,7 +125,7 @@ static enum hash_resize_status expand_hash_table(
       }
     }
     if (!located) {
-      push_error(
+      errors_push(
           EINVAL,
           msg("Failed to find spot for page after hash table resize"),
           with(entry->page_num, "%lu"));
@@ -164,8 +142,8 @@ static enum hash_resize_status expand_hash_table(
 
 // tag::allocate_entry_in_tx[]
 static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
-                                     uint64_t page_num,
-                                     page_hash_entry_t **entry) {
+                                     page_t *page) {
+  uint64_t page_num = page->page_num;
   txn_state_t *state = *state_ptr;
   size_t number_of_buckets = get_number_of_buckets(state);
   size_t starting_pos = (size_t)(page_num % number_of_buckets);
@@ -177,7 +155,7 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
       failed(EINVAL,
              msg("Attempted to allocate entry for page "
                  "which already exist in the table"),
-             with(page_num, "%s"));
+             with(page_num, "%lu"));
     }
 
     if (!state->entries[index].address) {
@@ -186,13 +164,13 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
       if (state->modified_pages + 1 < max_pages) {
         state->modified_pages++;
         state->entries[index].page_num = page_num;
-        *entry = &state->entries[index];
+        memcpy(&state->entries[index], page, sizeof(page_t));
         return success();
       }
       switch (expand_hash_table(state_ptr, number_of_buckets)) {
         case hash_resize_success:
           // try again, now we'll have enough room
-          return allocate_entry_in_tx(state_ptr, page_num, entry);
+          return allocate_entry_in_tx(state_ptr, page);
         case hash_resize_err_no_mem:
           // we'll accept it here and just have higher
           // load factor
@@ -210,7 +188,7 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
   switch (expand_hash_table(state_ptr, number_of_buckets)) {
     case hash_resize_success:
       // try again, now we'll have enough room
-      return allocate_entry_in_tx(state_ptr, page_num, entry);
+      return allocate_entry_in_tx(state_ptr, page);
     case hash_resize_err_no_mem:
       // we are at 100% capacity, can't recover, will error now
       failed(ENOMEM,
@@ -219,9 +197,9 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
              with(page_num, "%lu"));
     case hash_resize_err_failure:
       failed(EINVAL,
-             msg("Failed to add page_header %lu to the transaction "
+             msg("Failed to add page to the transaction "
                  "hash table"),
-             with(page_num, "%s"));
+             with(page_num, "%lu"));
   }
 }
 // end::allocate_entry_in_tx[]
@@ -230,34 +208,38 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr,
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
-  page_hash_entry_t *entry;
-  if (lookup_entry_in_tx(tx->state, page->page_num, &entry)) {
-    page->address = entry->address;
-    return true;
+  if (lookup_entry_in_tx(tx->state, page)) {
+    return success();
   }
 
-  uint64_t offset = page->page_num * PAGE_SIZE;
-  if (offset + PAGE_SIZE > tx->state->db->mmap.size) {
-    failed(ERANGE,
-           msg("Requests for a page that is outside of the bounds of "
-               "the file"),
-           with(page->page_num, "%lu"),
-           with(tx->state->db->mmap.size, "%lu"));
-  }
-  void *original = ((char *)tx->state->db->mmap.address + offset);
-  void *modified;
-  ensure(palmem_allocate_pages(1, &modified),
+  page_t original = {.page_num = page->page_num};
+  ensure(pages_get(tx->state->db, &original));
+
+  ensure(palmem_allocate_pages(1, &page->address),
          msg("Unable to allocate memory for a COW page"));
-  size_t cancel_defer = 0;
-  try_defer(free, modified, cancel_defer);
-  memcpy(modified, original, PAGE_SIZE);
 
-  ensure(allocate_entry_in_tx(&tx->state, page->page_num, &entry),
+  size_t cancel_defer = 0;
+  try_defer(free, page->address, cancel_defer);
+  memcpy(page->address, original.address, PAGE_SIZE);
+
+  ensure(allocate_entry_in_tx(&tx->state, page),
          msg("Failed to allocate entry"));
 
-  entry->address = modified;
-  page->address = modified;
   cancel_defer = 1;
-  return true;
+  return success();
 }
 // end::txn_modify_page[]
+
+// tag::txn_get_page[]
+result_t txn_get_page(txn_t *tx, page_t *page) {
+  errors_assert_empty();
+
+  if (lookup_entry_in_tx(tx->state, page)) {
+    return success();
+  }
+
+  ensure(pages_get(tx->state->db, page));
+
+  return success();
+}
+// end::txn_get_page[]

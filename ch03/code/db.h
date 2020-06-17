@@ -1,7 +1,19 @@
 #pragma once
 
-#include "error.h"
-#include "paging.h"
+#include <stdint.h>
+#include <unistd.h>
+
+#include "defer.h"
+#include "errors.h"
+
+#define PAGE_SIZE 8192
+#define PAGE_ALIGNMENT 4096
+
+typedef struct page {
+  void* address;
+  uint64_t page_num;
+  size_t num_of_pages;
+} page_t;
 
 typedef struct database_state db_state_t;
 
@@ -23,11 +35,18 @@ result_t db_create(const char* filename, database_options_t* options,
                    db_t* db);
 
 result_t db_close(db_t* db);
+enable_defer(db_close);
 
 result_t txn_create(db_t* db, uint32_t flags, txn_t* tx);
 
 result_t txn_close(txn_t* tx);
+enable_defer(txn_close);
+
 result_t txn_commit(txn_t* tx);
 
 result_t txn_get_page(txn_t* tx, page_t* page);
 result_t txn_modify_page(txn_t* tx, page_t* page);
+
+result_t pages_get(db_state_t* db, page_t* p);
+
+result_t pages_write(db_state_t* db, page_t* p);

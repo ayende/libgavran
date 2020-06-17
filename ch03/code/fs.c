@@ -44,14 +44,6 @@ const char* palfs_get_filename(file_handle_t* handle) {
 }
 // end::handle_impl[]
 
-void defer_close(struct cancel_defer* cd) {
-  if (cd->cancelled && *cd->cancelled) return;
-  int* fdp = cd->target;
-  if (close(*fdp) == -1) {
-    errors_push(errno, msg("Failed to close file"), with(*fdp, "%i"));
-  }
-}
-
 // tag::fsync_parent_directory[]
 static result_t fsync_parent_directory(char* file) {
   char* last = strrchr(file, '/');
