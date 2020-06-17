@@ -1,470 +1,342 @@
-== At the file system level
 
-Files are a wonderful abstraction, a stream of bytes that reside under name, sorted in a hierarchy. Simple enough that a child can use it, powerful enough to be
-the motto of an the entire set of operating systems. "Everything is a file" is one of the defining features of Unix, but it is also an abstraction, and as such,
-it is https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/[leaky].
+== Errors handling and other criticial infrastructure
 
-When building a storage engine, we need to have a pretty good idea about how to manage files. As it turns out, there is a lot of things that are
-https://yakking.branchable.com/posts/falsehoods-programmers-believe-about-file-paths/[just wrong] about how we think about files.
-The https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-pillai.pdf["All File Systems Are Not Created Equal: On the Complexity of Crafting Crash-Consistent
-Applications"] paper tested ten applications (from SQLite to Git to PostgreSQL)
-to find whatever they are properly writing to files. This paper is usually referred to as the ALICE (Application-Level Intelligent Crash Explorer) paper, after
-the name of the tool created to explore failures in file system usage.
+I want to first illustrate that with the sample code in Listing 1.1 and then discuss exactly what is going on here. In Listing 1.1 we have a function that
+reads 4 bytes from a file and convert these bytes into a string format. The task itself is nonsensical, meant to just illustrate a point. There are a bunch 
+of things that can go wrong in this kind of code. We may fail to open the file, or allocate memory. We may fail to read from the file, or not read enough, 
+etc. We need to remember to always close the file descriptor and we should always free the allocated buffer on error, but not if the function 
+completed successfully.
 
-There are a _lot_ of details that you need to take into account. For example, you may consider that changing a file and then calling `fsync()` will ensure that
-the changes to the file are made durable, and that is correct, if you haven't changed the file size. Because while the file data has been flushed, the file
-_metadata_ was not. Which may mean some fun times in the future with the debugger.
-
-.Testing actual behavior is _hard_, and the real world isn't cooperative
-****
-If you want to build a reliable storage engine, you are going to need to develop some paranoid tendencies. Because the fact that the documentation
-says something is possible or not doesn't translate to how things really are. When you care about reliability, the file system abstraction leaks
-badly. And it is hard to find a way around that.
-
-You can simulate some errors, but the sheer variety and scope involved makes thing hard. Especially because the error that hit you may come not from
-the code that you are using but several layers down. If you test errors from the file system, but the _file system_ didn't check for errors from
-the block device you may end up in a funny state. And in 99.999% of the cases, it won't matter, but you are _going_ to hit that one in a billion
-chance of an actual error at just the wrong time and see a broken system.
-
-There have been a number of studies made on the topic and I think that https://danluu.com/filesystem-errors/[Daniel Luu's summary] of the topic
-lays a lot of the issues on the table. There is not a _single_ storage hardware solution that doesn't have failure conditions that can cause
-data corruption. And file systems don't always handle it properly.
-
-To a large degree, we make certain assumptions about the system, then we verify them constantly. The less we demand from the bottom layers, the
-more reliable we can make our system.
-****
-
-LWN has some good articles on the topic of making sure that the https://lwn.net/Articles/457667/[data actually reach the disk] and
-the https://lwn.net/Articles/351422/[complexities involved]. The situation is made more complex by the fact that this is depend on what OS and file system
- you use and even what _mode_ you used to mount a particular drive. As the author of a storage engine, you have to deal with these details in either of two ways:
-
-* Specify explicitly the support configuration, raise hell if user is attempting to use on non supported configuration.
-* Make it work across the board. Plan for failure and when it happens, have the facilities in place to recover from it.
-
-Because working with files is such a huge complex mess, and because it is _different_ across operating systems, we'll hide this complexity behind a
-platform abstraction layer (PAL). Listing 2.1 shows the core functions that the PAL expose.
-
-[source]
-.Listing 2.1 - platform.fs.h - The file system interface that we'll consume for our storage engine
-----
-include::./code/platform.fs.h[]
-----
-<1> The `mmap_args` allows us to pass capture the required args for `mmap`, `munmap` and allow us to call `defer` easily on mmap ranges.
-<2> To enable `defer` and `try_defer` on `palfs_close_file` and `palfs_unmap`.
-
-We define an opaque type `file_handle_t`, which is how we'll communicate about files with the PAL. If you are used to C APIs, you might notice something
-interesting, the API shown in Listing 2.1 is not doing any memory allocations. The API can fail (invalid file name, wrong permissions, etc), but it won't
-have to deal with memory issues. Instead, we ask that the _caller_ will provide us with the memory for the `file_handle_t`. Typical usage of the API
-is shown in Listing 2.2.
-
-[source]
-.Listing 2.2 - Using the file API to create a file of minimum size
-----
-result_t create_and_set_file() {
-  size_t size;
-  ensure(palfs_compute_handle_size("/db/phones", &size));
-
-  file_handle_t* handle = malloc(size);
-  ensure(handle);
-  defer(free, handle);
-
-  ensure(palfs_create_file("/db/phones", handle));
-  defer(palfs_close_file, handle);
-
-  ensure(palfs_set_file_minsize(handle, 128*1024));
-
-  return success();
-}
-----
-
-The code in Listing 2.2 should ensure that at the end of the way, we have a file that has a minimum size of 128KB which will retain its size even in the case of an error or
-a system crash. That sounds easy enough to do in theory, but require some dancing around to get to it. Right now I'm going to focus on Linux as the implementation
-system, but we'll get to other systems down the line.
-
-.Reflections on low level API and system design
-****
-The API in Listing 2.1 is interesting is several ways. You can see that we are exposing some operations (create, set size, mmap) but totally ignoring others.
-For example, we don't have any way of _reading_ data through the API.
-
-I mentioned that I'm going to showcase the road that was taken. Gavran as a storage engine is going to be based on memory mapped memory in lieu of manual
-`read` calls. We'll discuss exactly how that plays into the design of the storage engine in a bit.
-
-Are there any other pieces that are missing from the API that you can see?
-****
-
-=== The file handle
-
-We defined the `file_handle_t` as an opaque type in the header, now let's see how we actually work with this on Linux. Listing 2.3 shows the implementation details.
-
-[source]
-.Listing 2.3 - fs.c - The file handle definition and usage
-----
-include::./code/fs.c[tags=handle_impl]
-----
-
-It turns out that `pal_file_handle`, which is `typedef`-ed to `file_handle_t` is a simple struct to hold a file descriptor (`int`). We use an opaque type like that
-because on Windows, for example, the file handle is a `HANDLE` and isn't equal in size to `int`.
-
-We are also doing some strange work to compute the size of the handle, how come it isn't always `4`? This is because the `filename` field is defined as zero length
-value and thus points _past the end of the handle_.  Take a look at Figure 2, which shows the structure of `file_handle_t` implementation on Linux.
-
-.The layout of `file_handle_t` in memory on Linux
-image::{img-src}/img2-1.png[]
-
-
-[WARNING]
-.Beware the paths
-====
-In Listing 2.3, I'm requiring that the provided path will be an absolute path. Why make this requirement?
-I'm trying to avoid doing things that we don't need to inside the storage engine. The caller can easily provide the full path, and it turns out that this
-matters.
-
-Let's assume that we accept the path "db/phones", which is a relative path. It gets resolved based on the current directory, as expected. However, our
-storage engine is meant to be _embedded_. What will happen if the parent application decide to change its output directory? That will mean that our
-relative file name will point to a _different_ location, which is going to cause unforeseen issues. Better to stop this early.
-
-That is leaving aside all the sheer complexity that are paths in the first place. There are _many_ vulnerabilities and issue that arose because of
-improper path handling. By requiring the the path will be rooted, I'm avoiding about 60% of them.
-====
-
-
-Hopefully Figure 2 gives you a more intuitive manner of how we put the name of the file immediately past the `file_handle_t`
-value. I'm doing it this way to avoid another pointer field or a separate allocation. All I need here is just one buffer and we can put everything inside
-properly.
-
-=== Creating a file
-
-One of my primary goals is to build the right primitives that we need and get as far away from the file system as I can get. These primitives will abstract
-the different nature of file and operating systems. We'll get to the point where we have a small set of actions that we can perform and then build the rest
-of the system on top of that.
+That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 1.1 shows a function that has to deal with coordination across merely two
+resources. If we have to deal with more, the situation worsen. Take a look at the code and then we'll break down everything that is new here.
 
 [IMPORTANT]
-.Using a block device instead of bothering with the file system
+.Error handling & resource utilization are critical infrastructures
 ====
-Technically speaking, the model that I intend to use will work just as well for raw block devices as it would do for files. Indeed, there are some
-real benefits of bypassing the file system for a storage engine. What I most want from a file system as a storage engine is that it will
-_get out of my way_. There are also some performance benefits, avoiding the need for data fragmentation, overhead of the file system, etc.
-
-That said, working with files is _ever so much_ easier. Yes, you can use commands such as `dd` to move data between blocks and files, but that
-tend to be much more awkward than if the data reside in a file. In fact, we are going to try hard to get to the point where we have as few files
-as we can get away with and do all our work internally inside our file.
-
-That would allow us to switch to a block device at a later point in time, but having direct access to the file is just too convenient to give up,
-leaving aside the other issue. A database server can expect to have the right kind of permissions to allow opening a raw block device. But an
-embedded storage engine needs to deal with limited rights on behalf of its processes.
+We expect to write non trivial amount of code in this project and we'll do a lot of low level work here. In order to ensure that we have a chance of getting
+to the end, we _must_ have a good way to handle errors and manage resources. 
+That is why the very first action I'm making in this book is explaining all about _error handling_. Even before we actually thought about what we'll be 
+building!
 ====
 
-The act of creating a file is a non trivial operation, since we need to make sure that the file creation is atomic and durable. Beyond what was already
-mentioned, you need to take into account users who pass invalid values (file name containing `/`, for example), _all_ the intricacies of soft and
-hard links, size quotas, etc. https://lwn.net/Articles/686789/[The LWN post] about this will probably turn your hair gray.
-To keep the code size small and not overburden ourself with validation code, I'm going to state that I'm trusting the
-callers of the API to have already done the validation of the data. As you can see in Listing 2.3, we are only doing minimal validations to prevent
-accidents, not trying to protect against malicious input.
+Listing 1.1 shows a _lot_ of stuff that won't show up in a C tutorial. I have marked on the side all the interesting tidbits, so we can discuss them at
+length.
 
-On Linux, once you opened a file, you no longer have access to its name. It may have multiple names (hard links) or non (anonymous or have been deleted).
-As such, the `palfs_compute_handle_size` requests enough space to store the name that the called passed us as part of the same allocation of `file_handle_t`.
+
+[source]
+.Listing 1.1: Mostly automatic handling of resource usage and error handling in C
+----
+include::./code/main.c[tags=read_int_to_str_buffer]
+----
+<1> Required (once) to enable defer calls on `close`. 
+
+<2> The `result_t` type is the return type for any function that may fail. It is an opaque type that is set to zero on failure and non zero of success. Using C's
+usual rules, we can use boolean operations on this value to test for success / fail. A key factor about `result_t` is that it is a value that _must_ be observed. 
+In other words, ignoring this value will result in a compiler error using our settings. 
+
+<3> The `failed` macro is used to report errors. A call to `failed` will exit the function with a fail status and the parameters to `failed` 
+will be used to generate an error message. It is expected that multiple methods will fail in a sequence, and the infrastructure is setup to handle this and 
+generate appropriate set of errors representing the location in the stack this issue occur on.
+You can use `msg` to provide some additional information and `with` to provide more context, such as local parameters. This is how we can see how much the 
+`read_all` was asked to scan, for example. The additional context can make such errors must easier to resolve. It is important to note that they are _not_
+evaluated if the operation completed successfully.
+
+<4> The `defer` and `try_defer` allow us to register a function to be called when the current scope ends. This capability uses the `__attribute__(cleanup)` feature
+in GCC and Clang and it is how we intend to manage resources in general. Freeing ourselves from having to deal with them at every turn. The `try_defer` macro also
+allows us to _cancel_ this operation. We'll see discuss why this is important shortly.
+
+<5> The `ensure` macro will check that a particular operation was successful (has non zero value) and will exit the function with an error if that isn't the
+case. This reduce nesting in the function and make it easier to both read and write.
+
+<6> The `success` macro allows us to exit a method successfully. 
+
+Together, these macros form the basis of error handling and resource management strategy for the upcoming storage engine. Let's see what each of them does and then
+we'll discuss how they all fit together. I'll discuss how they are _implemented_ in the next section.
+
+If we call `read_int_to_str_buffer("/path/to/directory", &buffer);` function (note that we used the path of a directory, not a file) we'll have the following 
+sequence of events:
+
+* The directory is opened.
+* The memory is allocated.
+* The read fails.
+* Everything gets cleaned up.
+* Caller can call `errors_print_all()` to get the following output:
+....
+read_all()                     - main.c:29         -  21 Is a directory       | Failed to read requested data, read_bytes = 0, cur = -1, size = 4
+read_int_to_str_buffer()       - main.c:53         -  22 Invalid argument     | read_all(fd, sizeof(int), &val), path = /tmp
+....
+
+You'll note that we get a _lot_ of information here. This is _almost_ a stack trace and the richness of exceptions, without any of the costs associated with it.
+We are also able to print out the current state at the time of the error, which can be _invaluable_ for debugging and troubleshooting.
+
+There are several things that work together here in order to enable this style of code:
+
+* All the functions return `result_t`, which must be checked.
+* Error reporting is done via `failed`. And completion with no error is marked via `success`. 
+* While you can check explicitly, you'll usually just use `ensure` to exit if the call has failed.
+
+All of those together create a system that operate almost like exceptions. I don't need to manually handle and pass errors up the chain, I don't have to fret
+about how to provide context to an error, etc. 
+
+
+.Inspirations for these ideas
+****
+The errors API concepts are very similar to how you deal with errors in https://en.wikibooks.org/wiki/OpenSSL/Error_handling[OpenSSL]. I had the chance
+of building completely new API so I stream-lined a lot of things, but the concepts are very similar.
+
+The `defer` usage comes from Go, although I added the notion of `try_defer` for more complex scenarios.
+****
+
+You'll notice that in the `read_int_to_str_buffer` function we do almost no explicit error checking, this is done for us by the `ensure`. The one case where we do have
+to test a value explicitly is when we are dealing with system code, when we are checking if the `open` was successful, then calling `failed` with the error.
+We want to push the things that can fail in this manner as deeply as possible, so we'll be able to use the `ensure` macro to reduce the amount of 
+explicit error handling we have to go through.
+
+This style of error handling is problematic in C, because we can't just _exit_ a function, we have to do cleanup first. In pretty much any C project of any 
+complexity you'll see `goto` used for this approach, to try to centralized error handling in the function. This resource management strategy is brittle and hard
+to use. Instead, we offer `defer` and `try_defer`. 
+
+[CAUTION]
+.Here `goto` is the _good_ option!
+====
+You probably heard about the "GOTO Considered Harmful" paper and likely have an aversion to this keyword. However, in most C projects, the use of a `goto`
+for error handling is the _preferred_ option. Because the other alternative is much worse, manually maintaining complex and brittle resource & error management code.
+====
+
+The `defer` and `try_defer` are based on `__attribute__((__cleanup__))` extension for both Clang and GCC. This is a way to instruct the compiler to call a method 
+when a variable goes out of scope. We use this approach to ensure that we have proper cleanup. For example, making sure that regardless of how we exit the 
+`read_int_to_str_buffer` function, the file will be properly closed.
+
+In `read_int_to_str_buffer` there is another resource usage pattern that we need to deal with. The buffer we allocate to hold the string must be released in the 
+function fails, but must _not_ be release if the function is successful. 
+In order to handle this kind of scenario, we have `try_defer`, it accepts an additional argument, that of a variable that it will monitor when called. If that variable is set, 
+we'll cancel the deferral call. In other words, we'll be able to cancel the deferrable command in the successful path, but until that point, we'll have automatic cleanup. 
+
+These two approaches together leads to a much cleaner codebase. And now, let's see how I actually built those. 
+
+=== Implementing resource management
+
+I'll start with the `defer` commands, because they are the smaller of the two. Most they just give good syntax over the compiler behavior. You can see how they
+are implemented in Listing 1.2.
+
+
+[source]
+.Listing 1.2: defer.h - Implementation of defer and try_defer using the __attribute__(cleanup)
+```
+include::./code/defer.h[]
+```
+<1> The `cancel_defer` struct allow to capture the state that will be sent through the `defer` call as well as the pointer to the cancellation flag.
+<2> The `defer_free` function is a good example of how we implement handling of `try_defer` functions. The captured value will be freed unless the caller has
+cancelled the deferral.
+<3> The actual macro implementing `try_defer`. Note that we set the `cancelled` field to track the marker value provided by the caller.
+<4> The `defer` macro is implemented in the same manner, but without setting the `cancelled` field. 
+<5> Helper macros to add `defer` support for other functions. We saw it being used in Listing 1.1. The `enable_semicolon_after_macro_` piece is there to allow
+nice syntax without compiler warnings. It defines a useless function to allow to add `;` at the end of the macro.
+
+The idea is that we setup a call to `void defer_<function>(struct cancel_defer* cd)` function. That will be called by the compiler when the scope exits. This
+The caller is responsible for providing this function. I would prefer to avoid it, but trying to do so send us _deep_ into preprocessor magic, and I'm already
+stretching the limits of what I think is acceptable. 
+
+We provide our own implementation on `free` manually because `free` cannot fail, so it returns a `void` which we can't compare on. If your functions use the 
+conventions outlined here, you can simply use `enable_defer(func_name)` and you are set.
+
+In practice, this is usually not an issue, the number of unique calls is low, so adding this once for a few functions is very easy. Then we just rely on the 
+compiler to do its magic. 
+
+=== Building error handling strategy
+
+Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. 
+
+
+* `errors_push` will create a new error and `errors_append_message` will add additional context to it.
+* `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
+  error propagation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programmatically
+  to them. 
+* The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
+
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.  Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
+use to _report_ errors:
+
+* `errors_push` will create a new error and `errors_append_message` will add additional context to it.
+* `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
+  error propagation. 
+* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programmatically
+  to them. 
+* The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
+
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.
+
+[source]
+.Listing 1.3: errors.h - Internal errors API implementation
+----
+include::./code/errors.h[]
+----
+
+A lot is going on in Listing 1.3, allow me to go through this one at a time. We start by forward declaring `op_result_t`. We don't actually _have_ such 
+a struct. We'll be using `result_t`, which is a pointer to an `op_result_t` with the `warn_unused_result` enabled. Because we created a new type, the 
+compiler will warn us about trying to assign it to other data types and the `warn_unused_result` will make sure taht we can't ignore it.
+
+The reason we declare this type is that the compiler will warn us if we are trying to assign this to any other type. It would generate a warning, and in 
+addition to the unused result warning, that ensures that we have a return type that we _have_ to take care of.
+
+The `failed` and `ensure` macros are variadic. They are meant to be used with the `with` and `msg` macros. The idea is that we'll first push a new
+error and then be able to provide more context to it. In the case of `ensure`, if the expression is true, there is no cost and nothing is actually
+being run. Note that for `ensure`, we also check if `errors_get_count()` is non zero. This is to handle a scenario where we had a `defer` that run
+and _failed_ after the function itself was successful. We want to treat this as an error and fail as usual. 
+
+:VA_ARG: ##__VA_ARGS__
+
+Because we use the `{VA_ARG}`  inside the `ensure` and `failed` macros, we also have to define `-Wno-gnu-zero-variadic-macro-arguments` to 
+suppress the warning Clang emits about GNU specific code.
 
 [NOTE]
-.The file system abstraction and the shoe on the other foot
+.The difference between `op_result_t*` and `result_t`
 ====
-On Linux, `file_handle_t` is defined as a struct containing a single `int` and followed by a `char*` buffer holding the null terminated string of
-the file. On Windows, on the other handle, the definition will use a `HANDLE` instead (which is `void*`, and we'll get the file name using
-`GetFinalPathNameByHandle` or `GetMappedFileName` instead. The reason that this is defined as an opaque type is that I'm trying to keep to an API
-that I can use on all platforms.
-====
-
-After calling `palfs_compute_handle_size` the caller is expected to allocate enough memory to store the data and then call `palfs_create_file` to actually
-create the handle. I'm going to talk about the functions in the same way the C compiler process them, so we'll start from the leafs first and build up our
-understanding for the big finish when we actually create the file.
-
-Listing 2.4 deals with a fairly nasty problem with Linux, management of file metadata. In particular, adding a file or changing the size of a file will
-cause changes not to the file itself, but to its parent directory. This isn't _actually_ true, but it is a fairly good lie in the sense that it gives you
-enough information to have a mostly correct gut feeling about how things work.
-
-Metadata updates not being part of `fsync` make it possible for you to make changes to a file (incidentally increasing its size), calling `fsync()` on the
-file and then losing data because the _size_ of the file wasn't properly persist to stable medium. I'll refer you to
-https://lwn.net/Articles/457667/[LWN again for the gory details].
-
-[source]
-.Listing 2.4 - fs.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
-----
-include::./code/fs.c[tags=fsync_parent_directory]
-----
-<1> We need to find the name of the _parent_ directory, we add a null in the right location to find it.
-<2> Checking that fhe file was opened successfully or `failed` otherwise.
-<3> Setting up `defer` to close the file descriptor.
-
-
-Listing 2.4 has quite a lot of error handling, but most of it isn't visible, hidden in the `defer` call which simplify the overall system logic.
-Why am I being so paranoid about error handling? To the point I defined a whole infrastructure for managing that before writing my first file?
-
-The answer is simple, we aim to create an ACID storage engine, one which will take data and _keep_ it. As such, we have to be aware that the
-underlying system can fail in interesting ways. The ALICE paper has found numerous issue is projects that
-have been heavily battle tested. And a few years ago that have been a case of data loss in Postgres that has been track down to not checking the
-return value of an `fsync()` call. This LWN article summarize https://lwn.net/Articles/752063/[the incident] quite well.
-If we aim to build a robust system, we _must_ assume that anything can fail, and react accordingly.
-
-[WARNING]
-.What happens if `close` fail from the `defer`?
-====
-In Listing 2.4, we setup `close` to be invoked automatically by the compiler when the function ends. However, what happens if there is an error
-in the `close` ? That happens after the `return` statement, so the return value was already selected. We handle this by pushing an error from a
-deferred operation and checking `errors_get_count()` to validate that there are no surprises.
-
-And while it may seem funny, `close` _can_ fail. Here is the https://lwn.net/Articles/576478/[LWN discussion on the topic ]. We are going to handle
-this differently, though. Errors during cleanup routines are already very hard to deal with. If we have to deal with them routinely that would be
-a pain. Instead, we are going to try to set things up so this doesn't happen.
-
-Our strategy is to ensure that there is no harm in managing failures. If a `close` failed, then the data was already flushed to disk or it doesn't
-matter. Use of temporary files (which we intend to discard) and calling `fsync` appropriately will mean that an unexpected failure is not going
-to have an impact on our system.
+As far as the C compiler is concerned, `result_t` and `op_result_t*` are one and the same. After all `resul_t` is a macro that resolves to
+`op_result_t*`. The difference between them is that the `result_t` macro also specifies `warn_unused_result`. This is how we force the 
+compiler to validate that our errors are not discarded.
 ====
 
-What Listing 2.4 does, essentially, is to `open` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This
-instructs the file system to properly persist the directory information and protect us from losing a new file.  Note that we rely on the fact that
-strings are mutable in C to truncate the `file` value by adding a null terminator for the parent directory (we restore it immediately afterward).
-This trick allows us to avoid allocating memory during these operations.
-
-It is safe to make this change in memory because the buffer that this string is located on is the one belonging to the `handle`. So that is our own
-memory and we are fine to modify it.
+The `errors_push` macro just call to `errors_push_new` with context using`__FILE__`, `__LINE__` and `__func__` built-ins to provide additional
+context for our "stack trace". The rest of the functions aren't anything special. The `errors_push` macro is _not_ variadic, we could implement it this
+way, but I would rather have the more explicit usage of `with` and `msg`. 
+The nice thing about `with` is that it capture the expression value as well the expression text. That saves us some keystrokes on each error call.
 
 [TIP]
-.The cost of `fsync`
+.Forcing error handling
 ====
-Using `fsync()`, we can ensure that writes to the disk has actually reached a stable medium. In other words, after `fsync()` was called, we can
-rest assured that a power failure won't wipe our data. For a storage engine that, as you can imagine, this is a highly desirable property.
+Beyond just using `result_t`, we also have the `errors_assert_empty` macro which will can use to check if the caller has previously
+ignored an error. If that is the case, we'll refuse to go on and error immediately.  That has the effect of ensuring that errors are handled, because it 
+will very visibly break stuff if you don't. 
 
-The issue is that `fsync()` usage, however, has a *very* high cost. To the point where we'll spend considerable time and effort down the line
-to _reduce_ the number of times we have to call `fsync()`. The primary issue with `fsync()` is that it needs to clear not just the data in our
-file but to effectively flush the entire disk cache. If you have a lot of pending I/O, you will _wait_ until this is completed, and that can
-take a while.
+This is meant for _external_ users. If you called an API method and it failed and you didn't check the error, all future operations will also fail.
+That keeps us in the habit of managing errors properly.
 ====
 
-The reason we need to call `fsync_parent_directory` is that to make the life of the user easier, we are going to create the file if it does not
-exists, including the parent directory. And if we are creating these directories, we need to ensure that they won't go away because of file
-system metadata issues.
-
-.Reducing user frustration
-****
-Automatically creating a directory when given a path is a _small_ feature. Call `mkdir` before `open`, pretty much. Doing that reliably_ is more
-complex, but not too hard. There are things you need to consider when doing this, what permissions should you give, how to handle any soft or
-hard links that you find along the way, etc.
-
-On the other hand, _not_ creating the directory automatically adds a tiny bump of frustration for the user. There is an extra, usually 
-unnecessary step to take along the way. 
-****
-
-Sadly, safely creating the full path is a somewhat tedious task. You can see how we approach it in Listing 2.5, where quite a lot is going on.
+You'll note that unlike most C APIs, that we are missing quite a bit here. Namely, where is the memory handling? In order to reduce as much as possible the
+complexity of the system, I have chosen to avoid memory allocations entirely in the error API. Let's see how this is achieved, we'll start with Listing 1.4, 
+where we define the storage for the actual errors.
 
 [source]
-.Listing 2.5 - fs.c - Ensuring that the full path provide exists and the caller has access to it
+.Listing 1.4 - errors.c - Storage declaration for the errors API
 ----
-include::./code/fs.c[tags=ensure_file_path]
+include::./code/errors.c[tags=declarations]
 ----
 
-If the file already exists, we can return successfully immediately. If the file is a directory, we return an error. We then scan the path
-one directory at a time and check if the directory exists. I'm using a trick here by putting a `0` in the place of the current directory
-separator. 
+We define a number of variables as thread local state. The idea is that instead of allocating the memory at the time of an error, we'll allocate the memory 
+at the time we create the thread. This is done for us automatically, so by the time we get to actually recording an error, we don't have to fear most failure
+modes.
 
-In other words, given a `/db/phones\0`, we'll start the search for `/` from the second character and then place a null terminator on that 
-position. The filename would then be: `/db\0phones\0`. If needed, we will create the directory and then move to the next one. As part of
-that, we'll set the `/` again and continue from the next `/`. This code requires a _mutable_ string to work, but it does the work with no 
-allocations, which is nice.
+The `\_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `\_errors_messages_buffer` is an array that stores
+the relevant message for each of recorded array. In other words, the `\_errors_messages_buffer` entries will always point to a location inside `\_messages_buffer`. 
+The `\_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 1.
 
-If we need to create a new directory, we make sure to call `fsync_parent_directory` to ensure that a power failure will not cause the directory to go poof.
-After all this setup, we can look at Listing 2.6, where the actual creation of the file takes place. 
+.The actual error messages are stored in a thread local buffer that is pre-allocated
+image::{img-src}/img1-1.png[]
+
+The `\_errors_count` value counts the number of errors that are currently recorded while `\_errors_buffer_len` counts how much of `\_messages_buffer` is in use. 
+The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `\_out_of_memory` flag is set if we have too many errors, at which point
+we'll start discarding them. I find that very unlikely to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
+
+If you'll look at the API in Listing 1.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about
+reading the errors or clearing them. The usual method you'll use the `ensure` / `failed` macros to bubble the errors to the callers until we get somewhere where
+we can make a decision about the issue. The caller will need to read the errors and make a determination and then clear the error state and prepare for the next
+operation. 
+
+A shorthand for printing to the terminal is provided with `errors_print_all()`, typically for debugging purposes. 
+If you need to access the error codes programmatically, you can use the `errors_get_codes()` function. 
+
+Because we are doing no memory allocations and working on a fixed buffer, we need to be careful with how we process the messages. I tried doing that directly 
+with the raw C API, but it was too complex to manage. I wrote a couple of utility functions to manage that and if you are interested, I would refer you to 
+Howard Chu's (author of LMDB) discussion of https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
 
 [source]
-.Listing 2.6 - fs.c - Creating a file in a safe manner" .c
+.Listing 1.5 - errors.c - String processing routines
 ----
-include::./code/fs.c[tags=palfs_create_file]
+include::./code/errors.c[tags=try_sprintf]
 ----
 
-By the time we got to Listing 2.6, all the interesting tidbits of code are already done. We copy the file name to our own buffer, which we control. That
-means that the rest of the code can treat this file name as a mutable string.
-
-If the file does not exist, we create the path to the file, as we saw in Listing 2.5. If the file exists, we make sure that it is not a directory. I'm 
-trying to go a little bit beyond rudimentary checks here and produce production level code.
-
-As careful as I am being here, note that there are many scenarios that I'm not trying to cover. Using soft and hard links or junction points is the first example that
-pops to mind. And double the work if you need to deal with files or paths that come from un-trusted source. OWASP has quite a bit to talk about in terms of the kind of
-vulnerabilities that this might expose.
-
-Earlier I discussed wanting to get the proper primitives and get as far away from the level of code that you would usually need to write to deal with the file system, 
-I think that now it is much clearer exactly why I want to get to that level as soon as I can.
-
-=== Setting the file's size
-
-When creating a file, it is created with zero bytes. That makes perfect sense, after all. There _is_ no data here. When you'll write to the file, the file system will
-allocate the additional space needed on the fly. This is simple, require no thinking on our part and exactly the wrong thing to want in a storage engine.
-
-We just saw how hard we have to work to properly ensure that changes to the metadata (such as, for example, changing its size) are properly protected against possible
-power failures. If we would need to call `fsync_parent_directory` after every write, we can kiss our hopes for good performance goodbye. Instead of letting the file
-system allocate the disk space for our file on the fly, we'll ask it for the space in advance, in well known locations. That will ensure that we only rarely need to
-call `fsync_parent_directory`. 
-
-Requesting the disk space in advance has another major benefit, it gives the file system the most information about how much disk space we want. It means that we give
-the file system the chance to give us long sequences of consecutive disk space. In the age of SSD and NVMe it isn't as critical as it used to be, but it still matters.
-Depending on your age, you may recall running `defrag` to gain _substantial_ performance increase on your system or have never heard about it at all. 
-
-Listing 2.7 shows how we request that the file system allocate enough disk space for us. At its core, we simply call to `posix_fallocate` which will extend the file
-for us (or do nothing if the file is already large enough). 
+The key about the functions in Listing 1.5 is that they accept a _limit_ to how much they can write, and then do all the checks inside. The end result is that
+our code string processing routine looks much simpler, see for yourself in Listing 1.6.
 
 [source]
-.Listing 2.7 - fs.c - Pre-allocate disk space by letting the file system know ahead of time what we need
+.Listing 1.6 - errors.c - Pushing a new error into the thread's buffer----
 ----
-include::./code/fs.c[tags=palfs_set_file_minsize]
+include::./code/errors.c[tags=errors_push_new]
+----
+<1> Check if we have more than the maximum number of errors. This is unlikely, in most use cases.
+<2> Increment the current error counter. Note that we increment this counter even if we don't have enough memory for the error message. In that case, the error
+message will be null, but the error code will be retained.
+<3> We call `try_sprintf` multiple times, formatting the error message. This code is a bit complex, since C's string processing capabilities are... awkward. 
+A key factor here is that we can safely call these function even if there isn't enough memory, they do their own check and bail out early. This code was 
+_much_ harder to follow before I introduced the `try_sprintf` helper. 
+
+The fact that we can limit the number of errors we may run into _during_ error handling is important. None of the error handling routines can generate an error
+or require any special treatment. Most of the nastiest issues that I have run into have happened while there was an error in the middle of handling an error.
+Reducing the number of possible failure points is very useful.
+
+Now that you have seen how we push a new error, let's see how we provide more context to the error. The backend of the `with` and `msg` macros is the
+`errors_append_message` function, shown in Listing 1.7.
+
+[source]
+.Listing 1.7 - errors.c - Appending a message to the current error
+----
+include::./code/errors.c[tags=errors_append_message]
+----
+<1> Here we start from one char _before_ the end. This is so the next write will overwrite the null terminator.
+<2> On the other hand, if we wrote to the buffer but hit the end, we'll restore the overwritten null terminator so we won't have an out of bound access on read.
+
+And finally, we have the rest of the errors API implementation in Listing 1.8. 
+
+[source]
+.Listing 1.8 - errors.c - The rest of the implementation
+----
+include::./code/errors.c[tags=errors_append_message]
 ----
 
-Much of the work in Listing 2.7 is dedicated to calling `fsync_parent_directory`, but not because we call it. The issue is that `fsync_parent_directory` mutate the
-filename that is passed to it. It make sure to return things to normal by the time it returns, but it means that we cannot pass it a constant value and expect things
-to work and `palfs_get_filename` returns a `const char*`, so we have to use a temporary copy.  I'm defining an `char` array of `PATH_MAX` to store the value in a 
-mutable fashion and copying the value there. 
+Thhis is a very powerful API, since it allows us to have good error handling with little ceremony. The `errors_append_message` and `errors_push_new` return 
+a `op_result_t*` because they might be used via the comma operator. That is a done in the `failure` macro, which is called internally from the `enforce` 
+macro.
 
-_Technically_, I could pass the `filename` value to the `fsync_parent_directory`, I know where the value came from and it _is_ mutable. But the problem is that this
-code needs to be able to run in a multi threaded environment. Imagine what will happen if one thread executes `fsync_parent_directory` while another reads the name
-using `palfs_get_filename`. We'll get really hard to figure out bugs. 
+You may find it strange that the very first thing that I did when starting a storage engine is to build error handling code, but that is a foundation that 
+will serve us for the rest of the project. The fact that we can have good ways to report error can save us _weeks_ of troubleshooting time. And with this
+in place, we can now move to our very first real task, working with files. 
 
 [WARNING]
-.The perils of paths
+.The errors API for external consumers?
 ====
-In Listing 2.7, I'm using `PATH_MAX` as the size of `filename_mutable`. This is usually defined to be 4Kb in size, which should be sufficient for pretty much all
-needs. Only a very small amount of it is likely to be used and this isn't meant to be used in a deep stack. Note that I'm checking that the length of the name is
-sufficient to fit in there, to avoid smashing the stack. 
-
-There are actually scenarios where `PATH_MAX` is _not_ sufficient. See this post^[https://eklitzke.org/path-max-is-tricky] a full discussion of the perils of 
- using `PATH_MAX`. 
+We looked at the error API (and `defer`) in the context of consuming this internally. Gavran, our storage engine, is meant to be an embedded library.
+That means that it is going to be used from other systems. Forcing our error convention on unsuspecting code bases is not something that I would consider
+desirable. 
 ====
 
-=== Closing a file
+=== Testing the error API
 
-After quite a journey, we are almost at the end. The only function we are left to implement to be able to compile the code in Listing 2.2 is `palfs_close_file`.
-You can see the code in Listing 2.8.
+I intend to close each chapter with a set of unit tests, verifying the functionality of the system that we built so far. Testing C code is a pain, especially
+when we get to the more complex scenarios. In order to handle this, I intent to write the tests in Python, where it is much easier. Along the way, that will
+serve as a way to ensure that we are able to make proper use of the code in an embedded mode.
 
-[source]
-.Listing 2.7 - fs.c - Closing a file
-----
-include::./code/fs.c[tags=palfs_close_file]
-----
-
-The `palfs_close_file` function simple call the `close` method and add some additional error handling, nothing more. We aren't trying to call `fsync` or do any
-fancy things at this layer. That will be the responsibility of higher tiers in the code. 
-
-One thing that deserve calling out here, an error from `close` isn't theoretical. In almost all cases, whenever you do I/O, you are not interacting with
-the actual hardware, but the page cache. That means that almost all the I/O is done in an asynchronous fashion and `close` is one way for you to get 
-notified if there have been any errors.
-
-Even with checking the return value of `close`, you still need to take into account that errors _will_ happen. Unless `fsync` was called, the file system
-is free to take you writes to a `close`-ed file and just throw them away. This is not a theoretical issue, by the way, it happens quite often in many 
-failure scenarios. 
-
-=== Reading and write from the file
-
-Now that we are able to create a file and allocate disk space for it, we need to tackle the next challenge, deciding how we are going to read and write
-from this file. I'll defer talking about the internal organization of the file to the next chapter, for now, let's talk about the low level interface
-that the PAL will offer to the rest of the system. 
-
-We already saw them in Listing 2.1, `palfs_mmap` and `palfs_unmap` as well as `palfs_write_file` are the functions that are provided for this purpose. 
-There isn't much there, which is quite surprising. There is a _vast_ difference between the performance of reading from disk (even fast ones) and 
-reading from memory. For this reason, database and storage engines typically spend quite a bit of time managing buffer pools and reducing the 
-number of times they _have_ to go to disk.
-
-I'm going to use a really cool technique to avoid the issue entirely. By mapping the file into memory, I don't have to write a buffer pool, I can
-use the page cache that already exists in the operating system. Using the system's page cache has a lot of advantages. I have run into this idea
-for the first time when reading LMDB's codebase and it is a fundamental property of how Voron (RavenDB's storage engine) achieve its speed. 
-I also recommend reading the https://queue.acm.org/detail.cfm?id=1814327["You're Doing It Wrong" paper by Poul-Henning Kamp] that goes into 
-great details why this is a great idea.
-
-The idea is that we'll ask the operating system to `mmap` the file into memory and we'll be able to access the data through directly memory access.
-The operating system is in charge of the page cache, getting the right data to memory, etc. That is a lot of code that we don't have to write, which
-has gone through literal decades of optimizations. In particular, the page cache implements strategies such as read ahead, automatic eviction as needed
-and many more behaviors that you'll usually need to write in a buffer pool implementation. By leaning on the OS' virtual memory manager to do all that
-we gain enormous leverage. 
-
-We could map the memory for both reads and writes, but I believe that it would make more sense to only map the file data for reads. This is to avoid
-cases where we accidentally write over the file data in an unintended manner. Instead, we create an explicit call to write the data to the file: `palfs_write_file`.
-The `palfs_unmap` is just the other side of the `palfs_mmap` operation, allowing us to clean up after ourselves. 
-You can see the mapping and un-mapping code in Listing 2.8.
-
-[source]
-.Listing 2.8 - fs.c - Implementing mapping and un-mapping of memory from out data file
-----
-include::./code/fs.c[tags=palfs_mmap]
-----
-
-There really isn't much there in Listing 2.8. We just need to call `mmap` or `munmap` and do some basic error reporting in the case of an error.
-In Listing 2.9, however, we allow to close the file and unmap the memory using a `defer` call.
-
-[source]
-.Listing 2.9 - fs.c - Allowing to close the file and unmap via defer
-----
-include::./code/fs.c[tags=defer_palfs_close_file]
-----
-
-And in Listing 2.10 we have the implementation of writing to a file: `palfs_write_file`
-
-[source]
-.Listing 2.10 - fs.c - Writing data to the file
-----
-include::./code/fs.c[tags=palfs_write_file]
-----
-
-The `palfs_write_file` call is a simple wrapper around the `pwrite` call, with the only difference being that we'll repeat the write until the entire buffer
-has been written. In practice, this usually means that we'll only do a single call to `pwrite` which will perform all the work.
-
-You'll note that I'm using two separate methods to interact with the file data. On the one hand, I'm using `mmap` to read the data, but I'm using the
-I/O call `pwrite` to write to it. On Linux, that is safe to do, because both `mmap` and the `write` call are using the same page cache and are 
-coherent with respect to one another. 
-
-On _Windows_, on the other hand, that is not the case. Mixing file I/O calls and memory mapped files lead to situation where you write data using the
-I/O API which will take some time to be visible using the memory view. For further reading, you can read how I found out about 
-https://ayende.com/blog/164577/is-select-broken-memory-mapped-files-with-unbufferred-writes-race-condition[this delightful state off affairs]. When we get to the 
-Windows side of things, we'll show how to deal with this limitation properly.
-
-=== Using our API for storing and retrieving data
-
-We are still very early on in the process, but I think that peeking at Listing 2.12 will show you how far we have come. We are making for use of all
-of our functions to store and read data from the file.
-
-[source]
-.Listing 2.11 - Using the file API to read & write
-----
-include::./code/main.c[]
-----
-<1> Allocating memory, ensuring that the memory was allocated and setting up its release on function exit.
-<2> Creating a file, ensuring that it was successful and setting up the closing of the file descriptor on function exit.
-<3> Mapping a file range, ensuring that it was successful and setting up the cleanup on function exit.
-
-Listing 2.11 shows case the the full  use of `defer` again, which is rapidly becoming my favorite approach to dealing with error handling in this codebase.
-We have to deal with multiple resources, but there isn't any jump in complexity in the function. Everything _works_. 
-
-As for the actual code, we create a new database, ensure that it has the right size, map it into memory and then write a value to it using the `write_file` 
-and read from it using the memory mapped address. The code reads nearly as well as the description of the code, with little in the way of unnecessary details.
-
-This may seem like a humble beginning, but we are currently building the foundation of our storage engine. In the next chapter, we are going to 
-start talking about how we are going to make _use_ of this functionality.
-
-=== Tests
-
-In order to make sure that we are producing good software, and that means tests. Now that the chapter is over, it is time to see its tests. I'm not going
-to deeply into the testing side of the pool, but I have found them to be invaluable to ensure that the software does what you _think_ it does.
+In order to access a C library from Python, I'm using `ctypes`. I'm not going to cover the Python API for the API, since there is nothing really interesting 
+there. The _tests_, however, are going to be included at the end of every chapter.
 
 [source,python]
-.Listing 2.12 - Testing the file API
 ----
-include::./code/tests02.py[]
+include::../pyapi/tests01.py[]
 ----
 
-.A note on testing
-****
-On each chapter, I'm going to create a set of unit tests that will verify the functionality on the system. Each chapter conclude with a system that pass
-all its (and previous) tests. That is important to ensure that any change that I'm making isn't going to break the system.
+And the output:
 
-That said, be aware that you can spend a lot of time tying yourself to a particular implementation choices using tests. I'm testing my code in Python
-and there is a very small Python layer to isolate the tests from the C code. That means that any changes that I make are going to be easier to adapt to.
+....
+===================== test session starts ============================
+platform linux -- Python 3.6.9, pytest-5.4.1, py-1.8.1, pluggy-0.13.1
+rootdir: /home/ayende/projects/libgavran/ch01/code
+collected 7 items
 
-Right now I'm writing fairly silly tests, mostly because I'm not going to try to test that we are writing durably to disk. That requires a lab with a
-UPS that I can trigger via an API and a machine that I don't mind frying.
-****
+tests.py .......                                                [100%]
 
-And now we are ready to see how we are going to be _using_ the files.
+===================== 7 passed in 0.05s ==============================
+....
+
+And that is quite enough for one chapter. In the next chapter we'll start dealing with the operating system and build the basics of the platform abstraction
+layer that will help us interact with the rest of the system.

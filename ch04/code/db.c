@@ -3,13 +3,8 @@
 
 #include "db.h"
 #include "errors.h"
+#include "impl.h"
 #include "platform.fs.h"
-
-struct database_state {
-  database_options_t options;
-  struct mmap_args mmap;
-  file_handle_t *handle;
-};
 
 static result_t handle_newly_opened_database(db_t *db) {
   (void)db;

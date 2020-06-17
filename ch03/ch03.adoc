@@ -1,462 +1,470 @@
-== At the pages layer, building transactions
+== At the file system level
 
-We have gotten to the point where we can read and write data to a file. It will take a while to understand why we didn't simply call `write` or `read` directly and call
-it a day. We'll discuss that in detail when we implement transactions. Right now, I want to focus on how we are going to lay out the data on the file. 
+Files are a wonderful abstraction, a stream of bytes that reside under name, sorted in a hierarchy. Simple enough that a child can use it, powerful enough to be
+the motto of an the entire set of operating systems. "Everything is a file" is one of the defining features of Unix, but it is also an abstraction, and as such,
+it is https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/[leaky].
 
-Files are typically thought of as sequence of bytes. Consider the text file shown below. It shows a simple text file consisting of several lines. 
+When building a storage engine, we need to have a pretty good idea about how to manage files. As it turns out, there is a lot of things that are
+https://yakking.branchable.com/posts/falsehoods-programmers-believe-about-file-paths/[just wrong] about how we think about files.
+The https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-pillai.pdf["All File Systems Are Not Created Equal: On the Complexity of Crafting Crash-Consistent
+Applications"] paper tested ten applications (from SQLite to Git to PostgreSQL)
+to find whatever they are properly writing to files. This paper is usually referred to as the ALICE (Application-Level Intelligent Crash Explorer) paper, after
+the name of the tool created to explore failures in file system usage.
 
+There are a _lot_ of details that you need to take into account. For example, you may consider that changing a file and then calling `fsync()` will ensure that
+the changes to the file are made durable, and that is correct, if you haven't changed the file size. Because while the file data has been flushed, the file
+_metadata_ was not. Which may mean some fun times in the future with the debugger.
+
+.Testing actual behavior is _hard_, and the real world isn't cooperative
+****
+If you want to build a reliable storage engine, you are going to need to develop some paranoid tendencies. Because the fact that the documentation
+says something is possible or not doesn't translate to how things really are. When you care about reliability, the file system abstraction leaks
+badly. And it is hard to find a way around that.
+
+You can simulate some errors, but the sheer variety and scope involved makes thing hard. Especially because the error that hit you may come not from
+the code that you are using but several layers down. If you test errors from the file system, but the _file system_ didn't check for errors from
+the block device you may end up in a funny state. And in 99.999% of the cases, it won't matter, but you are _going_ to hit that one in a billion
+chance of an actual error at just the wrong time and see a broken system.
+
+There have been a number of studies made on the topic and I think that https://danluu.com/filesystem-errors/[Daniel Luu's summary] of the topic
+lays a lot of the issues on the table. There is not a _single_ storage hardware solution that doesn't have failure conditions that can cause
+data corruption. And file systems don't always handle it properly.
+
+To a large degree, we make certain assumptions about the system, then we verify them constantly. The less we demand from the bottom layers, the
+more reliable we can make our system.
+****
+
+LWN has some good articles on the topic of making sure that the https://lwn.net/Articles/457667/[data actually reach the disk] and
+the https://lwn.net/Articles/351422/[complexities involved]. The situation is made more complex by the fact that this is depend on what OS and file system
+ you use and even what _mode_ you used to mount a particular drive. As the author of a storage engine, you have to deal with these details in either of two ways:
+
+* Specify explicitly the support configuration, raise hell if user is attempting to use on non supported configuration.
+* Make it work across the board. Plan for failure and when it happens, have the facilities in place to recover from it.
+
+Because working with files is such a huge complex mess, and because it is _different_ across operating systems, we'll hide this complexity behind a
+platform abstraction layer (PAL). Listing 2.1 shows the core functions that the PAL expose.
+
+[source]
+.Listing 2.1 - platform.fs.h - The file system interface that we'll consume for our storage engine
 ----
-One
-Three
-Four
+include::./code/platform.fs.h[]
+----
+<1> The `mmap_args` allows us to pass capture the required args for `mmap`, `munmap` and allow us to call `defer` easily on mmap ranges.
+<2> To enable `defer` and `try_defer` on `palfs_close_file` and `palfs_unmap`.
+
+We define an opaque type `file_handle_t`, which is how we'll communicate about files with the PAL. If you are used to C APIs, you might notice something
+interesting, the API shown in Listing 2.1 is not doing any memory allocations. The API can fail (invalid file name, wrong permissions, etc), but it won't
+have to deal with memory issues. Instead, we ask that the _caller_ will provide us with the memory for the `file_handle_t`. Typical usage of the API
+is shown in Listing 2.2.
+
+[source]
+.Listing 2.2 - Using the file API to create a file of minimum size
+----
+result_t create_and_set_file() {
+  size_t size;
+  ensure(palfs_compute_handle_size("/db/phones", &size));
+
+  file_handle_t* handle = malloc(size);
+  ensure(handle);
+  defer(free, handle);
+
+  ensure(palfs_create_file("/db/phones", handle));
+  defer(palfs_close_file, handle);
+
+  ensure(palfs_set_file_minsize(handle, 128*1024));
+
+  return success();
+}
 ----
 
-If I want to add `Two` to the file in the right location, what do I have to do? There is no easy way to add data in the middle of the file. I have to write out
-what I want and then continue writing to the end of the file (extending it along the way). There actually _are_ ways to extend a file in such a manner, in turns
-out. It isn't very useful for most scenarios, but I want to discuss that a bit so you'll understand how that works.
+The code in Listing 2.2 should ensure that at the end of the way, we have a file that has a minimum size of 128KB which will retain its size even in the case of an error or
+a system crash. That sounds easy enough to do in theory, but require some dancing around to get to it. Right now I'm going to focus on Linux as the implementation
+system, but we'll get to other systems down the line.
 
-You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of blocks in the middle of a file. That works because while the file system present
-you with the illusion of a sequence of bytes, the reality is very different. Take a look at Figure 3, which shows the physical outline of the text file above.
+.Reflections on low level API and system design
+****
+The API in Listing 2.1 is interesting is several ways. You can see that we are exposing some operations (create, set size, mmap) but totally ignoring others.
+For example, we don't have any way of _reading_ data through the API.
 
-.Physical layout of a file on disk
-image::{img-src}/img3-1.png[]
+I mentioned that I'm going to showcase the road that was taken. Gavran as a storage engine is going to be based on memory mapped memory in lieu of manual
+`read` calls. We'll discuss exactly how that plays into the design of the storage engine in a bit.
 
-Any file that is smaller than 512 bytes will fit on a single block one block (sometimes called sector). A block is 512B - 4KB in size, in most cases and you can
-assume that it will be 4KB on pretty much any modern disk. And by modern, I'm talking anything anything made in the past _decade_. 
+Are there any other pieces that are missing from the API that you can see?
+****
 
-Pretend that the file is actually large enough to reside on multiple blogs. You can use the `filefrag` command to view the blocks on the file. This is _exactly_ 
-what happens when we talk about fragmentation of files. The physical layout of the file is made up of blocks, which reside on a block device (the disk drive).
-It is the job of the file system to map those blocks into a file and present us with the file stream abstraction. 
+=== The file handle
 
-With `FALLOC_FL_INSERT_RANGE`, we can tell the file system that we want to add new blocks to the file, somewhere in the middle. That is a cheap operation, because
-we aren't actually moving anything. We simply change the list of blocks that are assigned to the file and write new data to the block. You can see how that looks
-on Figure 4.
+We defined the `file_handle_t` as an opaque type in the header, now let's see how we actually work with this on Linux. Listing 2.3 shows the implementation details.
 
-.A file's physical layout after adding a block in the middle
-image::{img-src}/img3-2.png[]
+[source]
+.Listing 2.3 - fs.c - The file handle definition and usage
+----
+include::./code/fs.c[tags=handle_impl]
+----
 
-So we can add data cheaply in the middle of a file, although it requires somewhat unusual API calls. The problem is that we can do that only on block boundary. On 
-most modern systems, that is 4KB in size. We can also only insert data in increments of 4KB, so this approach isn't generally usable.
+It turns out that `pal_file_handle`, which is `typedef`-ed to `file_handle_t` is a simple struct to hold a file descriptor (`int`). We use an opaque type like that
+because on Windows, for example, the file handle is a `HANDLE` and isn't equal in size to `int`.
 
-At the same time, we are going to think about how we are going to manage the data we put into storage. We need to consider how we read and write data. As it 
-turns out, there are quite a few common methods to handle this scenario:
+We are also doing some strange work to compute the size of the handle, how come it isn't always `4`? This is because the `filename` field is defined as zero length
+value and thus points _past the end of the handle_.  Take a look at Figure 2, which shows the structure of `file_handle_t` implementation on Linux.
 
-* Append only - we always write at the end of the file, and the file format ensures that new values are found before old values. This has the benefit of being 
-  simple to start with, since there is very little to manage, but you'll very quickly end up with most of your space being used by values that has been 
-  overwritten. Getting rid of these old values require you to _compact_ the file, which may take twice as much space as the original file take and introduce
-  a _lot_ of load on the I/O system.
-* Fixed size records - in this model, we define the size of a record upfront (64 bytes, for example) and then we can treat the file as an array of those records.
-  This is how many applications stored their data and it is a very simple method that is surprisingly powerful. It has the downside, of course, that you are 
-  forced to pick a set size and use it for the life time of the data.
-* Page model - the file is divided into pages (4KB - 4MB) in size that are treated as independent buffers. We are always working on a the page level, which is
-  a buffer that is read and written to in an atomic fashion. In other words, we replicate exactly how the file system think of the world. This is similar to the 
-  fixed size records option, but instead of storing fixed size records, we have fixed size pages and we are free to manage their internal structure as we see
-  fit. The page size is also large enough that we don't usually need to 
+.The layout of `file_handle_t` in memory on Linux
+image::{img-src}/img2-1.png[]
 
-=== Getting to grips with paging
 
-For our storage engine, we are going to use the paging model. That allows the most flexibility and is the most common choice for storage engines. I'm not going to
-go too deeply into the design choices, you might want to refer the https://www.databass.dev/[Database Internals] book for details. In particular, the terms you
-are looking for are Log Structure Merge vs Page Structure. 
+[WARNING]
+.Beware the paths
+====
+In Listing 2.3, I'm requiring that the provided path will be an absolute path. Why make this requirement?
+I'm trying to avoid doing things that we don't need to inside the storage engine. The caller can easily provide the full path, and it turns out that this
+matters.
+
+Let's assume that we accept the path "db/phones", which is a relative path. It gets resolved based on the current directory, as expected. However, our
+storage engine is meant to be _embedded_. What will happen if the parent application decide to change its output directory? That will mean that our
+relative file name will point to a _different_ location, which is going to cause unforeseen issues. Better to stop this early.
+
+That is leaving aside all the sheer complexity that are paths in the first place. There are _many_ vulnerabilities and issue that arose because of
+improper path handling. By requiring the the path will be rooted, I'm avoiding about 60% of them.
+====
+
+
+Hopefully Figure 2 gives you a more intuitive manner of how we put the name of the file immediately past the `file_handle_t`
+value. I'm doing it this way to avoid another pointer field or a separate allocation. All I need here is just one buffer and we can put everything inside
+properly.
+
+=== Creating a file
+
+One of my primary goals is to build the right primitives that we need and get as far away from the file system as I can get. These primitives will abstract
+the different nature of file and operating systems. We'll get to the point where we have a small set of actions that we can perform and then build the rest
+of the system on top of that.
+
+[IMPORTANT]
+.Using a block device instead of bothering with the file system
+====
+Technically speaking, the model that I intend to use will work just as well for raw block devices as it would do for files. Indeed, there are some
+real benefits of bypassing the file system for a storage engine. What I most want from a file system as a storage engine is that it will
+_get out of my way_. There are also some performance benefits, avoiding the need for data fragmentation, overhead of the file system, etc.
+
+That said, working with files is _ever so much_ easier. Yes, you can use commands such as `dd` to move data between blocks and files, but that
+tend to be much more awkward than if the data reside in a file. In fact, we are going to try hard to get to the point where we have as few files
+as we can get away with and do all our work internally inside our file.
+
+That would allow us to switch to a block device at a later point in time, but having direct access to the file is just too convenient to give up,
+leaving aside the other issue. A database server can expect to have the right kind of permissions to allow opening a raw block device. But an
+embedded storage engine needs to deal with limited rights on behalf of its processes.
+====
+
+The act of creating a file is a non trivial operation, since we need to make sure that the file creation is atomic and durable. Beyond what was already
+mentioned, you need to take into account users who pass invalid values (file name containing `/`, for example), _all_ the intricacies of soft and
+hard links, size quotas, etc. https://lwn.net/Articles/686789/[The LWN post] about this will probably turn your hair gray.
+To keep the code size small and not overburden ourself with validation code, I'm going to state that I'm trusting the
+callers of the API to have already done the validation of the data. As you can see in Listing 2.3, we are only doing minimal validations to prevent
+accidents, not trying to protect against malicious input.
+
+On Linux, once you opened a file, you no longer have access to its name. It may have multiple names (hard links) or non (anonymous or have been deleted).
+As such, the `palfs_compute_handle_size` requests enough space to store the name that the called passed us as part of the same allocation of `file_handle_t`.
+
+[NOTE]
+.The file system abstraction and the shoe on the other foot
+====
+On Linux, `file_handle_t` is defined as a struct containing a single `int` and followed by a `char*` buffer holding the null terminated string of
+the file. On Windows, on the other handle, the definition will use a `HANDLE` instead (which is `void*`, and we'll get the file name using
+`GetFinalPathNameByHandle` or `GetMappedFileName` instead. The reason that this is defined as an opaque type is that I'm trying to keep to an API
+that I can use on all platforms.
+====
+
+After calling `palfs_compute_handle_size` the caller is expected to allocate enough memory to store the data and then call `palfs_create_file` to actually
+create the handle. I'm going to talk about the functions in the same way the C compiler process them, so we'll start from the leafs first and build up our
+understanding for the big finish when we actually create the file.
+
+Listing 2.4 deals with a fairly nasty problem with Linux, management of file metadata. In particular, adding a file or changing the size of a file will
+cause changes not to the file itself, but to its parent directory. This isn't _actually_ true, but it is a fairly good lie in the sense that it gives you
+enough information to have a mostly correct gut feeling about how things work.
+
+Metadata updates not being part of `fsync` make it possible for you to make changes to a file (incidentally increasing its size), calling `fsync()` on the
+file and then losing data because the _size_ of the file wasn't properly persist to stable medium. I'll refer you to
+https://lwn.net/Articles/457667/[LWN again for the gory details].
+
+[source]
+.Listing 2.4 - fs.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
+----
+include::./code/fs.c[tags=fsync_parent_directory]
+----
+<1> We need to find the name of the _parent_ directory, we add a null in the right location to find it.
+<2> Checking that fhe file was opened successfully or `failed` otherwise.
+<3> Setting up `defer` to close the file descriptor.
+
+
+Listing 2.4 has quite a lot of error handling, but most of it isn't visible, hidden in the `defer` call which simplify the overall system logic.
+Why am I being so paranoid about error handling? To the point I defined a whole infrastructure for managing that before writing my first file?
+
+The answer is simple, we aim to create an ACID storage engine, one which will take data and _keep_ it. As such, we have to be aware that the
+underlying system can fail in interesting ways. The ALICE paper has found numerous issue is projects that
+have been heavily battle tested. And a few years ago that have been a case of data loss in Postgres that has been track down to not checking the
+return value of an `fsync()` call. This LWN article summarize https://lwn.net/Articles/752063/[the incident] quite well.
+If we aim to build a robust system, we _must_ assume that anything can fail, and react accordingly.
+
+[WARNING]
+.What happens if `close` fail from the `defer`?
+====
+In Listing 2.4, we setup `close` to be invoked automatically by the compiler when the function ends. However, what happens if there is an error
+in the `close` ? That happens after the `return` statement, so the return value was already selected. We handle this by pushing an error from a
+deferred operation and checking `errors_get_count()` to validate that there are no surprises.
+
+And while it may seem funny, `close` _can_ fail. Here is the https://lwn.net/Articles/576478/[LWN discussion on the topic ]. We are going to handle
+this differently, though. Errors during cleanup routines are already very hard to deal with. If we have to deal with them routinely that would be
+a pain. Instead, we are going to try to set things up so this doesn't happen.
+
+Our strategy is to ensure that there is no harm in managing failures. If a `close` failed, then the data was already flushed to disk or it doesn't
+matter. Use of temporary files (which we intend to discard) and calling `fsync` appropriately will mean that an unexpected failure is not going
+to have an impact on our system.
+====
+
+What Listing 2.4 does, essentially, is to `open` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This
+instructs the file system to properly persist the directory information and protect us from losing a new file.  Note that we rely on the fact that
+strings are mutable in C to truncate the `file` value by adding a null terminator for the parent directory (we restore it immediately afterward).
+This trick allows us to avoid allocating memory during these operations.
+
+It is safe to make this change in memory because the buffer that this string is located on is the one belonging to the `handle`. So that is our own
+memory and we are fine to modify it.
 
 [TIP]
-.Pages are a way to work with the data inside the storage engine
+.The cost of `fsync`
 ====
-Our storage engine is going to divide the file into pages that are 8KB in side. Instead of thinking about the whole of a file as a stream of bytes, we are going
-to cut it into pages and work on each one of them independently. This is a very common decision for databases since there are many benefits for this approach.
-Modifying a single page solve the need to insert data in the middle of a file, we can overwrite the page as a whole. 
+Using `fsync()`, we can ensure that writes to the disk has actually reached a stable medium. In other words, after `fsync()` was called, we can
+rest assured that a power failure won't wipe our data. For a storage engine that, as you can imagine, this is a highly desirable property.
 
-Pages are to a database as bytes are to a file. The basic building blocks, but they aren't sufficient. In order to actually make _sense_ of the system, we have
-to layer additional features and data structures. I'm building Govran from the ground up and explaining each section independently. It all come together and
-then we'll have a beautiful picture and gorgeous architecture.
-====
-
-The next question to ask is what will be the page size we'll select. The page size is of great important for the storage engine. That is the atomic unit on which
-all operations are made. The page size must be a multiple of the file system block size. In practice, that means that it should be a multiple of 4KB these days. 
-When building Voron (RavenDB's storage engine) we have run a whole bunch of benchmarks and the sweet spot for our needs was a page size that was 8KB. I'm going
-to use that value again and maybe we'll play with the size when we get to writing benchmark code (which is still very far away).
-
-The API that we wrote so far isn't really suitable for working with pages. That is intentional, we are now building another layer in the storage engine. On top
-of our PAL code (which deals with files) we now have a paging layer. I'm going to need to jump ahead a little bit and declare a few things that will not make 
-_any_ sense now. I'm going to define types for database and a transaction. You can see them in Listing 3.1.
-
-[source]
-.Listing 3.1 - db.h - The declarations of db_t and txn_t
-----
-include::./code/db.h[]
-----
-
-The reason that I'm defining them now is that there is going to be a strong association between the paging layer, which manages the pages on the file and the 
-transaction layer. In fact, the only _way_ for us to work with pages at all is in the context of a transaction. In the hope of avoiding duplicate work, I'm 
-going to forward declare these and move on. We'll flesh these down the line.
-
-Listing 3.2 shows the API we'll have for dealing with pages.
-
-[source]
-.Listing 3.2 - paging.h - The initial paging API
-----
-include::./code/paging.h[]
-----
-
-In Listing 3.2, we define the `PAGE_SIZE` constant and the `page_t` struct. There isn't much there at this point, we simply have the page number and
-the mapped address for the page. We can use that to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the 
-same read & write operation as we did in Listing 2.11. 
-One caveat we have to take into account is that we _can't_ modify the result of the `pages_get` directly. This is because the memory is mapped as readonly. Attempts
-to write to it will result in a segmentation fault. In order to deal with that, we'll copy the page to our own buffer and use the `pages_write` to update its content.
-
-[TIP]
-.Always work _with_ the hardware
-====
-One additional factor for using pages as the manner in which we manage the data in the file is that this means that all our I/O is now going to be page based.
-This in turn means that drives such as SSD or NVMe are going to have easier time, because we are never going to issue a read or a write the crosses a page
-boundary. This also tend to allow you to get better lifetime from your hardware, since you are reduce the amount of work it needs to do.
-Writing on page boundary has been shown to increase the longevity of the hard drives and can also allow the disk to optimize the data access better.
+The issue is that `fsync()` usage, however, has a *very* high cost. To the point where we'll spend considerable time and effort down the line
+to _reduce_ the number of times we have to call `fsync()`. The primary issue with `fsync()` is that it needs to clear not just the data in our
+file but to effectively flush the entire disk cache. If you have a lot of pending I/O, you will _wait_ until this is completed, and that can
+take a while.
 ====
 
-We are working with pages, so we want to use page aligned memory, which usually means that we want to make use of `posix_memalign`. That function, however, has awkward
-usage within our API, so we'll wrap it in `txn_allocate_page`, shown on Listing 3.3.
+The reason we need to call `fsync_parent_directory` is that to make the life of the user easier, we are going to create the file if it does not
+exists, including the parent directory. And if we are creating these directories, we need to ensure that they won't go away because of file
+system metadata issues.
 
-[source]
-.Listing 3.3 - mem.c - Allocating memory in chunks of pages
-----
-include::./code/mem.c[tags=palmem_allocate_pages]
-----
-
-The `txn_allocate_page` is pretty bare boned, but that is sufficient for now. With that at hand, let's see how we can make use of the API to read and write from the file.
-
-[source]
-.Listing 3.3 - main.c - Reading and writing using the paging API
-----
-include::./code/main.c[tags=create_and_write_file]
-----
-<1> Changes from Listing 2.11 start here.
-<2> We ask to get a (read only) page 0.
-<3> We allocate a (mutable) page from memory (unrelated to the file).
-<4> We copy the data from page 0 to the mutable page.
-<5> We copy a string to mutable page.
-<6> We write the modified page back to the file.
-<7> Using memory mapped I/O, we read the values we just wrote to the file.
-
-We get the page, copy it to our own buffer, modify our own copy and then write it back. This technique is called Copy On Write and it has some highly desirable
-properties. For example, until I call `pages_write`, there has been no change to the file. That means that I can abort an operation midway through, free the 
-copy of the memory I used and move on without need to write compensation logic to restore things to the way it was.
-
-Listing 3.3 also present us with another problem. I'm likely not going to be able to keep track of everything in a system that need to modify more than a single page. 
-We need some way to manage pages in a more seamless manner, to handle the Copy On Write, the writes of all the modified pages back to the file and to free all that 
-memory.
-
-For that matter, what happens if I need to modify the same page twice? Am I going to have multiple copies? What will end up in the file in the end?
-All of that leads me to realize that we can't remain at the level of working with a single page, we need some higher scope to work with here. We need to implment
-the concept of a database and a transaction.
-
-=== A skeleton database
-
-We aren't really ready for real transactions, because it will take time until it actually have the appropriate transactional properties, but that is the right term
-for where we will be.
-
-A transaction is a short lived object that is meant to do a specific operation. This is important because we don't expect a transaction to last very long or be very large.
-I'm sure we'll get some of those, but we are going to optimize for small & short transactions. Long or big transactions will work, but they aren't our optmization traget.
-
-Look at Listing 3.4, which shows the API we are going to expose for our users. 
-
-[source]
-.Listing 3.4 - db.h - Transaction API declaration for our storage engine
-----
-include::./code/db.h
-----
-
-The idea in Listing 3.4 is that we want to do _everything_ within the scope of a transaction. Note that if you want to get or modify a page, you must provide a 
-valid transaction to do so. The functions are also named `txn_low_get_page`, the `low` part of the name indicates that they are low level interface. I don't 
-intend for our users to _ever_ work at that level. These functions will be moved to an internal header and not exposed as we provide more features to callers. 
-
-We now have a `txn_t` struct that we can use to represent the transaction, but the actual implementation is hidden away in the `txn_state_t`. We'll shortly 
-see why that is a _very_ useful approach for what we want to do. We also introduced the concept of a `db_t`, which will hold the `file_handle_t` and any other 
-resources that will be required.
-
-[CAUTION]
-.Paying attention to the man behind the screen
-==== 
-C is a great low level language, but I'm really feeling the lack of data types. I want to make sure that everything that goes into the engine 
-is covered here, but I'm not sure how useful it will be to have you go through  a hash table implementation, for example.
- 
-I'm assuming that if you are reading this book, you probably are familiar with this enough so that should be of no interest to you. For now,
-I want to keep putting all the code here, but I think that when I'll start using code beyond the standard library, I'm going to just point
-you to that code and not put it here.
-====
-
-As you can imagine, the transaction API is going to be of enormous importance for our storage engine and as such, so we'll spend some time fleshing out the API.
-This is where we start to put together the skeleton of Gavran. Let's take a look at the first stage, creating a database, shown in Listing 3.5.
-
-[source]
-.Listing 3.5 - db.c - Creating an database instance
-----
-include::./code/db.c[]
-----
-
-A `db_t` is a simple structure that holds a single opaque pointer. I'm using the same approach in `txn_t` as well and it means that I have both encapsulation as well
-as a way to modify the state of the object without needing to change the value that holds it. We'll see how useful that is when we get to building transactions.
-
-The `struct database_state` itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), the file handle
-and the memory map result. As times goes by, we'll see more and more data being managed at the database level, but it is important to start with the proper structure
-now, to avoid extra work later.
-
-We check and validate the options, then we use our existing PAL file system API to create a file, set it to the right size and map it. With the use of `ensure` and
-`try_defer`, the entire thing reads as if we had no error handling. Note that we use multiple `try_defer` statements to setup resource cleanup in the event of a 
-failure. They are guaranteed to run in reverse order of definition.
-
-In the next chapter, we are going to focus on `handle_newly_opened_database` and do a lot of work there, but for now, I want to focus on transactions.
-
-=== Starting to implement transactions.
-
-You already saw the external API to create a transaction in Listing 3.4, now we want to actually build it. Before we can do that, I want to go over what transactions _are_.
-A transaction in the context of Gavran is a set of changes that are applied to the database. Until they are applied, they are not visible to any other transactions.
-
-Before we dive into the details of how a transaction is implemented in code, I want to talk about what we are trying to _do_. The attachments that we'll build in this
-chapter is mostly concerned with managing a list of modified pages. The idea is that you'll always go through the transaction to modify pages, it will manage them for
-you and eventually commit them.
-
-The overall structure can be seen in Figure 4. 
-
-.The layout of a transaction with 2 modified pages
-images::{img-src}/img3-3.png
-
-Using the Copy On Write mode tha we discussed earlier, whenever we want to modify a page, we'll copy it to the side and make the modifications. Once all the changes 
-in the transaction are completed, we'll persist them all at once. Consider the implications of such aa system. How would a rollback look in this case? 
-Simply free the copies, no one else had any access to them, so nothing needs to be done. 
-
-As for commit, once all the changes has been written to the file, we are done. We saw in the previous chapter that it takes significant effort to make sure that a
-change to the file metadata is persisted. Changes to the file's data are by no means easier. We are going to deal with a single facet of the ACID properties in
-this chapter, and atomic commit. 
-
-
-.A note about multi threading
+.Reducing user frustration
 ****
-We don't have any. 
+Automatically creating a directory when given a path is a _small_ feature. Call `mkdir` before `open`, pretty much. Doing that reliably_ is more
+complex, but not too hard. There are things you need to consider when doing this, what permissions should you give, how to handle any soft or
+hard links that you find along the way, etc.
 
-Right now, the code isn't going to be able to handle multiple threads.
-The atomic property that we'll have is about sequential or interleaved transactions.
-Gavran _will_ have all of the ACID properties, including safe usage under multi threaded code, mind you. 
+On the other hand, _not_ creating the directory automatically adds a tiny bump of frustration for the user. There is an extra, usually 
+unnecessary step to take along the way. 
 ****
 
-Listing 3.6 shows the structure of a transaction as well as its initialization.
+Sadly, safely creating the full path is a somewhat tedious task. You can see how we approach it in Listing 2.5, where quite a lot is going on.
 
 [source]
-.Listing 3.6 - txn.c - Creating a transaction
+.Listing 2.5 - fs.c - Ensuring that the full path provide exists and the caller has access to it
 ----
-include::./code/txn.c[tags=transaction_state]
-
-include::./code/txn.c[tags=txn_create]
+include::./code/fs.c[tags=ensure_file_path]
 ----
 
+If the file already exists, we can return successfully immediately. If the file is a directory, we return an error. We then scan the path
+one directory at a time and check if the directory exists. I'm using a trick here by putting a `0` in the place of the current directory
+separator. 
 
-A `txn_t` is just a pointer to `txn_state_t`, which holds the details about the transactions as well as the start of a hash table to hold
-the modified pages. We use the empty `entries` field to point past the end of the struct to the actual data. I'm doing it in this manner because
-it means that I have to do less allocations, which greatly simplify the code.
+In other words, given a `/db/phones\0`, we'll start the search for `/` from the second character and then place a null terminator on that 
+position. The filename would then be: `/db\0phones\0`. If needed, we will create the directory and then move to the next one. As part of
+that, we'll set the `/` again and continue from the next `/`. This code requires a _mutable_ string to work, but it does the work with no 
+allocations, which is nice.
 
-You'll note that we are passing a `flags` parameter to the function, but not doing much of it. I'm currently ignoring that but we'll use that to
-set various behaviors on the transaction, such as whatever it is read only or allowed to write.
-In `txn_create`, we allocate enough space for the transaction state as well as 8 hash table entries. We'll see how they are used shortly.
-
-[CAUTION]
-.I gotta implement a hash table, argh!
-====
-I have to admit, given that I write databases for a living, I was highly amused by how reluctant I was to implement a hash table. I have wrote
-a few, so it isn't a new task. I'm also doing that while implementing a _storage engine_, which is closely related. 
-
-The good news here is that this hash table only need to support `put` and `get`, not `remove`. That makes the overall complexity much easier.
-
-Given that the readers of this book are likely interested, I'm going to go for an open addressing with linear probing model. And one of the 
-key features that I care about is avoiding the usual pointer caching that you'll typically see in hash tables. That is why the actual 
-`entries` buffer is placed after the `txn_state_t`. Data locality. 
-====
-
-One of the key responsibilities of the transaction is managing the work of `txn_modify_page`, to handle that properly, we need to store the modified
-pages in the transaction and be able to access them quickly.  Listing 3.7 has the details on how we manage that.
+If we need to create a new directory, we make sure to call `fsync_parent_directory` to ensure that a power failure will not cause the directory to go poof.
+After all this setup, we can look at Listing 2.6, where the actual creation of the file takes place. 
 
 [source]
-.Listing 3.7 - Modifying a page inside a transaction
+.Listing 2.6 - fs.c - Creating a file in a safe manner" .c
 ----
-include::./code/txn.c[tags=txn_modify_page]
+include::./code/fs.c[tags=palfs_create_file]
 ----
 
-The `txn_modify_page` function in Listing 3.7 will first check if we already asked to modify the page in this transaction. If so, that copy of 
-the page will be returned to us. If not, we'll check that the page number if valid, allocate a copy of the page, copy the data to it and
-then register it in the hash table. 
+By the time we got to Listing 2.6, all the interesting tidbits of code are already done. We copy the file name to our own buffer, which we control. That
+means that the rest of the code can treat this file name as a mutable string.
 
-This is called Copy On Write (COW) and it will serve as the basis for implementing one of the core ACID properties, Isolation.
+If the file does not exist, we create the path to the file, as we saw in Listing 2.5. If the file exists, we make sure that it is not a directory. I'm 
+trying to go a little bit beyond rudimentary checks here and produce production level code.
 
-.Memory alignment
-====
-In Listing 3.5 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
-to give me 8KB buffer with 8KB alignment.
+As careful as I am being here, note that there are many scenarios that I'm not trying to cover. Using soft and hard links or junction points is the first example that
+pops to mind. And double the work if you need to deal with files or paths that come from un-trusted source. OWASP has quite a bit to talk about in terms of the kind of
+vulnerabilities that this might expose.
 
-This is a match to how the operating system manage pages in memory (on 4KB alignment). It means that for the rest of my system, I can safely assume that 
-the page buffer is properly align for anything that I want to do. This is important for performance and correctness reasons, especially outside of the x64/x86 world.
-====
+Earlier I discussed wanting to get the proper primitives and get as far away from the level of code that you would usually need to write to deal with the file system, 
+I think that now it is much clearer exactly why I want to get to that level as soon as I can.
 
-=== Managing the transaction state with a hash table
+=== Setting the file's size
 
-The real work in `txn_modify_page` is inside the `lookup_entry_in_tx` and `allocate_entry_in_tx`. Let's see how these work, we'll start with
-the `lookup_entry_in_tx` in Listing 3.8, where we are searching through the hash table for a match.
+When creating a file, it is created with zero bytes. That makes perfect sense, after all. There _is_ no data here. When you'll write to the file, the file system will
+allocate the additional space needed on the fly. This is simple, require no thinking on our part and exactly the wrong thing to want in a storage engine.
+
+We just saw how hard we have to work to properly ensure that changes to the metadata (such as, for example, changing its size) are properly protected against possible
+power failures. If we would need to call `fsync_parent_directory` after every write, we can kiss our hopes for good performance goodbye. Instead of letting the file
+system allocate the disk space for our file on the fly, we'll ask it for the space in advance, in well known locations. That will ensure that we only rarely need to
+call `fsync_parent_directory`. 
+
+Requesting the disk space in advance has another major benefit, it gives the file system the most information about how much disk space we want. It means that we give
+the file system the chance to give us long sequences of consecutive disk space. In the age of SSD and NVMe it isn't as critical as it used to be, but it still matters.
+Depending on your age, you may recall running `defrag` to gain _substantial_ performance increase on your system or have never heard about it at all. 
+
+Listing 2.7 shows how we request that the file system allocate enough disk space for us. At its core, we simply call to `posix_fallocate` which will extend the file
+for us (or do nothing if the file is already large enough). 
 
 [source]
-.Listing 3.8 - txn.c -Looking up a page in the transaction's hash table
+.Listing 2.7 - fs.c - Pre-allocate disk space by letting the file system know ahead of time what we need
 ----
-include::./code/txn.c[tags=lookup_entry_in_tx]
+include::./code/fs.c[tags=palfs_set_file_minsize]
 ----
 
-I'm going to skip explaining https://en.wikipedia.org/wiki/Hash_table[how hash tables work], I assume that you either have a grasp on that
-or is able to learn that from other sources. I'll mention that I'm using a hash table implementation strategy called 
-https://en.wikipedia.org/wiki/Linear_probing[linear probing]. This refers to how the hash table handles collisions. Instead of creating a 
-linked list of values on hash collision, we'll move to the next location in the array. That means that we are going to have good locality
-of reference when doing the search, the entire hash table is typically a single allocation and the `get` and `put` implementation are
-straightforward.
+Much of the work in Listing 2.7 is dedicated to calling `fsync_parent_directory`, but not because we call it. The issue is that `fsync_parent_directory` mutate the
+filename that is passed to it. It make sure to return things to normal by the time it returns, but it means that we cannot pass it a constant value and expect things
+to work and `palfs_get_filename` returns a `const char*`, so we have to use a temporary copy.  I'm defining an `char` array of `PATH_MAX` to store the value in a 
+mutable fashion and copying the value there. 
 
-The downside of linear probing and open addressing in general is that the deletes tend to be far more complex to implement than an 
-implementation that uses chaining. The good news is that we don't need to worry about that here, so the complexity is greatly reduced.
+_Technically_, I could pass the `filename` value to the `fsync_parent_directory`, I know where the value came from and it _is_ mutable. But the problem is that this
+code needs to be able to run in a multi threaded environment. Imagine what will happen if one thread executes `fsync_parent_directory` while another reads the name
+using `palfs_get_filename`. We'll get really hard to figure out bugs. 
 
-There are a few other things to consider for this case:
+[WARNING]
+.The perils of paths
+====
+In Listing 2.7, I'm using `PATH_MAX` as the size of `filename_mutable`. This is usually defined to be 4Kb in size, which should be sufficient for pretty much all
+needs. Only a very small amount of it is likely to be used and this isn't meant to be used in a deep stack. Note that I'm checking that the length of the name is
+sufficient to fit in there, to avoid smashing the stack. 
 
-* The key for the hash is the page number, these are `uint64_t` values and it is very likely that you'll get consecutive values.
-  As such, we don't try to be fancy with the hash function, we simply modulus the page number with the number of buckets in the 
-  hash table and start the search there.
-* The rule on collision goes like this. Whenever a put is attempted that collided, we'll move to the next available spot that 
-  is free. In other words, the worst case scenario for this sort of hash table is having to scan through all the buckets. 
-* This is where the load factor comes into play. Given that the page numbers are likely to cluster around specific values, the
-  empty buckets that remain act as backstop to avoid iterating through all the buckets. 
-* A `page_hash_entry_t` is 16 bytes in size of x64, which means that we can fit 4 of them on a cache line. A sequential reading
-  through the buckets is likely to generate highly predictable access pattern which can be optimized by the compiler and CPU
-  significantly. 
+There are actually scenarios where `PATH_MAX` is _not_ sufficient. See this post^[https://eklitzke.org/path-max-is-tricky] a full discussion of the perils of 
+ using `PATH_MAX`. 
+====
 
-Now that we know how to get an entry from the hash table, let's look at the other side, how can we put one in? This is the more complex
-operation because we may need to resize the hash table if the load factor grows big enough. The details are in Listing 3.9.
+=== Closing a file
+
+After quite a journey, we are almost at the end. The only function we are left to implement to be able to compile the code in Listing 2.2 is `palfs_close_file`.
+You can see the code in Listing 2.8.
 
 [source]
-.Listing 3.9 - txn.c - Adding an entry to the hash table, potentially resizing it
+.Listing 2.7 - fs.c - Closing a file
 ----
-include::./code/txn.c[tags=allocate_entry_in_tx]
+include::./code/fs.c[tags=palfs_close_file]
 ----
 
-The code in Listing 3.9 starts out in the same manner as `lookup_entry_in_tx` does, by doing a scan on the buckets from the starting position based on the
-modulus of the page number with the number of buckets. We are searching for one of two cases:
+The `palfs_close_file` function simple call the `close` method and add some additional error handling, nothing more. We aren't trying to call `fsync` or do any
+fancy things at this layer. That will be the responsibility of higher tiers in the code. 
 
-* A bucket that has the same page number, which we error on, because after the page has been allocated, there should never be any overwrites.
-* An empty bucket, which we can reuse. The way I implemented this hash table, we will write to the first empty bucket. That means that if we find any
-  empty bucket during a scan, we know that the page number we search can't be on a later bucket.
+One thing that deserve calling out here, an error from `close` isn't theoretical. In almost all cases, whenever you do I/O, you are not interacting with
+the actual hardware, but the page cache. That means that almost all the I/O is done in an asynchronous fashion and `close` is one way for you to get 
+notified if there have been any errors.
 
-Once we found an empty slot of put the value in, we check the load factor on the table. If it is lower than 75%, we can assign the bucket to the page
-and return successfully. But if we are over the 75% mark, we need to resize the hash table. This is done in `expand_hash_table`, which we will explore
-shortly. 
+Even with checking the return value of `close`, you still need to take into account that errors _will_ happen. Unless `fsync` was called, the file system
+is free to take you writes to a `close`-ed file and just throw them away. This is not a theoretical issue, by the way, it happens quite often in many 
+failure scenarios. 
 
-There are three possible return values for `expand_hash_table`:
+=== Reading and write from the file
 
-* Success, in which case we increased the size of the hash table and will recurse to add the page in the right location.
-* Failure, the function has run into unrecoverable problem. 
-* Unable to resize because of memory pressure. In this case, we have two separate behaviors. If there isn't enough memory, but there is still room in 
-  the hash table we'll allow the load factor to grow as needed. We'll only raise an error when the load factor reach 100% and we cannot complete the 
-  allocation at all.
+Now that we are able to create a file and allocate disk space for it, we need to tackle the next challenge, deciding how we are going to read and write
+from this file. I'll defer talking about the internal organization of the file to the next chapter, for now, let's talk about the low level interface
+that the PAL will offer to the rest of the system. 
 
-The idea behind this behavior is to be robust to temporary conditions. We don't *have* to resize the hash table if there is memory pressure right now.
-We can increase the load factor and gain more time. Maybe the transaction will complete and we can throw away the entire table, for example.
+We already saw them in Listing 2.1, `palfs_mmap` and `palfs_unmap` as well as `palfs_write_file` are the functions that are provided for this purpose. 
+There isn't much there, which is quite surprising. There is a _vast_ difference between the performance of reading from disk (even fast ones) and 
+reading from memory. For this reason, database and storage engines typically spend quite a bit of time managing buffer pools and reducing the 
+number of times they _have_ to go to disk.
 
-.Memory management in Linux
+I'm going to use a really cool technique to avoid the issue entirely. By mapping the file into memory, I don't have to write a buffer pool, I can
+use the page cache that already exists in the operating system. Using the system's page cache has a lot of advantages. I have run into this idea
+for the first time when reading LMDB's codebase and it is a fundamental property of how Voron (RavenDB's storage engine) achieve its speed. 
+I also recommend reading the https://queue.acm.org/detail.cfm?id=1814327["You're Doing It Wrong" paper by Poul-Henning Kamp] that goes into 
+great details why this is a great idea.
+
+The idea is that we'll ask the operating system to `mmap` the file into memory and we'll be able to access the data through directly memory access.
+The operating system is in charge of the page cache, getting the right data to memory, etc. That is a lot of code that we don't have to write, which
+has gone through literal decades of optimizations. In particular, the page cache implements strategies such as read ahead, automatic eviction as needed
+and many more behaviors that you'll usually need to write in a buffer pool implementation. By leaning on the OS' virtual memory manager to do all that
+we gain enormous leverage. 
+
+We could map the memory for both reads and writes, but I believe that it would make more sense to only map the file data for reads. This is to avoid
+cases where we accidentally write over the file data in an unintended manner. Instead, we create an explicit call to write the data to the file: `palfs_write_file`.
+The `palfs_unmap` is just the other side of the `palfs_mmap` operation, allowing us to clean up after ourselves. 
+You can see the mapping and un-mapping code in Listing 2.8.
+
+[source]
+.Listing 2.8 - fs.c - Implementing mapping and un-mapping of memory from out data file
+----
+include::./code/fs.c[tags=palfs_mmap]
+----
+
+There really isn't much there in Listing 2.8. We just need to call `mmap` or `munmap` and do some basic error reporting in the case of an error.
+In Listing 2.9, however, we allow to close the file and unmap the memory using a `defer` call.
+
+[source]
+.Listing 2.9 - fs.c - Allowing to close the file and unmap via defer
+----
+include::./code/fs.c[tags=defer_palfs_close_file]
+----
+
+And in Listing 2.10 we have the implementation of writing to a file: `palfs_write_file`
+
+[source]
+.Listing 2.10 - fs.c - Writing data to the file
+----
+include::./code/fs.c[tags=palfs_write_file]
+----
+
+The `palfs_write_file` call is a simple wrapper around the `pwrite` call, with the only difference being that we'll repeat the write until the entire buffer
+has been written. In practice, this usually means that we'll only do a single call to `pwrite` which will perform all the work.
+
+You'll note that I'm using two separate methods to interact with the file data. On the one hand, I'm using `mmap` to read the data, but I'm using the
+I/O call `pwrite` to write to it. On Linux, that is safe to do, because both `mmap` and the `write` call are using the same page cache and are 
+coherent with respect to one another. 
+
+On _Windows_, on the other hand, that is not the case. Mixing file I/O calls and memory mapped files lead to situation where you write data using the
+I/O API which will take some time to be visible using the memory view. For further reading, you can read how I found out about 
+https://ayende.com/blog/164577/is-select-broken-memory-mapped-files-with-unbufferred-writes-race-condition[this delightful state off affairs]. When we get to the 
+Windows side of things, we'll show how to deal with this limitation properly.
+
+=== Using our API for storing and retrieving data
+
+We are still very early on in the process, but I think that peeking at Listing 2.12 will show you how far we have come. We are making for use of all
+of our functions to store and read data from the file.
+
+[source]
+.Listing 2.11 - Using the file API to read & write
+----
+include::./code/main.c[]
+----
+<1> Allocating memory, ensuring that the memory was allocated and setting up its release on function exit.
+<2> Creating a file, ensuring that it was successful and setting up the closing of the file descriptor on function exit.
+<3> Mapping a file range, ensuring that it was successful and setting up the cleanup on function exit.
+
+Listing 2.11 shows case the the full  use of `defer` again, which is rapidly becoming my favorite approach to dealing with error handling in this codebase.
+We have to deal with multiple resources, but there isn't any jump in complexity in the function. Everything _works_. 
+
+As for the actual code, we create a new database, ensure that it has the right size, map it into memory and then write a value to it using the `write_file` 
+and read from it using the memory mapped address. The code reads nearly as well as the description of the code, with little in the way of unnecessary details.
+
+This may seem like a humble beginning, but we are currently building the foundation of our storage engine. In the next chapter, we are going to 
+start talking about how we are going to make _use_ of this functionality.
+
+=== Tests
+
+In order to make sure that we are producing good software, and that means tests. Now that the chapter is over, it is time to see its tests. I'm not going
+to deeply into the testing side of the pool, but I have found them to be invaluable to ensure that the software does what you _think_ it does.
+
+[source,python]
+.Listing 2.12 - Testing the file API
+----
+include::../pyapi/tests02.py[]
+----
+
+.A note on testing
 ****
-By default, Linux will never fail a `malloc`. In other words, when calling `malloc`, you'll never get `NULL` back. If you care to know more about 
-this behavior, search for https://lwn.net/Articles/317814/[over commit and the OOM killer]. A good paper on why over commit is required is 
-https://www.microsoft.com/en-us/research/publication/a-fork-in-the-road/["A fork() in the road"]. 
+On each chapter, I'm going to create a set of unit tests that will verify the functionality on the system. Each chapter conclude with a system that pass
+all its (and previous) tests. That is important to ensure that any change that I'm making isn't going to break the system.
 
-In essence, too much software simply assume that all memory allocations will succeed. Even the Linux kernel has this an issue with
-https://lwn.net/Articles/627419/[this kind of expectation]. 
+That said, be aware that you can spend a lot of time tying yourself to a particular implementation choices using tests. I'm testing my code in Python
+and there is a very small Python layer to isolate the tests from the C code. That means that any changes that I make are going to be easier to adapt to.
 
-The problem with not failing `malloc` is that Linux cannot just magic some more RAM, and even with swap, you'll eventually run out. The issue
-is how it _handles_ this scenario. And the way Linux work is that when you use too much memory, Linux will select a victim process and _kill_ it
-to reutilize the memory it uses. The situation is worse because the triggering event that would cause the OOM killer to run and select a victim
-to kill can be a totally unrelated process.
-
-That has serious implications for people building robust software. I can't catch a `SIGKILL` and ignore it, after all. But I could change
-my system behavior to handle memory allocation failure. There are configuration flag that you can use to avoid this behavior, but they 
-have their own side effects and they are global. In other words, they impact the whole system. If you are running a single process, or
-as we are doing now, a library, that isn't going to be useful for you.
-
-The code I'm writing here assume that it is possible to get memory allocation failures and handle them appropriately. We are currently
-allocating directly from the system, but that is likely to change as the implementation proceeds. We'll start managing the memory much
-more closely and will be able to react properly to low memory events.
+Right now I'm writing fairly silly tests, mostly because I'm not going to try to test that we are writing durably to disk. That requires a lab with a
+UPS that I can trigger via an API and a machine that I don't mind frying.
 ****
 
-The last piece of the puzzle for the hash table is the `expand_hash_table` function, which is covered in Listing 3.10. Inside this function you
-can find the reason we use the `state` pointer inside `txn_t`. 
-
-[source]
-.Listing 3.10 - txn.c - Expanding the hash table
-----
-include::./code/txn.c[tags=expand_hash_table]
-----
-
-The code in Listing 3.10 allocates a new bucket buffer, double the size of the old one (plus the size of the `txn_state_t`). If we fail this allocation, we let the 
-caller know about this and they can decide how to handle it. You saw the two behaviors we have for this error mode in Listing 3.9.
-
-We then copy the `txn_state_t` and then copy all the existing values from the existing table to the new one, placing them in their new location. 
-I'm handling an impossible scenario as well (`located` being `false`), just to be on the safe side. The key here is that there really isn't much that is
-interesting here. This function does the work, and that is it.
-
-There is a catch here. We allocate a _new_ buffer for the hash table and the transaction state. But the caller points to the old one. That is why we use
-the `txn_t` that holds a `state` field. The caller can keep using the same value, but we replace the internal state of the system. There are other
-important properties that we result from this behavior:
-
-* The memory is always allocated as a single buffer, aiding locality.
-* Doubling the size of the hash table means that we'll very quickly reach the appropriate size.
-* When we'll start managing memory directly, instead of using `malloc`, we'll be able to reuse this buffer across transaction calls. Meaning that allocations
-  will only need to happen on the _first_ transaction.
-
-=== Committing and closing the transaction
-
-Now that we have a way to keep track of the modified pages in the transaction, the next stage is to figure out how to commit those changes to disk. It turns out 
-that most of the work was already done for us. Listing 3.11 shows how to "commit" a transaction.
-I'm using commit in quotes here because this is not respecting any of the transaction properties, but we are laying down the foundation for actual transactions.
-
-.Listing 3.11 - txn.c - Committing the modified pages to disk
-----
-include::./code/txn.c[tags=txn_commit]
-----
-
-There really isn't much to do in Listing 3.11, to be honest. We scan through the table of modified pages and write them to the file using the `palfs_write_file` function
-we looked at in the previous chapter. If there is an error, we return, and that is about it. Note that we don't have any attempt to for durability, 
-atomicity, etc. 
-
-As we run through the modified pages, we are freeing them. If there is an error, nothing bad will happen, they will get cleaned up properly in `txn_close`. 
-After the transaction is committed, we can close it. Alternatively, we can close the transaction without committing it to as a rollback. Listing 3.12 shows the
-relevant code.
-
-.Listing 3.12 - txn.c - Closing the transaction and freeing resources
-----
-include::./code/txn.c[tags=txn_close]
-----
-
-Closing the transaction in Listing 3.12 means that we iterate over the modified pages and free them, then we are done. 
-
-A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the
-future. Get it working, get it working _right_ and only then get it working fast.
-
-=== Using the transaction API
-
-The last thing that we'll do in this chapter is put everything together. Listing 3.12 shows how we can now write Listing 3.3 using the new API.
-
-[source]
-.Listing 3.12 - main.c - Reading and writing using the paging API
-----
-include::./code/main.c[tags=create_and_use_database]
-----
-<1> Function to read from the first page in a transaction
-<2> Start a transaction and modify a page
-<3> Read before committing the transaction
-<4> Read after transaction commit
-
-In Listing 3.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
-of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to make sure show
-how we are starting to get real features. 
-The reason the code in Listing 3.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
-_copy_ of the page and the act of committing the transaction make it apparent to the next transaction.
-
-=== Unit tests
-
-
+And now we are ready to see how we are going to be _using_ the files.

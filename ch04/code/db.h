@@ -6,6 +6,7 @@
 #include "defer.h"
 #include "errors.h"
 
+// tag::paging_api[]
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
@@ -14,10 +15,16 @@ typedef struct page {
   uint64_t page_num;
   size_t num_of_pages;
 } page_t;
+// end::paging_api[]
 
+// tag::tx_api[]
 typedef struct database_state db_state_t;
 
 typedef struct transaction_state txn_state_t;
+
+typedef struct database_options {
+  uint64_t minimum_size;
+} database_options_t;
 
 typedef struct database {
   db_state_t* state;
@@ -26,10 +33,6 @@ typedef struct database {
 typedef struct transaction {
   txn_state_t* state;
 } txn_t;
-
-typedef struct database_options {
-  uint64_t minimum_size;
-} database_options_t;
 
 result_t db_create(const char* filename, database_options_t* options,
                    db_t* db);
@@ -46,7 +49,4 @@ result_t txn_commit(txn_t* tx);
 
 result_t txn_get_page(txn_t* tx, page_t* page);
 result_t txn_modify_page(txn_t* tx, page_t* page);
-
-result_t pages_get(db_state_t* db, page_t* p);
-
-result_t pages_write(db_state_t* db, page_t* p);
+// end::tx_api[]

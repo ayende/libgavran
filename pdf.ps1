@@ -1,0 +1,1 @@
+asciidoctor-pdf -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\output\book.pdf
