@@ -24,3 +24,5 @@ include::./ch02/ch02.adoc[]
 include::./ch03/ch03.adoc[]
 
 include::./ch04/ch04.adoc[]
+
+include::./ch05/ch05.adoc[]

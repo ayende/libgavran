@@ -1,13 +1,13 @@
 
 == Errors handling and other criticial infrastructure
 
-I want to first illustrate that with the sample code in Listing 1.1 and then discuss exactly what is going on here. In Listing 1.1 we have a function that
+I want to first illustrate that with the sample code in Listing 2.1 and then discuss exactly what is going on here. In Listing 2.1 we have a function that
 reads 4 bytes from a file and convert these bytes into a string format. The task itself is nonsensical, meant to just illustrate a point. There are a bunch 
 of things that can go wrong in this kind of code. We may fail to open the file, or allocate memory. We may fail to read from the file, or not read enough, 
 etc. We need to remember to always close the file descriptor and we should always free the allocated buffer on error, but not if the function 
 completed successfully.
 
-That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 1.1 shows a function that has to deal with coordination across merely two
+That is a _lot_ of state to manage, and it makes it easy to make mistake. Listing 2.1 shows a function that has to deal with coordination across merely two
 resources. If we have to deal with more, the situation worsen. Take a look at the code and then we'll break down everything that is new here.
 
 [IMPORTANT]
@@ -19,12 +19,12 @@ That is why the very first action I'm making in this book is explaining all abou
 building!
 ====
 
-Listing 1.1 shows a _lot_ of stuff that won't show up in a C tutorial. I have marked on the side all the interesting tidbits, so we can discuss them at
+Listing 2.1 shows a _lot_ of stuff that won't show up in a C tutorial. I have marked on the side all the interesting tidbits, so we can discuss them at
 length.
 
 
 [source]
-.Listing 1.1: Mostly automatic handling of resource usage and error handling in C
+.Listing 2.1: Mostly automatic handling of resource usage and error handling in C
 ----
 include::./code/main.c[tags=read_int_to_str_buffer]
 ----
@@ -117,11 +117,11 @@ These two approaches together leads to a much cleaner codebase. And now, let's s
 === Implementing resource management
 
 I'll start with the `defer` commands, because they are the smaller of the two. Most they just give good syntax over the compiler behavior. You can see how they
-are implemented in Listing 1.2.
+are implemented in Listing 2.2.
 
 
 [source]
-.Listing 1.2: defer.h - Implementation of defer and try_defer using the __attribute__(cleanup)
+.Listing 2.2: defer.h - Implementation of defer and try_defer using the __attribute__(cleanup)
 ```
 include::./code/defer.h[]
 ```
@@ -130,7 +130,7 @@ include::./code/defer.h[]
 cancelled the deferral.
 <3> The actual macro implementing `try_defer`. Note that we set the `cancelled` field to track the marker value provided by the caller.
 <4> The `defer` macro is implemented in the same manner, but without setting the `cancelled` field. 
-<5> Helper macros to add `defer` support for other functions. We saw it being used in Listing 1.1. The `enable_semicolon_after_macro_` piece is there to allow
+<5> Helper macros to add `defer` support for other functions. We saw it being used in Listing 2.2. The `enable_semicolon_after_macro_` piece is there to allow
 nice syntax without compiler warnings. It defines a useless function to allow to add `;` at the end of the macro.
 
 The idea is that we setup a call to `void defer_<function>(struct cancel_defer* cd)` function. That will be called by the compiler when the scope exits. This
@@ -155,7 +155,7 @@ Moving on to the error handling, we actually have a few levels inside the error 
   to them. 
 * The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
 
-On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.  Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 2.3.  Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
 use to _report_ errors:
 
 * `errors_push` will create a new error and `errors_append_message` will add additional context to it.
@@ -165,15 +165,15 @@ use to _report_ errors:
   to them. 
 * The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
 
-On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 1.3.
+On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 2.3.
 
 [source]
-.Listing 1.3: errors.h - Internal errors API implementation
+.Listing 2.3: errors.h - Internal errors API implementation
 ----
 include::./code/errors.h[]
 ----
 
-A lot is going on in Listing 1.3, allow me to go through this one at a time. We start by forward declaring `op_result_t`. We don't actually _have_ such 
+A lot is going on in Listing 2.3, allow me to go through this one at a time. We start by forward declaring `op_result_t`. We don't actually _have_ such 
 a struct. We'll be using `result_t`, which is a pointer to an `op_result_t` with the `warn_unused_result` enabled. Because we created a new type, the 
 compiler will warn us about trying to assign it to other data types and the `warn_unused_result` will make sure taht we can't ignore it.
 
@@ -215,11 +215,11 @@ That keeps us in the habit of managing errors properly.
 ====
 
 You'll note that unlike most C APIs, that we are missing quite a bit here. Namely, where is the memory handling? In order to reduce as much as possible the
-complexity of the system, I have chosen to avoid memory allocations entirely in the error API. Let's see how this is achieved, we'll start with Listing 1.4, 
+complexity of the system, I have chosen to avoid memory allocations entirely in the error API. Let's see how this is achieved, we'll start with Listing 2.4, 
 where we define the storage for the actual errors.
 
 [source]
-.Listing 1.4 - errors.c - Storage declaration for the errors API
+.Listing 2.4 - errors.c - Storage declaration for the errors API
 ----
 include::./code/errors.c[tags=declarations]
 ----
@@ -230,16 +230,16 @@ modes.
 
 The `\_messages_buffer` is a 2KB buffer that is used to store the actual messages for the errors, while the `\_errors_messages_buffer` is an array that stores
 the relevant message for each of recorded array. In other words, the `\_errors_messages_buffer` entries will always point to a location inside `\_messages_buffer`. 
-The `\_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 1.
+The `\_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 2.
 
 .The actual error messages are stored in a thread local buffer that is pre-allocated
-image::{img-src}/img1-1.png[]
+image::{img-src}/img1-2.png[]
 
 The `\_errors_count` value counts the number of errors that are currently recorded while `\_errors_buffer_len` counts how much of `\_messages_buffer` is in use. 
 The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `\_out_of_memory` flag is set if we have too many errors, at which point
 we'll start discarding them. I find that very unlikely to actually happen. Very deep stack traces are unusual in C so I don't expect will need even that much.
 
-If you'll look at the API in Listing 1.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about
+If you'll look at the API in Listing 2.3, you can see that aside from `errors_push_new` and `errors_append_message`, all the other functions we offer are about
 reading the errors or clearing them. The usual method you'll use the `ensure` / `failed` macros to bubble the errors to the callers until we get somewhere where
 we can make a decision about the issue. The caller will need to read the errors and make a determination and then clear the error state and prepare for the next
 operation. 
@@ -252,16 +252,16 @@ with the raw C API, but it was too complex to manage. I wrote a couple of utilit
 Howard Chu's (author of LMDB) discussion of https://www.openldap.org/lists/openldap-software/200303/msg00560.html[C string API].
 
 [source]
-.Listing 1.5 - errors.c - String processing routines
+.Listing 2.5 - errors.c - String processing routines
 ----
 include::./code/errors.c[tags=try_sprintf]
 ----
 
-The key about the functions in Listing 1.5 is that they accept a _limit_ to how much they can write, and then do all the checks inside. The end result is that
-our code string processing routine looks much simpler, see for yourself in Listing 1.6.
+The key about the functions in Listing 2.5 is that they accept a _limit_ to how much they can write, and then do all the checks inside. The end result is that
+our code string processing routine looks much simpler, see for yourself in Listing 2.6.
 
 [source]
-.Listing 1.6 - errors.c - Pushing a new error into the thread's buffer----
+.Listing 2.6 - errors.c - Pushing a new error into the thread's buffer----
 ----
 include::./code/errors.c[tags=errors_push_new]
 ----
@@ -277,20 +277,20 @@ or require any special treatment. Most of the nastiest issues that I have run in
 Reducing the number of possible failure points is very useful.
 
 Now that you have seen how we push a new error, let's see how we provide more context to the error. The backend of the `with` and `msg` macros is the
-`errors_append_message` function, shown in Listing 1.7.
+`errors_append_message` function, shown in Listing 2.7.
 
 [source]
-.Listing 1.7 - errors.c - Appending a message to the current error
+.Listing 2.7 - errors.c - Appending a message to the current error
 ----
 include::./code/errors.c[tags=errors_append_message]
 ----
 <1> Here we start from one char _before_ the end. This is so the next write will overwrite the null terminator.
 <2> On the other hand, if we wrote to the buffer but hit the end, we'll restore the overwritten null terminator so we won't have an out of bound access on read.
 
-And finally, we have the rest of the errors API implementation in Listing 1.8. 
+And finally, we have the rest of the errors API implementation in Listing 2.8. 
 
 [source]
-.Listing 1.8 - errors.c - The rest of the implementation
+.Listing 2.8 - errors.c - The rest of the implementation
 ----
 include::./code/errors.c[tags=errors_append_message]
 ----
@@ -322,14 +322,14 @@ there. The _tests_, however, are going to be included at the end of every chapte
 
 [source,python]
 ----
-include::../pyapi/tests01.py[]
+include::../pyapi/tests02.py[]
 ----
 
 And the output:
 
 ....
 ===================== test session starts ============================
-platform linux -- Python 3.6.9, pytest-5.4.1, py-1.8.1, pluggy-0.13.1
+platform linux -- Python 3.6.9, pytest-5.4.1, py-2.8.1, pluggy-0.13.1
 rootdir: /home/ayende/projects/libgavran/ch01/code
 collected 7 items
 

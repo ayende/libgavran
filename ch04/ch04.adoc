@@ -79,10 +79,10 @@ to use that value again and maybe we'll play with the size when we get to writin
 The API that we wrote so far isn't really suitable for working with pages. That is intentional, we are now building another layer in the storage engine. On top
 of our PAL code (which deals with files) we now have a paging layer. I'm going to need to jump ahead a little bit and declare a few things that will not make 
 _any_ sense now. Instead of building pages and then the database infrastructure, I'm going to define the code as it should be in the end. You can see the 
-relevant definitions in Listing 3.1. 
+relevant definitions in Listing 4.1. 
 
 [source]
-.Listing 3.1 - db.h & impl.h - The declarations of db_t and txn_t
+.Listing 4.1 - db.h & impl.h - The declarations of db_t and txn_t
 ----
 // from db.h - public API
 include::./code/db.h[tags=paging_api]
@@ -91,7 +91,7 @@ include::./code/db.h[tags=paging_api]
 include::./code/impl.h[tags=paging_api]
 ----
 
-In Listing 3.1, we also define the `PAGE_SIZE` constant and the `page_t` struct. There isn't much there at this point, we simply have the page number and
+In Listing 4.1, we also define the `PAGE_SIZE` constant and the `page_t` struct. There isn't much there at this point, we simply have the page number and
 the mapped address for the page as well as the total size. 
 
 We can use that to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the same read & write operation as we did in 
@@ -109,10 +109,10 @@ Writing on page boundary has been shown to increase the longevity of the hard dr
 ====
 
 We are working with pages, so we want to use page aligned memory, which usually means that we want to make use of `posix_memalign`. That function, however, has awkward
-usage within our API, so we'll wrap it in `txn_allocate_page`, shown on Listing 3.2.
+usage within our API, so we'll wrap it in `txn_allocate_page`, shown on Listing 4.2.
 
 [source]
-.Listing 3.2 - mem.c - Allocating memory in chunks of pages
+.Listing 4.2 - mem.c - Allocating memory in chunks of pages
 ----
 include::./code/mem.c[tags=palmem_allocate_pages]
 ----
@@ -120,7 +120,7 @@ include::./code/mem.c[tags=palmem_allocate_pages]
 The `palmem_allocate_pages` is pretty bare boned, but that is sufficient for now. With that at hand, let's see how we can make use of the API to read and write from the file.
 
 [source]
-.Listing 3.2 - main.c - Reading and writing using the paging API
+.Listing 4.2 - main.c - Reading and writing using the paging API
 ----
 include::./code/main.c[tags=create_and_write_file]
 ----
@@ -134,11 +134,11 @@ include::./code/main.c[tags=create_and_write_file]
 
 We get the page, copy it to our own buffer, modify our own copy and then write it back. This technique is called Copy On Write and it has some highly desirable
 properties. For example, until I call `pages_write`, there has been no change to the file. That means that I can abort an operation midway through, free the 
-copy of the memory I used and move on without need to write compensation logic to restore things to the way it was. Listing 3.3 shows the implementation of
+copy of the memory I used and move on without need to write compensation logic to restore things to the way it was. Listing 4.3 shows the implementation of
 `pages_get` and `pages_write`.
 
 [source]
-.Listing 3.3 - paging.c - Reading and writing using the paging API
+.Listing 4.3 - paging.c - Reading and writing using the paging API
 ----
 include::./code/paging.c[]
 ----
@@ -168,10 +168,10 @@ that is the right term for where we will be.
 A transaction is a short lived object that is meant to do a specific operation. This is important because we don't expect a transaction to last very long or be very large.
 I'm sure we'll get some of those, but we are going to optimize for small & short transactions. Long or big transactions will work, but they aren't our optimization target.
 
-Look at Listing 3.4, which shows the API we are going to expose for our users. 
+Look at Listing 4.4, which shows the API we are going to expose for our users. 
 
 [source]
-.Listing 3.4 - db.h - Transaction API declaration for our storage engine
+.Listing 4.4 - db.h - Transaction API declaration for our storage engine
 ----
 include::./code/db.h[tags=tx_api]
 ----
@@ -184,7 +184,7 @@ include::./code/db.h[tags=tx_api]
 <7> Enabling `defer` support for closing a transaction.
 <8> Page modifications API.
 
-The idea in Listing 3.4 is that we want to do _everything_ within the scope of a transaction. Note that if you want to get or modify a page, you must provide a 
+The idea in Listing 4.4 is that we want to do _everything_ within the scope of a transaction. Note that if you want to get or modify a page, you must provide a 
 valid transaction to do so. The functions are also named `txn_low_get_page`, the `low` part of the name indicates that they are low level interface. I don't 
 intend for our users to _ever_ work at that level. These functions will be moved to an internal header and not exposed as we provide more features to callers. 
 
@@ -204,10 +204,10 @@ you to that code and not put it here.
 ====
 
 As you can imagine, the transaction API is going to be of enormous importance for our storage engine and as such, so we'll spend some time fleshing out the API.
-This is where we start to put together the skeleton of Gavran. Let's take a look at the first stage, creating a database, shown in Listing 3.5.
+This is where we start to put together the skeleton of Gavran. Let's take a look at the first stage, creating a database, shown in Listing 4.5.
 
 [source]
-.Listing 3.5 - db.c - Creating an database instance
+.Listing 4.5 - db.c - Creating an database instance
 ----
 include::./code/db.c[]
 ----
@@ -217,7 +217,7 @@ I'm sorry for the code dump, but I assume that it is best to show everything as 
 A `db_t` is a simple structure that holds a single opaque pointer. I'm using the same approach in `txn_t` as well and it means that I have encapsulation as well
 as a way to modify the state of the object without needing to change the value that holds it. We'll see how useful that is when we get to building transactions.
 
-The `struct database_state` (shown in Listing 3.1) itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), 
+The `struct database_state` (shown in Listing 4.1) itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), 
 the file handle and the memory map result. As times goes by, we'll see more and more data being managed at the database level, but it is important to start with the
 proper structure now, to avoid extra work later.
 
@@ -229,7 +229,7 @@ In the next chapter, we are going to focus on `handle_newly_opened_database` and
 
 === Starting to implement transactions
 
-You already saw the external API to create a transaction in Listing 3.4, now we want to actually build it. Before we can do that, I want to go over what transactions _are_.
+You already saw the external API to create a transaction in Listing 4.4, now we want to actually build it. Before we can do that, I want to go over what transactions _are_.
 A transaction in the context of Gavran is a set of changes that are applied to the database. Until they are applied, they are not visible to any other transactions.
 
 Before we dive into the details of how a transaction is implemented in code, I want to talk about what we are trying to _do_. The attachments that we'll build in this
@@ -239,7 +239,7 @@ you and eventually commit them.
 The overall structure can be seen in Figure 4. 
 
 .The layout of a transaction with 2 modified pages
-image::{img-src}/img3-3.png[]
+image::{img-src}/img3-4.png[]
 
 Using the Copy On Write mode tha we discussed earlier, whenever we want to modify a page, we'll copy it to the side and make the modifications. Once all the changes 
 in the transaction are completed, we'll persist them all at once. Consider the implications of such a system. How would a rollback look in this case? 
@@ -259,10 +259,10 @@ The atomic property that we'll have is about sequential or interleaved transacti
 Gavran _will_ have all of the ACID properties, including safe usage under multi threaded code, mind you. 
 ****
 
-Listing 3.6 shows the structure of a transaction as well as its initialization.
+Listing 4.6 shows the structure of a transaction as well as its initialization.
 
 [source]
-.Listing 3.6 - impl.h & txn.c - Creating a transaction
+.Listing 4.6 - impl.h & txn.c - Creating a transaction
 ----
 include::./code/impl.h[tags=transaction_state]
 
@@ -299,15 +299,15 @@ held by the container and they can live very far apart. That is not the case her
 ====
 
 One of the key responsibilities of the transaction is managing the work of `txn_modify_page`, to handle that properly, we need to store the modified
-pages in the transaction and be able to access them quickly.  Listing 3.7 has the details on how we manage that.
+pages in the transaction and be able to access them quickly.  Listing 4.7 has the details on how we manage that.
 
 [source]
-.Listing 3.7 - Modifying a page inside a transaction
+.Listing 4.7 - Modifying a page inside a transaction
 ----
 include::./code/txn.c[tags=txn_modify_page]
 ----
 
-The `txn_modify_page` function in Listing 3.7 will first check if we already asked to modify the page in this transaction. If so, that copy of 
+The `txn_modify_page` function in Listing 4.7 will first check if we already asked to modify the page in this transaction. If so, that copy of 
 the page will be returned to us. If not, we'll check that the page number if valid, allocate a copy of the page, copy the data to it and
 then register it in the hash table. 
 
@@ -315,7 +315,7 @@ This is called Copy On Write (COW) and it will serve as the basis for implementi
 
 .Memory alignment
 ****
-In Listing 3.7 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
+In Listing 4.7 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
 to give me 8KB buffer with 8KB alignment.
 
 This is a match to how the operating system manage pages in memory (on 4KB alignment). It means that for the rest of my system, I can safely assume that 
@@ -325,10 +325,10 @@ the page buffer is properly align for anything that I want to do. This is import
 === Managing the transaction state with a hash table
 
 The real work in `txn_modify_page` is inside the `lookup_entry_in_tx` and `allocate_entry_in_tx`. Let's see how these work, we'll start with
-the `lookup_entry_in_tx` in Listing 3.8, where we are searching through the hash table for a match.
+the `lookup_entry_in_tx` in Listing 4.8, where we are searching through the hash table for a match.
 
 [source]
-.Listing 3.8 - txn.c -Looking up a page in the transaction's hash table
+.Listing 4.8 - txn.c -Looking up a page in the transaction's hash table
 ----
 include::./code/txn.c[tags=lookup_entry_in_tx]
 ----
@@ -355,15 +355,15 @@ There are a few other things to consider for this case:
 
 Now that we know how to get an entry from the hash table, let's look at the other side, how can we put a value in the table?
 This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. 
-The details are in Listing 3.9.
+The details are in Listing 4.9.
 
 [source]
-.Listing 3.9 - txn.c - Adding an entry to the hash table, potentially resizing it
+.Listing 4.9 - txn.c - Adding an entry to the hash table, potentially resizing it
 ----
 include::./code/txn.c[tags=allocate_entry_in_tx]
 ----
 
-The code in Listing 3.9 starts out in the same manner as `lookup_entry_in_tx` does, by doing a scan on the buckets from the starting position based on the
+The code in Listing 4.9 starts out in the same manner as `lookup_entry_in_tx` does, by doing a scan on the buckets from the starting position based on the
 modulus of the page number with the number of buckets. We are searching for one of two cases:
 
 * A bucket that has the same page number, which we error on, because after the page has been allocated, there should never be any overwrites.
@@ -409,17 +409,17 @@ allocating directly from the system, but that is likely to change as the impleme
 more closely and will be able to react properly to low memory events.
 ****
 
-The last piece of the puzzle for the hash table is the `expand_hash_table` function, which is covered in Listing 3.10. Inside this function you
+The last piece of the puzzle for the hash table is the `expand_hash_table` function, which is covered in Listing 4.10. Inside this function you
 can find the reason we use the `state` pointer inside `txn_t`. 
 
 [source]
-.Listing 3.10 - txn.c - Expanding the hash table
+.Listing 4.10 - txn.c - Expanding the hash table
 ----
 include::./code/txn.c[tags=expand_hash_table]
 ----
 
-The code in Listing 3.10 allocates a new bucket buffer, double the size of the old one (plus the size of the `txn_state_t`). If we fail this allocation, we let the 
-caller know about this and they can decide how to handle it. You saw the two behaviors we have for this error mode in Listing 3.9.
+The code in Listing 4.10 allocates a new bucket buffer, double the size of the old one (plus the size of the `txn_state_t`). If we fail this allocation, we let the 
+caller know about this and they can decide how to handle it. You saw the two behaviors we have for this error mode in Listing 4.9.
 
 We then copy the `txn_state_t` and then copy all the existing values from the existing table to the new one, placing them in their new location. 
 I'm handling an impossible scenario as well (`located` being `false`), just to be on the safe side. The key here is that there really isn't much that is
@@ -437,10 +437,10 @@ important properties that we result from this behavior:
 === Getting a page from the transaction
 
 We focused on the process of modifying a page, what about getting one? If we don't need to mutate a page, there is no need for all this copying, right?
-Checking Listing 3.12, where we show how to get a page for read only operations.
+Checking Listing 4.12, where we show how to get a page for read only operations.
 
 [source]
-.Listing 3.12 - txn.c - Getting a page from the transaction for read only purposes
+.Listing 4.12 - txn.c - Getting a page from the transaction for read only purposes
 ----
 include::./code/txn.c[tags=txn_get_page]
 ----
@@ -455,38 +455,38 @@ that you might want to keep in mind.
 === Committing and closing the transaction
 
 Now that we have a way to keep track of the modified pages in the transaction, the next stage is to figure out how to commit those changes to disk. It turns out 
-that most of the work was already done for us. Listing 3.11 shows how to "commit" a transaction.
+that most of the work was already done for us. Listing 4.11 shows how to "commit" a transaction.
 I'm using commit in quotes here because this is not respecting any of the transaction properties, but we are laying down the foundation for actual transactions.
 
-.Listing 3.11 - txn.c - Committing the modified pages to disk
+.Listing 4.11 - txn.c - Committing the modified pages to disk
 ----
 include::./code/txn.c[tags=txn_commit]
 ----
 
-There really isn't much to do in Listing 3.11, to be honest. We scan through the table of modified pages and write them to the file using the `palfs_write_file` function
+There really isn't much to do in Listing 4.11, to be honest. We scan through the table of modified pages and write them to the file using the `palfs_write_file` function
 we looked at in the previous chapter. If there is an error, we return, and that is about it. Note that we don't have any attempt to for durability, 
 atomicity, etc. 
 
 As we run through the modified pages, we are freeing them. If there is an error, nothing bad will happen, they will get cleaned up properly in `txn_close`. 
-After the transaction is committed, we can close it. Alternatively, we can close the transaction without committing it to as a rollback. Listing 3.12 shows the
+After the transaction is committed, we can close it. Alternatively, we can close the transaction without committing it to as a rollback. Listing 4.12 shows the
 relevant code.
 
-.Listing 3.12 - txn.c - Closing the transaction and freeing resources
+.Listing 4.12 - txn.c - Closing the transaction and freeing resources
 ----
 include::./code/txn.c[tags=txn_close]
 ----
 
-Closing the transaction in Listing 3.12 means that we iterate over the modified pages and free them, then we are done. 
+Closing the transaction in Listing 4.12 means that we iterate over the modified pages and free them, then we are done. 
 
 A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the
 future. Get it working, get it working _right_ and only then get it working fast.
 
 === Using the transaction API
 
-The last thing that we'll do in this chapter is put everything together. Listing 3.12 shows how we can now write Listing 3.3 using the new API.
+The last thing that we'll do in this chapter is put everything together. Listing 4.12 shows how we can now write Listing 4.3 using the new API.
 
 [source]
-.Listing 3.12 - main.c - Reading and writing using the paging API
+.Listing 4.12 - main.c - Reading and writing using the paging API
 ----
 include::./code/main.c[tags=create_and_use_database]
 ----
@@ -495,10 +495,10 @@ include::./code/main.c[tags=create_and_use_database]
 <3> Read before committing the transaction
 <4> Read after transaction commit
 
-In Listing 3.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
+In Listing 4.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
 of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to show
 how we are starting to get real features. 
-The reason the code in Listing 3.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
+The reason the code in Listing 4.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
 _copy_ of the page and the act of committing the transaction make it apparent to the next transaction.
 
 === Unit tests
@@ -506,9 +506,9 @@ _copy_ of the page and the act of committing the transaction make it apparent to
 Finally, before we close this chapter, we need to make sure that the software _works_. 
 
 [source,python]
-.Listing 3.13 - Unit testing the transaction API
+.Listing 4.13 - Unit testing the transaction API
 ----
-include::../pyapi/tests03.py[]
+include::../pyapi/tests04.py[]
 ----
 
 The actual Python API I'm using here is not mirroring the C API directly, mind you. I'm trying to get a more realistic API that wraps some C code. It also

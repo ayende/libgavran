@@ -1,0 +1,1 @@
+pytest ../../pyapi/tests01.py ../../pyapi/tests02.py ../../pyapi/tests03.py ../../pyapi/tests04.py

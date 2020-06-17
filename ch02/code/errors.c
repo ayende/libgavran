@@ -147,7 +147,7 @@ void errors_clear(void) {
   _errors_count = 0;
 }
 
-size_t errors_get_count() { return _errors_count; }
+inline size_t errors_get_count() { return _errors_count; }
 
 uint32_t errors_get_oom_flag() { return _out_of_memory; }
 // end::rest[]
