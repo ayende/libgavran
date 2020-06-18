@@ -83,6 +83,6 @@ static inline void set_bit(uint64_t* buffer, uint64_t pos) {
 }
 
 static inline void clear_bit(uint64_t* buffer, uint64_t pos) {
-  buffer[pos / 64] ^= ~(1UL << pos % 64);
+  buffer[pos / 64] ^= (1UL << pos % 64);
 }
 // end::free_space[]

@@ -41,6 +41,11 @@ static result_t initialize_freespace_bitmap(db_t *db, txn_t *tx) {
   for (size_t i = 0; i < num_of_busy_pages; i++) {
     set_bit(p.address, i);
   }
+  // mark as busy the pages beyond the end of the file
+  for (size_t i = db->state->header.number_of_pages % BITS_IN_PAGE;
+       i < BITS_IN_PAGE; i++) {
+    set_bit(p.address, i);
+  }
 
   return success();
 }
@@ -90,7 +95,8 @@ static result_t handle_newly_opened_database(db_t *db) {
 
   ensure(file_header->magic == FILE_HEADER_MAGIC, EINVAL,
          msg("Unable to find valid file header"),
-         with(palfs_get_filename(state->handle), "%s"));
+         with(palfs_get_filename(state->handle), "%s"),
+         with(file_header->magic, "%lu"));
 
   ensure(
       file_header->number_of_pages * PAGE_SIZE <= state->mmap.size,

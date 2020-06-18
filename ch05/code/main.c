@@ -9,7 +9,7 @@
 #include "platform.fs.h"
 #include "platform.mem.h"
 
-// tag::create_and_use_database[]
+// tag::allocate_page_and_use_it[]
 static result_t allocate_page_and_use_it() {
   // <1>
   db_t db;
@@ -42,7 +42,7 @@ static result_t allocate_page_and_use_it() {
 
   return success();
 }
-// end::create_and_use_database[]
+// end::allocate_page_and_use_it[]
 
 int main() {
   if (!allocate_page_and_use_it()) {

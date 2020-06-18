@@ -248,8 +248,9 @@ result_t txn_free_page(txn_t *tx, page_t *page) {
 
   memset(page->address, 0, PAGE_SIZE);
 
-  page_t free_space_page = {.page_num =
-                                page->page_num / BITS_IN_PAGE};
+  page_t free_space_page = {
+      .page_num = tx->state->db->header.free_space_bitmap_start +
+                  page->page_num / BITS_IN_PAGE};
 
   ensure(txn_modify_page(tx, &free_space_page));
   clear_bit(free_space_page.address, page->page_num % BITS_IN_PAGE);

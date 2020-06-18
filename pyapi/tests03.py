@@ -15,58 +15,40 @@ def setup_function(function):
     if os.path.isdir(path):
         os.rmdir(path)
 
-options = DatabaseOptions()
-options.minimum_size = 128*1024
+def test_can_get_file_name():   
+    with PalFS(path) as file:
+        assert path == file.name()
 
-def test_can_create_db_and_Tx():
-    with Database(path, options) as db:
-        with db.txn(flags = 0) as tx:
+def test_can_close_file():   
+    with PalFS(path) as file:
+        file.close()
+
+def test_can_create_file():   
+    with PalFS(path) as f:
+        assert os.path.isfile(path)
+        assert os.path.getsize(path) == 0
+
+def test_can_set_file_size():
+    with PalFS(path) as file:
+        assert os.path.getsize(path) == 0
+        file.set_size(1024)
+        assert os.path.getsize(path) == 1024
+        assert file.size() == 1024
+
+def test_can_write_and_read_memory():
+    with PalFS(path) as file:
+        file.set_size(1024)
+        file.write(0, b'Hello Gavran\0')
+        with file.map(0, 1024) as ptr:
+            s = ctypes.string_at(ptr).decode('utf-8')
+            assert s == "Hello Gavran"
+
+def test_will_get_error_on_opening_a_dir():
+    os.mkdir(path)
+    with pytest.raises(GavranError) as g:
+        with PalFS(path) as file:
             pass
+    assert "Is a directory" in str(g.value)
 
-def test_can_write_data():
-    with Database(path, options) as db:
-        with db.txn(flags = 0) as tx:
-            p = tx.modify(0)
-            b = b'Hello Garvan Python'
-            ctypes.memmove(p.address, b, len(b))
 
-            tx.commit()
-
-        with db.txn(flags = 0) as tx:
-            p = tx.get(0)
-            b = b'Hello Garvan Python'
-            
-            assert b == ctypes.string_at(p.address)
-
-def test_tx_without_commit_change_no_data():
-    with Database(path, options) as db:
-        with db.txn(flags = 0) as tx:
-            p = tx.modify(0)
-            b = b'Hello Garvan Python'
-            ctypes.memmove(p.address, b, len(b))
-
-            # tx.commit() - not doing this
-
-        with db.txn(flags = 0) as tx:
-            p = tx.get(0)
-            b = b''
-            
-            assert b == ctypes.string_at(p.address)
-
-def test_value_persisted_across_restarts():
-    with Database(path, options) as db:
-        with db.txn(flags = 0) as tx:
-            p = tx.modify(0)
-            b = b'Hello Garvan Python'
-            ctypes.memmove(p.address, b, len(b))
-
-            tx.commit()
-
-    # create it again
-
-    with Database(path, options) as db:
-        with db.txn(flags = 0) as tx:
-            p = tx.get(0)
-            b = b'Hello Garvan Python'
-               
-            assert b == ctypes.string_at(p.address)
+         

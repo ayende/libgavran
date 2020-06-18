@@ -154,6 +154,16 @@ class Transaction:
     def __init__(self, s):
         self.s = s
 
+    def allocate(self, nearby=0):
+        p = Page()
+        if not gvn.txn_allocate_page(pointer(self.s), pointer(p), c_long(nearby)):
+            Errors.Raise()
+        return p
+
+    def free(self, page):
+        if not gvn.txn_free_page(pointer(self.s), pointer(page)):
+            Errors.Raise()
+        
     def get(self, num):
         p = Page()
         p.page_num = num
@@ -265,7 +275,9 @@ def setup_db(gvn):
         ("txn_close", [POINTER(DbOrTx)], c_void_p),
         ("txn_commit",[POINTER(DbOrTx)], c_void_p),
         ("txn_get_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
-        ("txn_modify_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p)
+        ("txn_modify_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
+        ("txn_free_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
+        ("txn_allocate_page", [POINTER(DbOrTx), POINTER(Page), c_long], c_void_p),
     ]
 
     for method in methods:

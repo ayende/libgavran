@@ -166,6 +166,9 @@ data structure (B+Tree) to manage the free list. That can lead to recursion wher
 list operation is ongoing. That can lead to... issues and took a while to properly stabilize. This model, however, solve all those issues very
 neatly.
 
+We also mark the pages _beyond the end of the file_ as busy, which allows us to safely skip them. We'll need to address that when we'll allow to 
+increase the file size.
+
 .Placing limits on the transaction API
 ****
 Using the transaction API to manage the startup of our database is cool, but it comes at a cost. We are using the API at a time when we haven't actually
@@ -442,10 +445,27 @@ the error handling here, since this is just concept code. It makes the intent mu
 [source]
 .Listing 5.13 - main.c - Using the transaction allocation API
 ----
-include::./code/main.c[tags=txn_allocate_page]
+include::./code/main.c[tags=allocate_page_and_use_it]
 ----
+<1> Create the database (and set close on function end via `defer`).
+<2> Create a transaction (and close via `defer`).
+<3> Allocate a new page using the free space bitmap
+<4> Copy data to the new page
+<5> Commit and close the transaction
+<6> Create a new transaction to read the data. Note that _this_ transaction will be closed via the previous setup `defer`.
 
-The code in Listing 5.13 will print the new allocated page number (2) and the string "Hello Gavran". We still have work to do on the infrastructure, but we
+The code in Listing 5.13 will print the new allocated page number (2) and the string "Hello Gavran". 
+You can run this multiple times to see how it allocates a new page on each run. Calls to `txn_free_page` will make the page available for allocations again.
+We still have work to do on the infrastructure, but we
 are very nearly ready to start implementing higher level concepts, like data structures. The next chapter will deal with issues such as allocating multiple
-pages and how we can handle increasing the file size of the database dynamically.
+pages and managing pages metadata.
 
+=== Unit tests
+
+As usual, chapter close means that we need to unit test our code. 
+
+[source,python]
+.Listing 5.14 - Unit testing the transaction API
+----
+include::../pyapi/tests05.py[]
+----
