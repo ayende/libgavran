@@ -1,5 +1,6 @@
 #pragma once
 
+#include <errno.h>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -13,7 +14,7 @@
 typedef struct page {
   void* address;
   uint64_t page_num;
-  size_t num_of_pages;
+  size_t overflow_size;
 } page_t;
 // end::paging_api[]
 
@@ -69,3 +70,19 @@ result_t txn_commit(txn_t* tx);
 result_t txn_get_page(txn_t* tx, page_t* page);
 result_t txn_modify_page(txn_t* tx, page_t* page);
 // end::tx_api[]
+
+// tag::new_tx_api[]
+result_t txn_free_page(txn_t* tx, page_t* page);
+result_t txn_allocate_page(txn_t* tx, page_t* page,
+                           uint64_t nearby_hint);
+// end::new_tx_api[]
+
+// tag::free_space[]
+static inline void set_bit(uint64_t* buffer, uint64_t pos) {
+  buffer[pos / 64] |= (1UL << pos % 64);
+}
+
+static inline void clear_bit(uint64_t* buffer, uint64_t pos) {
+  buffer[pos / 64] ^= ~(1UL << pos % 64);
+}
+// end::free_space[]

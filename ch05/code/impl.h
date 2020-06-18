@@ -43,5 +43,8 @@ typedef struct bitmap_search_state {
   uint64_t previous_set_bit;
 } bitmap_search_state_t;
 
+void init_search(bitmap_search_state_t* search, void* bitmap,
+                 uint64_t size, uint64_t required);
+
 bool search_free_range_in_bitmap(bitmap_search_state_t* search);
 // end::search_free_range_in_bitmap[]

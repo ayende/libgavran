@@ -9,15 +9,6 @@
 #include "platform.mem.h"
 
 // tag::free_space[]
-
-static inline void set_bit(uint64_t *buffer, uint64_t pos) {
-  buffer[pos / 64] |= (1UL << pos % 64);
-}
-
-static inline void clear_bit(uint64_t *buffer, uint64_t pos) {
-  buffer[pos / 64] ^= ~(1UL << pos % 64);
-}
-
 static inline uint64_t get_number_of_free_space_bitmap_pages(
     db_state_t *db) {
   return db->header.number_of_pages / BITS_IN_PAGE +
@@ -58,7 +49,7 @@ static result_t initialize_freespace_bitmap(db_t *db, txn_t *tx) {
 // tag::set_file_header[]
 static result_t set_file_header(db_t *db, txn_t *tx) {
   page_t p = {.page_num = 0};
-  ensure(txn_modify_page(&tx, &p));
+  ensure(txn_modify_page(tx, &p));
 
   memset(p.address, 0, PAGE_SIZE);
 
@@ -68,6 +59,16 @@ static result_t set_file_header(db_t *db, txn_t *tx) {
 }
 // end::set_file_header[]
 
+static result_t initialize_file_structure(db_t *db) {
+  txn_t tx;
+  ensure(txn_create(db, 0, &tx));
+  defer(txn_close, &tx);
+  ensure(initialize_freespace_bitmap(db, &tx));
+  ensure(set_file_header(db, &tx));
+  ensure(txn_commit(&tx));
+  return success();
+}
+
 // tag::handle_newly_opened_database[]
 static result_t handle_newly_opened_database(db_t *db) {
   db_state_t *state = db->state;
@@ -76,7 +77,7 @@ static result_t handle_newly_opened_database(db_t *db) {
   // if the file headeris zeroed, we are probably dealing with a new
   // database
   bool isNew =
-      memcmp(file_header, &state->header, sizeof(file_header_t));
+      !memcmp(file_header, &state->header, sizeof(file_header_t));
 
   if (isNew) {
     // now needs to set it up
@@ -87,23 +88,25 @@ static result_t handle_newly_opened_database(db_t *db) {
     ensure(initialize_file_structure(db));
   }
 
-  fail(file_header->magic != FILE_HEADER_MAGIC, EINVAL,
-       msg("Unable to find valid file header"),
-       with(get_file_name(state->handle), "%s"));
+  ensure(file_header->magic == FILE_HEADER_MAGIC, EINVAL,
+         msg("Unable to find valid file header"),
+         with(palfs_get_filename(state->handle), "%s"));
 
-  fail(file_header->number_of_pages * PAGE_SIZE > state->mmap.size,
-       EINVAL,
-       msg("The size of the file is smaller than the expected size, "
-           "file was probably truncated"),
-       with(get_file_name(state->handle, "%s")),
-       with(state->mmap.size, "%lu"),
-       with(file_header->number_of_pages * PAGE_SIZE, "%lu"));
+  ensure(
+      file_header->number_of_pages * PAGE_SIZE <= state->mmap.size,
+      EINVAL,
+      msg("The size of the file is smaller than the expected size, "
+          "file was probably truncated"),
+      with(palfs_get_filename(state->handle), "%s"),
+      with(state->mmap.size, "%lu"),
+      with(file_header->number_of_pages * PAGE_SIZE, "%lu"));
 
-  fail(file_header->page_size != PAGE_SIZE, EINVAL,
-       msg("The file page size is invalid"),
-       with(get_file_name(state->handle), "%s"),
-       with(file_header->page_size, "%d"), with(PAGE_SIZE, "%d"));
+  ensure(file_header->page_size == PAGE_SIZE, EINVAL,
+         msg("The file page size is invalid"),
+         with(palfs_get_filename(state->handle), "%s"),
+         with(file_header->page_size, "%d"), with(PAGE_SIZE, "%d"));
 
+  memcpy(&db->state->header, file_header, sizeof(file_header_t));
   return success();
 }
 // end::handle_newly_opened_database[]

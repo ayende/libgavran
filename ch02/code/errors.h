@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+extern _Thread_local size_t _errors_count;
+
 typedef struct operation_result op_result_t;
 
 #define result_t __attribute__((warn_unused_result)) op_result_t*
@@ -14,7 +16,7 @@ typedef struct operation_result op_result_t;
 
 #define ensure(CALL, ...)                        \
   do {                                           \
-    if (!CALL || errors_get_count()) {           \
+    if (!(CALL) || errors_get_count()) {         \
       failed(EINVAL, msg(#CALL), ##__VA_ARGS__); \
     }                                            \
   } while (0)

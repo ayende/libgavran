@@ -1,10 +1,11 @@
 #include <limits.h>
+#include <string.h>
 
 #include "impl.h"
 
 // tag::search_word[]
-static void init_search(bitmap_search_state_t *search, void *bitmap,
-                        uint64_t size, uint64_t required) {
+void init_search(bitmap_search_state_t *search, void *bitmap,
+                 uint64_t size, uint64_t required) {
   memset(search, 0, sizeof(bitmap_search_state_t));
   search->bitmap = bitmap;
   search->bitmap_size = size;
@@ -101,7 +102,7 @@ static bool search_for_smallest_nearby(
       // the bigger the request range, the less we care about locality
       +search->space_required;
 
-  while (find_next_range(search)) {
+  while (search_bitmap(search)) {
     if (search->space_required == search->space_available_at_position)
       return true;  // perfect match!
     if (current_size > search->space_available_at_position) {
@@ -139,7 +140,7 @@ bool search_free_range_in_bitmap(bitmap_search_state_t *search) {
   search->bitmap += high;
   search->bitmap_size -= high;
 
-  if (find_smallest_nearby_range(search)) {
+  if (search_for_smallest_nearby(search)) {
     search->found_position += high * 64;
     return true;
   }
