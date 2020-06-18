@@ -211,7 +211,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   page_t original = {.page_num = page->page_num};
   ensure(pages_get(tx->state->db, &original));
 
-  ensure(palmem_allocate_pages(1, &page->address),
+  ensure(palmem_allocate_pages(page),
          msg("Unable to allocate memory for a COW page"));
 
   size_t cancel_defer = 0;

@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-extern _Thread_local size_t _errors_count;
-
 typedef struct operation_result op_result_t;
 
 #define result_t __attribute__((warn_unused_result)) op_result_t*

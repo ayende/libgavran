@@ -13,7 +13,7 @@ _Thread_local static char _messages_buffer[MAX_ERRORS_MSG_BUFFER];
 _Thread_local static const char *_errors_messages_buffer[MAX_ERRORS];
 _Thread_local static int _errors_messages_codes[MAX_ERRORS];
 
-_Thread_local size_t _errors_count;
+_Thread_local static size_t _errors_count;
 _Thread_local static size_t _errors_buffer_len;
 _Thread_local static uint32_t _out_of_memory;
 
@@ -147,7 +147,7 @@ void errors_clear(void) {
   _errors_count = 0;
 }
 
-inline size_t errors_get_count() { return _errors_count; }
+size_t errors_get_count() { return _errors_count; }
 
 uint32_t errors_get_oom_flag() { return _out_of_memory; }
 // end::rest[]
