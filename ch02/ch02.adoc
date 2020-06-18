@@ -233,7 +233,7 @@ the relevant message for each of recorded array. In other words, the `\_errors_m
 The `\_errors_messages_codes`, in turn, is a parallel array of the actual error codes that we got. This memory layout is shown in Figure 2.
 
 .The actual error messages are stored in a thread local buffer that is pre-allocated
-image::{img-src}/img1-2.png[]
+image::{img-src}/fig1.png[]
 
 The `\_errors_count` value counts the number of errors that are currently recorded while `\_errors_buffer_len` counts how much of `\_messages_buffer` is in use. 
 The size of the buffer is 2KB and the maximum number of errors we can hold is 64. The `\_out_of_memory` flag is set if we have too many errors, at which point

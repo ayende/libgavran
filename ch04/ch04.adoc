@@ -19,7 +19,7 @@ You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of bloc
 you with the illusion of a sequence of bytes, the reality is very different. Take a look at Figure 3, which shows the physical outline of the text file above.
 
 .Physical layout of a file on disk
-image::{img-src}/img3-1.png[]
+image::{img-src}/fig3.png[]
 
 Any file that is smaller than 512 bytes will fit on a single block one block (sometimes called sector). A block is 512B - 4KB in size, in most cases and you can
 assume that it will be 4KB on pretty much any modern disk. And by modern, I'm talking anything anything made in the past _decade_. 
@@ -33,7 +33,7 @@ we aren't actually moving anything. We simply change the list of blocks that are
 on Figure 4.
 
 .A file's physical layout after adding a block in the middle
-image::{img-src}/img3-2.png[]
+image::{img-src}/fig4.png[]
 
 So we can add data cheaply in the middle of a file, although it requires somewhat unusual API calls. The problem is that we can do that only on block boundary. On 
 most modern systems, that is 4KB in size. We can also only insert data in increments of 4KB, so this approach isn't generally usable.
@@ -236,10 +236,10 @@ Before we dive into the details of how a transaction is implemented in code, I w
 chapter is mostly concerned with managing a list of modified pages. The idea is that you'll always go through the transaction to modify pages, it will manage them for
 you and eventually commit them.
 
-The overall structure can be seen in Figure 4. 
+The overall structure can be seen in Figure 5. 
 
 .The layout of a transaction with 2 modified pages
-image::{img-src}/img3-4.png[]
+image::{img-src}/fig5.png[]
 
 Using the Copy On Write mode tha we discussed earlier, whenever we want to modify a page, we'll copy it to the side and make the modifications. Once all the changes 
 in the transaction are completed, we'll persist them all at once. Consider the implications of such a system. How would a rollback look in this case? 

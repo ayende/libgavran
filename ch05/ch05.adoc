@@ -49,12 +49,12 @@ what needs to be done to add this to our code. We need a higher level abstractio
 
 This is why we have the `database_options_t` and the `db_create` function, which we saw in the previous chapter. Listing 4.5 showed how we open a database,
 validate its options, set the size, create the memory mapping, etc. I mentioned there that we'll do more work in `handle_newly_opened_database` in the future.
-Well, the future has arrived, and now is the time to put some structure in our file. Take a look at Figure 5, which shows the structure.
+Well, the future has arrived, and now is the time to put some structure in our file. Take a look at Figure 6, which shows the structure.
 The idea is that in the first page, we are going to store the header _twice_, 
 once at the start of the file (position 0) and once at the midway of the page (position 4096). 
 
 .The physical layout of the header records in the first few page in the file
-image::{img-src}/img5-1.png[]
+image::{img-src}/fig6.png[]
 
 [TIP]
 .Duplicating data for safety reasons
@@ -76,10 +76,10 @@ Listing 5.3 shows the implementation of `handle_newly_opened_database` and how w
 `db_state_t`, to include an in memory copy of the file header. 
 
 [source]
-.Listing 5.3 - db.c - Opening a database
+.Listing 5.3 - impl.h & db.c - Opening a database
 ----
 // adding new fields to the database state
-include::./code/db.h[tags=database_state]
+include::./code/impl.h[tags=database_state]
 
 include::./code/db.c[tags=handle_newly_opened_database]
 ----
@@ -131,7 +131,7 @@ The bitmap approach has several advantages:
 * There are many ways to efficiently search a bitmap.
 * There is a fixed size for the free list, we don't need to handle allocate / free of space except when we grow the actual file.
 
-This hits all the sweat spots, so let consider how we can go about implementing this? If you'll recall Figure 5, we are using the first page of the file 
+This hits all the sweat spots, so let consider how we can go about implementing this? If you'll recall Figure 6, we are using the first page of the file 
 as the location of the headers. Where would we put the free space bitmap?
 
 As easy solution would be to place it as the second page, but that has an issue, how are we going to handle growing the file? A single page will give us
@@ -184,9 +184,9 @@ more than one page. That can only happen once the database exceeded 4TB in size.
 of code to handle this. We also defined several utility functions in Listing 5.5, but there is nothing really interesting in them. 
 
 .Layout of the file on disk after adding the free space bitmap
-image::{img-src}/img5-2.png[]
+image::{img-src}/fig7.png[]
 
-As you can see in Figure 6, the second page is used for the free list and the first two bits there are marked as busy. The rest of the page is 
+As you can see in Figure 7, the second page is used for the free list and the first two bits there are marked as busy. The rest of the page is 
 filled with zeros, indicating free pages. Where did those zeros come from, however? We didn't set them up.
 These zeros are there because we create a new file. Even though we preallocated the size of the file, the operating system ensures that the 
 contents of the file are zeroed. Otherwise, you may get sensitive data from other files. We rely on this property here to avoid doing extra work.
@@ -211,7 +211,7 @@ architecture makes me very happy. Let's look at Listing 5.6 to see how this is d
 [source]
 .Listing 5.6 - txn.c - Freeing a page in the transaction
 ----
-include::./code/txn.c[tags=txn_free_page]
+include::./code/txn.alloc.c[tags=txn_free_page]
 ----
 
 The fact that there is so little to do here is quite impressive. Even I'm saying this about my own code.
@@ -265,7 +265,7 @@ include::./code/impl.h[tags=search_free_range_in_bitmap]
 .This is a pure function
 =====
 The `search_free_range_in_bitmap` is a pure function. In other words, it does _not_ modify its input or make any change to the system. After finding
-the right range, the responsibility to mark is as busy is on the caller.
+the right range, the responsibility to mark it as busy is on the caller.
 =====
 
 This function accepts the bitmap buffer and its size, the required size and the preferred location and returns the found position using the `found_position`
@@ -312,19 +312,19 @@ This code is succinct, and I like how it turned out. It took several tries to ge
 A part of what make this function challenging is that we are keeping track of the state _across_ calls. For example, we may have a free range that strides a
 word boundary. That will be handle in _two_ calls to `search_word`. 
 
-It might be easier to understand if you take a peek at Figure 7, which shows a bitmap in a visual manner for the bitmap:
+It might be easier to understand if you take a peek at Figure 8, which shows a bitmap in a visual manner for the bitmap:
  `{0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC}`. 
 
 .Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
-image::{img-src}/img5-3.png[]
+image::{img-src}/fig8.png[]
 
-Figure 7 has three types of cells:
+Figure 8 has three types of cells:
 
 * Marked with `X` - busy. 
 * Marked with `V` and colored - we'll run a few sample queries on them, so I highlighted them for ease of identification.
 * Empty - free cells. 
 
-Look at the first row of cells in Figure 7, if we want to allocate a page near the marked position (red), where would you put it? What if we wanted to 
+Look at the first row of cells in Figure 8, if we want to allocate a page near the marked position (red), where would you put it? What if we wanted to 
 allocate two pages? In the middle of the image, there is another marked position (yellow), I want to get 4 pages near that location. And we want to get
 7 pages near the last marked position (green). 
 
@@ -340,7 +340,7 @@ I'm writing this in Jun of 2020, which means that five to eight years after the 
 get _right_.
 ====
 
-The data in Figure 7 has multiple words to go through, let's see how the code is handling it. We use the `search_word` to search a single word and 
+The data in Figure 8 has multiple words to go through, let's see how the code is handling it. We use the `search_word` to search a single word and 
 `search_bitmap` to search the entire bitmap. THe code for that function in in Listing 5.9
 
 [source]
@@ -417,7 +417,7 @@ see how it all comes together.
 [source]
 .Listing 5.12 - txn.c - Allocate a page in the transaction
 ----
-include::./code/txn.c[tags=txn_allocate_page]
+include::./code/txn.alloc.c[tags=txn_allocate_page]
 ----
 <1> This utility function is used to mark a page as busy in the free space bitmap.
 <2> Right now we deal with all pages as single units. We cannot search across free space pages. We'll be fixing this later.
