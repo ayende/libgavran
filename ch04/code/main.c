@@ -35,7 +35,7 @@ static result_t create_and_write_file() {
   ensure(pages_get(&state, &p));
   page_t copy = {.num_of_pages = 1, .page_num = 0};
   // <3>
-  ensure(palmem_allocate_pages(1, &copy.address));
+  ensure(palmem_allocate_pages(&copy));
   // <4>
   memcpy(copy.address, p.address, PAGE_SIZE);
   // <5>
