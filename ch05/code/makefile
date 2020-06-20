@@ -14,7 +14,7 @@ SRCS := $(shell find $(SRC_DIRS) -name '*.c')
 OBJS := $(SRCS:%=$(BUILD_DIR)/%.o)
 DEPS := $(OBJS:.o=.d)
 
-INC_DIRS := $(she ll find $(SRC_DIRS) -type d)
+INC_DIRS := $(shell find $(SRC_DIRS) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
 WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments
@@ -22,7 +22,7 @@ DEFINES = -D_FILE_OFFSET_BITS=64
 
 CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC 
 
-LDFLAGS =  -lm #-shared
+LDFLAGS = -shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)

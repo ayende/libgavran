@@ -75,11 +75,13 @@ static result_t initialize_file_structure(db_t *db) {
   page_t metadata_page = {.page_num = 0};
   ensure(txn_modify_page(&tx, &metadata_page));
   memset(metadata_page.address, 0, PAGE_SIZE);
+  // <4>
   page_metadata_t *entry = metadata_page.address;
   entry->type = page_metadata;
 
   ensure(initialize_freespace_bitmap(db, &tx, &metadata_page));
 
+  // <5>
   memcpy(&entry->file_header, &db->state->header, sizeof(file_header_t));
 
   ensure(txn_commit(&tx));

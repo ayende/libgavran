@@ -148,14 +148,15 @@ class DbOrTx(Structure):
     _fields_ = [("state", c_void_p)]
 
 class Page(Structure):
-    _fields_ =[("address", c_void_p), ("page_num", c_long), ("size", c_size_t)]
+    _fields_ =[("address", c_void_p), ("page_num", c_long), ("overflow_size", c_size_t)]
 
 class Transaction:
     def __init__(self, s):
         self.s = s
 
-    def allocate(self, nearby=0):
+    def allocate(self, size = 8192, nearby=0):
         p = Page()
+        p.overflow_size = size
         if not gvn.txn_allocate_page(pointer(self.s), pointer(p), c_long(nearby)):
             Errors.Raise()
         return p

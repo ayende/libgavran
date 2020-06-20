@@ -118,7 +118,7 @@ static bool filter_unacceptable_ranges(bitmap_search_state_t *search) {
     return true;
   }
 
-  // <8>
+  // <6>
   uint64_t new_end = ((search->found_position + search->space_required) &
                       PAGES_IN_METADATA_MASK) +
                      PAGES_IN_METADATA;

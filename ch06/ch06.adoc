@@ -131,9 +131,9 @@ There are other issues that we have to consider:
 * We _must_ be able to access a particular page's metadata in O(1) access time. That is, we cannot afford to do any sort of search. In the same way that accessing
   a page is done using pointer arithmetic and jumping directly to the memory mapped location, we need to have the same behavior for the pages metadata.
 
-A good solution would be to place a metadata page at the start of Mb. That will give us a constant computation to figure out where a particular page's metadata is. 
-It will also ensure that a single bad block in the disk will not have a disastrous impact on the entire data file. However, if we choose this method, we'll run into 
-other issues. Let's take a look at Figure 11 to see what would happen then.
+A good solution would be to place a metadata page at the start of each megabyte of disk space. That will give us a constant computation to figure out where a particular 
+page's metadata is.  It will also ensure that a single bad block in the disk will not have a disastrous impact on the entire data file. However, if we choose this method, 
+we'll run into  other issues. Let's take a look at Figure 11 to see what would happen then.
 
 .Placing a metadata page at the start of each MB in the file
 image::{img-src}/fig11.png[]
@@ -176,7 +176,7 @@ this is the case.
 There is one issue with this approach, however, if the allocation size is a multiple of 128 pages. In this case, we'll add another extra page to the 
 allocation, ensuring that the first page will reside in a metadata page range that has a valid page. 
 This adds a bit of complication to large value allocations, but it isn't a massively large issue, and there are many cases where having some extra allocated
-space that we can immediately use is of great benefit, so we'll go with this. It also means that at worst we waste 8KB for a 1 MB allocation, so it isn't ac
+space that we can immediately use is of great benefit, so we'll go with this. It also means that at worst we waste 8KB for a 1 MB allocation, so it isn't a
 critical amount.
 
 .The location of the file header
@@ -184,7 +184,7 @@ critical amount.
 In the previous chapter, we placed the file header in the first page. Now, that first page is the metadata page for the first MB in the data. What do we do
 with the file header?
 
-The answer is that we are going to put it on a diet, but keep it in just the same place. The side of the current `file_header_t` is 40 bytes, which is a bit
+The answer is that we are going to put it on a diet, but keep it in just the same place. The size of the current `file_header_t` is 40 bytes, which is a bit
 high, if we can narrow it down enough, we'll be able to put in inside the _metadata_ for the first page, which is itself stored in the first page. The whole
 thing is a bit recursive, but I believe that this would provide an elegant solution for this task. 
 ****
@@ -197,10 +197,10 @@ We need to decide what kind of information we are going to place in the page met
 .Listing 6.2 - impl.h & db.h - The structure of page metadata and the API to work with it
 ----
 // from impl.h
-include:./code/impl.h[tags=page_metadata_t]
+include::./code/impl.h[tags=page_metadata_t]
 
 // from db.h
-include:./code/db.h[tags=page_metadata]
+include::./code/db.h[tags=page_metadata]
 ----
 
 All types of pages have an `overflow_size` and a `type` field to work with. There are currently 31 free bytes that we get to use and 28 bytes that we reserve
@@ -210,7 +210,7 @@ we'll start using them to setup the database.
 [source]
 .Listing 6.3 - txn.c - API implementation to work with page metadata
 ----
-include:./code/txn.c[tags=page_metadata]
+include::./code/txn.c[tags=page_metadata]
 ----
 
 The API in Listing 6.3 is built upon `txn_get_page` and `txn_modify_page` and provide us with a way to get or modify the metadata for a page. As you can see,
@@ -222,10 +222,10 @@ Listing 6.4 and see how that changed. The previous incarnation of this function 
 .Listing 6.4 - db.h & db.c - Initializing the database
 ----
 // from db.h
-include:./code/db.h[tags=file_header]
+include::./code/db.h[tags=file_header]
 
 // from db.c
-include:./code/db.c[tags=initialize_file_structure]
+include::./code/db.c[tags=initialize_file_structure]
 ----
 <1> We put `file_header_t` on a diet, see the sidebar below for more details on the changes. The end result was that `file_header_t` now takes 26 bytes, down from 40.
 <2> The size of the free space is now computed in bytes taken for the bitmap, and there is a maximum size now. It is 2EB (exabytes), so I'm not worried. 
@@ -265,9 +265,9 @@ We'll tackle them in turn, in order of increasing complexity. Right now, we are 
 will become much more useful down the road. 
 
 [source]
-.Listing 6.5 - db.c - Updating `txn_get_page` to account for page metadata
+.Listing 6.5 - txn.c - Updating `txn_get_page` to account for page metadata
 ----
-include:./code/db.c[tags=txn_get_page]
+include::./code/txn.c[tags=txn_get_page]
 ----
 
 The key change here is the `set_page_overflow_size` addition. There isn't much to do in `txn_get_page` that needs to be different, we just need to set the
@@ -278,13 +278,13 @@ internally.
 Next, we have Listing 6.6 covering the `txn_modify_page`.
 
 [source]
-.Listing 6.6 - mem.c & db.c - Updating `txn_modify_page` to account for page metadata
+.Listing 6.6 - mem.c & txn.c - Updating `txn_modify_page` to account for page metadata
 ----
 // from mem.c
-include:./code/mem.c[tags=palmem_allocate_pages]
+include::./code/mem.c[tags=palmem_allocate_pages]
 
 // from db.c
-include:./code/db.c[tags=txn_get_page]
+include::./code/txn.c[tags=txn_modify_page]
 ----
 <1> Call `set_page_overflow_size` to figure out what the size of the value is.
 <2> Compute the size in pages from the `overflow_size` value, which is in bytes.
@@ -307,9 +307,9 @@ The next function to discuss is `txn_allocate_page`. Here we need to take care o
 an metadata page yet, so we have to check and reserve that page first. The code for that is in Listing 6.7.
 
 [source]
-.Listing 6.7 - db.alloc.c - Updating `txn_allocate_page` to account for page metadata
+.Listing 6.7 - txn.alloc.c - Updating `txn_allocate_page` to account for page metadata
 ----
-include:./code/db.alloc.c[tags=txn_allocate_page]
+include::./code/txn.alloc.c[tags=txn_allocate_page]
 ----
 <1> Allow to check if a page is marked as busy or not. 
 <2> In `allocate_metadata_entry` we check if the metadata page is busy or not.
@@ -324,9 +324,9 @@ constraints on where we can allocate.
 [source]
 .Listing 6.7 - bitmap.c - Checking if the range found match our requirements
 ----
-include:./code/bitmap.c[tags=init_search]
+include::./code/bitmap.c[tags=init_search]
 
-include:./code/bitmap.c[tags=filter_unacceptable_ranges]
+include::./code/bitmap.c[tags=filter_unacceptable_ranges]
 ----
 <1> In `init_search`, we make sure that we requests for sizes that are a multiple of 128 are padded by one page.
 <2> When verifying small allocations, we'll check if the allocation is starting on a 128 page boundary, and if so, try to shift it by one page forward.
@@ -362,7 +362,7 @@ the _metadata_ for that particular range. You can see how I solved the issue in 
 [source]
 .Listing 6.8 - txn.alloc.c - Freeing page and metadata pages
 ----
-include:./code/txn.alloc.c[tags=txn_free_page]
+include::./code/txn.alloc.c[tags=txn_free_page]
 ----
 <1> The `get_free_space_bitmap_word` allows us to get a full `uint64_t` from the free space bitmap for the relevant page. The idea is that we can very quickly compare if a 
 particular range is full of holes.
@@ -376,6 +376,16 @@ particular range is full of holes.
 The `txn_free_page` function now is able to expand is responsibilities and manage not just freeing of the page but also releasing of the metadata. By pushing this
 responsibility very deep in the structure, we make sure that we don't really have to think about this situation going forward.
 
-=== Inside `page_metadata_t`
+There is still a lurking issue in our system. We are able to allocate disk space that we have reserved from the system, but how are we going to be able to handle
+running out of space entirely? How can we grow our file? 
 
-=== Copy bitmap.c
+=== Unit tests
+
+There have been a _lot_ of changes to the internals of the code and there is a lot more functionality to test. I have included scenarios that will test
+our each of the options we have discussed in this chapter.
+
+[source,python]
+.Listing 6.9 - Unit testing multi page allocations
+----
+include::../pyapi/tests06.py[]
+----
