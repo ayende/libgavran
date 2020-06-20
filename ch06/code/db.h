@@ -11,23 +11,26 @@
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
+typedef struct page_metadata page_metadata_t;
+
 typedef struct page {
   void *address;
   uint64_t page_num;
   uint32_t overflow_size;
+  uint32_t _padding;
 } page_t;
 // end::paging_api[]
 
 // tag::file_header[]
-#define FILE_HEADER_MAGIC (9410039042695495)  // = 'Gavran!\0'
+#define FILE_HEADER_MAGIC (9410039042695495) // = 'Gavran!\0'
 
-typedef struct file_header {
+// <1>
+typedef struct __attribute__((__packed__)) file_header {
   uint64_t magic;
   uint64_t number_of_pages;
-  uint32_t version;
-  uint32_t page_size;
   uint64_t free_space_bitmap_start;
-  uint64_t free_space_bitmap_in_pages;
+  uint8_t version;
+  uint8_t page_size_power_of_two;
 } file_header_t;
 // end::file_header[]
 
@@ -76,11 +79,25 @@ result_t txn_allocate_page(txn_t *tx, page_t *page, uint64_t nearby_hint);
 // end::new_tx_api[]
 
 // tag::free_space[]
+result_t txn_page_busy(txn_t *tx, uint64_t page_num, bool *busy);
+
 static inline void set_bit(uint64_t *buffer, uint64_t pos) {
   buffer[pos / 64] |= (1UL << pos % 64);
+}
+
+static inline bool is_bit_set(uint64_t *buffer, uint64_t pos) {
+  return (buffer[pos / 64] & (1UL << pos % 64)) != 0;
 }
 
 static inline void clear_bit(uint64_t *buffer, uint64_t pos) {
   buffer[pos / 64] ^= (1UL << pos % 64);
 }
 // end::free_space[]
+
+// tag::page_metadata[]
+result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
+                          page_metadata_t **metadata);
+
+result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
+                             page_metadata_t **metadata);
+// end::page_metadata[]

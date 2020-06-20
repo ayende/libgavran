@@ -12,11 +12,11 @@ typedef struct operation_result op_result_t;
   errors_push(CODE, ##__VA_ARGS__); \
   return failure_code()
 
-#define ensure(CALL, ...)                        \
-  do {                                           \
-    if (!(CALL) || errors_get_count()) {         \
-      failed(EINVAL, msg(#CALL), ##__VA_ARGS__); \
-    }                                            \
+#define ensure(CALL, ...)                            \
+  do {                                               \
+    if (!(CALL) || errors_get_count()) {             \
+      failed(EINVAL, msg(#CALL " "), ##__VA_ARGS__); \
+    }                                                \
   } while (0)
 
 #define msg(MSG) errors_append_message(MSG)

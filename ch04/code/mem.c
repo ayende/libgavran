@@ -7,7 +7,8 @@
 
 // tag::palmem_allocate_pages[]
 result_t palmem_allocate_pages(page_t *p) {
-  int rc = posix_memalign(&p->address, PAGE_SIZE, PAGE_SIZE);
+  int rc = posix_memalign(&p->address, PAGE_SIZE,
+                          PAGE_SIZE * p->num_of_pages);
   if (rc) {
     failed(rc, msg("Unable to allocate memory for page"));
   }
