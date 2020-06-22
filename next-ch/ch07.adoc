@@ -1,0 +1,55 @@
+== File size increases
+
+The `database_options_t` structure has a single field right now (`minimum_size`) which is used to set the initial size of the database file. It is also the _only_
+size that we have for the file. There is no mechanism to accommodate increasing the file size. This is what we are going to solve in this chapter. 
+
+What issues do we need to deal with when we consider increasing the file size of a database?
+
+* How to do this while the database is live an not forcing us to restart the database. That seems like a good first rule, we want to be able to increase the file
+size while transactions are running.
+* By how much should we increase the file size? Grow too fast and users will be annoyed. Grow too slow and you'll spend a lot of time increasing the size as well
+as potentially fragment your database file.
+* How do we update the free space bitmap? What happens if we get to the point where we need to _move_ it?
+* We also need to update the file header.
+* What will trigger file size expansion? 
+* How to handle running out of space on the device? 
+
+The list of issues above are mostly above how to deal with the implementation of growing a file. I want to focus first on the _design_ impact. Right now, we have
+the whole file mapped at the database level. Multiple transactions may share the same mapping. When we increase the size of the file, we need to decide how we are
+going to extend that mapping. Here are our options:
+
+* Attempt to map the new portions of the file at the end of the already existing memory mapping. Nothing else needs to be done in that case. However, we may not
+be able to do that. Something else may take that place.
+* We can map a portion of memory that is much larger than the file, so when we extend the file, the mapping will already cover it. However, what do we do when
+we run out of room in the mapping?
+* We can map the whole file _again_, the existing portions of the file will be mapped twice, but that is just virtual memory, it would map to the same physical
+pages in RAM.
+
+The first two options have edge cases that would require complex handling, while the third option (remapping the whole file) should work regardless. We'll go with
+that option.
+
+.Mapping (far) more than the file size require
+****
+Memory mapping works on a page boundary (4KB), but files aren't mandated to be a size of 4KB in size. Because of that, you can map beyond the end of the file.
+On Windows, you can only map to the size of the file rounded by page size, but on Linux, there is no issue in mapping _far_ beyond the size of the file. If you'll
+try to _access_ memory beyond the edge of the file, you'll get a `SIGSEGV`, of course.
+
+_However_, it is legal to first map beyond the end of the file, and only then _extend_ the file. The previously mapped memory would work just fine with the new file
+size. LMDB is making heavy use of this approach, for example. You specify a maximum size for the database, but the size of disk is only as large as what you'll 
+actually be _using_. Windows allows to do the same using some lower level undocumented API. 
+
+The downside of this approach is that if you hit the specified memory map limit, you have to close the database and restart it with a large map size.
+****
+
+When running in 64 bits, we usually can consider the virtual memory address space as infinite. That isn't actually true, on `x86-64` as well as `ARM AArch64`,
+despite the names, pointers are actually using only 48 bits. So the address space is _just_ 256 TB. Certain operating systems and versions have further 
+limits on how much virtual memory  you can use. Thankfully, mostly those limits are about legacy systems and aren't relevant for anything recent.
+
+While 256 TB isn't infinite, it is large enough that we can assume that we'll be able to map the file twice in the same address space, which is exactly what
+we'll do. The first mapping is the original one, with the old file size. And the new mapping with the new size. Older transactions will need to use the old
+mapping, which means that we need to have a copy of the mapping at the transaction level now.
+ 
+
+database_options{
+  uint32_t max_number_of_pages_to_grow = 128*32;
+}

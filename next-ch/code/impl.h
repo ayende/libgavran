@@ -1,5 +1,3 @@
-#include <stdalign.h>
-
 #include "db.h"
 #include "platform.fs.h"
 
@@ -10,11 +8,10 @@
 // tag::transaction_state[]
 struct transaction_state {
   db_state_t *db;
-  uint64_t tx_id;
   size_t allocated_size;
   uint32_t flags;
   uint32_t modified_pages;
-  txn_state_t *previous_write_tx;
+  struct mmap_args mmap;
   page_t entries[];
 };
 // end::transaction_state[]
@@ -22,21 +19,14 @@ struct transaction_state {
 // tag::database_state[]
 struct database_state {
   database_options_t options;
-  struct mmap_args mmap;
   file_handle_t *handle;
   file_header_t header;
   char _padding[6];
-  txn_state_t *last_write_tx;
-  txn_state_t *current_write_tx;
-  txn_state_t *default_read_tx;
-  char _padding2[8];
 };
 // end::database_state[]
 
 result_t pages_get(db_state_t *db, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
-
-void txn_cleanup(txn_state_t *state);
 
 // tag::search_free_range_in_bitmap[]
 typedef struct bitmap_search_state {

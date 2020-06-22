@@ -377,7 +377,8 @@ The `txn_free_page` function now is able to expand is responsibilities and manag
 responsibility very deep in the structure, we make sure that we don't really have to think about this situation going forward.
 
 There is still a lurking issue in our system. We are able to allocate disk space that we have reserved from the system, but how are we going to be able to handle
-running out of space entirely? How can we grow our file? 
+running out of space entirely? How can we grow our file? These are great questions, but we won't answer them immediately. I'm itching to get to grips with the 
+ACID properties of the transaction, so we'll get to that next.
 
 === Unit tests
 

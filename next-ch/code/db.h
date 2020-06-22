@@ -11,9 +11,6 @@
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
-#define WRITE_TX 1
-#define READ_TX 2
-
 typedef struct page_metadata page_metadata_t;
 
 typedef struct page {
@@ -71,8 +68,6 @@ result_t txn_close(txn_t *tx);
 enable_defer(txn_close);
 
 result_t txn_commit(txn_t *tx);
-result_t txn_apply(txn_t *tx);
-
 // <8>
 result_t txn_get_page(txn_t *tx, page_t *page);
 result_t txn_modify_page(txn_t *tx, page_t *page);

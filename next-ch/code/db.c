@@ -69,7 +69,7 @@ static result_t initialize_freespace_bitmap(db_t *db, txn_t *tx,
 
 static result_t initialize_file_structure(db_t *db) {
   txn_t tx;
-  ensure(txn_create(db, WRITE_TX, &tx));
+  ensure(txn_create(db, 0, &tx));
   defer(txn_close, &tx);
 
   page_t metadata_page = {.page_num = 0};
@@ -92,22 +92,13 @@ static result_t initialize_file_structure(db_t *db) {
 // tag::handle_newly_opened_database[]
 static result_t handle_newly_opened_database(db_t *db) {
   db_state_t *state = db->state;
+  page_metadata_t *entry = state->mmap.address;
+  file_header_t *file_header = &entry->file_header;
   // at this point state->header is zeroed
-  // if the file header is zeroed, we are probably dealing with a new
+  // if the file headeris zeroed, we are probably dealing with a new
   // database
-  bool isNew = true;
-
-  {
-    txn_t tx;
-    ensure(txn_create(db, READ_TX, &tx));
-    defer(txn_close, &tx);
-    page_t first_page = {.page_num = 0};
-    ensure(txn_get_page(&tx, &first_page));
-    page_metadata_t *entry = first_page.address;
-    file_header_t *file_header = &entry->file_header;
-    isNew = !memcmp(file_header, &state->header, sizeof(file_header_t)) &&
-            !entry->type;
-  }
+  bool isNew = !memcmp(file_header, &state->header, sizeof(file_header_t)) &&
+               !entry->type;
 
   if (isNew) {
     // now needs to set it up
@@ -118,42 +109,29 @@ static result_t handle_newly_opened_database(db_t *db) {
     ensure(initialize_file_structure(db));
   }
 
-  {
-    // need a new tx here, because we might have committed changes to init the
-    // file
-    txn_t tx;
-    ensure(txn_create(db, READ_TX, &tx));
-    defer(txn_close, &tx);
-    page_t first_page = {.page_num = 0};
-    ensure(txn_get_page(&tx, &first_page));
-    page_metadata_t *entry = first_page.address;
-    file_header_t *file_header = &entry->file_header;
+  ensure(entry->type == page_metadata,
+         msg("The first file page must be metadata page, but was..."),
+         with(entry->type, "%x"));
 
-    ensure(entry->type == page_metadata,
-           msg("The first file page must be metadata page, but was..."),
-           with(entry->type, "%x"));
+  ensure(file_header->magic == FILE_HEADER_MAGIC, EINVAL,
+         msg("Unable to find valid file header"),
+         with(palfs_get_filename(state->handle), "%s"),
+         with(file_header->magic, "%lu"));
 
-    ensure(file_header->magic == FILE_HEADER_MAGIC, EINVAL,
-           msg("Unable to find valid file header"),
-           with(palfs_get_filename(state->handle), "%s"),
-           with(file_header->magic, "%lu"));
+  ensure(file_header->number_of_pages * PAGE_SIZE <= state->mmap.size, EINVAL,
+         msg("The size of the file is smaller than the expected size, "
+             "file was probably truncated"),
+         with(palfs_get_filename(state->handle), "%s"),
+         with(state->mmap.size, "%lu"),
+         with(file_header->number_of_pages * PAGE_SIZE, "%lu"));
 
-    ensure(file_header->number_of_pages * PAGE_SIZE <= state->mmap.size, EINVAL,
-           msg("The size of the file is smaller than the expected size, "
-               "file was probably truncated"),
-           with(palfs_get_filename(state->handle), "%s"),
-           with(state->mmap.size, "%lu"),
-           with(file_header->number_of_pages * PAGE_SIZE, "%lu"));
+  ensure(pow(2, file_header->page_size_power_of_two) == PAGE_SIZE, EINVAL,
+         msg("The file page size is invalid"),
+         with(palfs_get_filename(state->handle), "%s"),
+         with((uint32_t)(pow(2, file_header->page_size_power_of_two)), "%d"),
+         with(PAGE_SIZE, "%d"));
 
-    ensure(pow(2, file_header->page_size_power_of_two) == PAGE_SIZE, EINVAL,
-           msg("The file page size is invalid"),
-           with(palfs_get_filename(state->handle), "%s"),
-           with((uint32_t)(pow(2, file_header->page_size_power_of_two)), "%d"),
-           with(PAGE_SIZE, "%d"));
-
-    memcpy(&db->state->header, file_header, sizeof(file_header_t));
-  }
-
+  memcpy(&db->state->header, file_header, sizeof(file_header_t));
   return success();
 }
 // end::handle_newly_opened_database[]
@@ -192,27 +170,14 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   size_t db_state_size;
   ensure(palfs_compute_handle_size(path, &db_state_size));
   db_state_size += sizeof(db_state_t);
-  db_state_size += sizeof(txn_state_t);
 
   ptr = calloc(1, db_state_size);
   ensure(ptr, msg("Unable to allocate database state struct"),
          with(path, "%s"));
   try_defer(free, ptr, done);
 
-  ptr->handle =
-      (file_handle_t *)((char *)ptr + sizeof(txn_state_t) + sizeof(db_state_t));
+  ptr->handle = (file_handle_t *)(ptr + 1);
   memcpy(&ptr->options, options, sizeof(database_options_t));
-
-  ptr->default_read_tx = (txn_state_t *)(ptr + 1);
-
-  ptr->default_read_tx->allocated_size = sizeof(txn_state_t);
-  ptr->default_read_tx->db = ptr;
-  ptr->default_read_tx->flags = READ_TX;
-  ptr->default_read_tx->modified_pages = 0;
-  ptr->default_read_tx->previous_write_tx = 0;
-  ptr->default_read_tx->tx_id = 0;
-
-  ptr->last_write_tx = ptr->default_read_tx;
 
   ensure(palfs_create_file(path, ptr->handle), with(path, "%s"));
   try_defer(palfs_close_file, ptr->handle, done);

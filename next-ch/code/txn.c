@@ -14,8 +14,6 @@
 static bool lookup_entry_in_tx(txn_state_t *state, page_t *page) {
   uint64_t page_num = page->page_num;
   size_t number_of_buckets = get_number_of_buckets(state);
-  if (!number_of_buckets)
-    return false;
   size_t starting_pos = (size_t)(page_num % number_of_buckets);
   // we use linear probing to find a value in case of collisions
   for (size_t i = 0; i < number_of_buckets; i++) {
@@ -36,12 +34,6 @@ static bool lookup_entry_in_tx(txn_state_t *state, page_t *page) {
 // tag::txn_commit[]
 result_t txn_commit(txn_t *tx) {
   errors_assert_empty();
-
-  tx->state->db->last_write_tx = tx->state;
-  return success();
-}
-
-result_t txn_apply(txn_t *tx) {
   txn_state_t *state = tx->state;
   size_t number_of_buckets = get_number_of_buckets(state);
 
@@ -51,12 +43,19 @@ result_t txn_apply(txn_t *tx) {
       continue;
 
     ensure(pages_write(state->db, entry));
-  }
 
+    free(entry->address);
+    entry->address = 0;
+  }
   return success();
 }
+// end::txn_commit[]
 
-void txn_cleanup(txn_state_t *state) {
+// tag::txn_close[]
+result_t txn_close(txn_t *tx) {
+  if (!tx->state)
+    return success(); // probably double close?
+  txn_state_t *state = tx->state;
   size_t number_of_buckets = get_number_of_buckets(state);
   for (size_t i = 0; i < number_of_buckets; i++) {
     page_t *entry = &state->entries[i];
@@ -67,15 +66,7 @@ void txn_cleanup(txn_state_t *state) {
     entry->address = 0;
   }
 
-  free(state);
-}
-
-// end::txn_commit[]
-
-// tag::txn_close[]
-result_t txn_close(txn_t *tx) {
-  if (!tx->state)
-    return success(); // probably double close?
+  free(tx->state);
 
   tx->state = 0;
   return success();
@@ -86,14 +77,6 @@ result_t txn_close(txn_t *tx) {
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
 
-  if (flags == READ_TX) {
-    tx->state = db->state->last_write_tx;
-    return success();
-  }
-  ensure(!db->state->current_write_tx,
-         msg("There can only be a single write transaction at a time, but "
-             "asked for a write transaction when one is already opened"));
-
   size_t initial_size = sizeof(txn_state_t) + sizeof(page_t) * 8;
   txn_state_t *state = calloc(1, initial_size);
   ensure(state, msg("Unable to allocate memory for transaction state"));
@@ -101,8 +84,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   state->allocated_size = initial_size;
   state->flags = flags;
   state->db = db->state;
-  state->previous_write_tx = db->state->last_write_tx;
-  state->tx_id = db->state->last_write_tx->tx_id + 1;
+
   tx->state = state;
   return success();
 }
@@ -237,12 +219,8 @@ static result_t set_page_overflow_size(txn_t *tx, page_t *p) {
 result_t txn_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
-  txn_state_t *cur = tx->state;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, page)) {
-      return success();
-    }
-    cur = cur->previous_write_tx;
+  if (lookup_entry_in_tx(tx->state, page)) {
+    return success();
   }
 
   ensure(pages_get(tx->state->db, page));
@@ -257,33 +235,24 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
-  ensure(tx->state->flags == WRITE_TX,
-         msg("Read transactions cannot modify the pages"));
-
   if (lookup_entry_in_tx(tx->state, page)) {
     return success();
   }
 
+  if (!page->overflow_size)
+    page->overflow_size = PAGE_SIZE;
+
   page_t original = {.page_num = page->page_num};
-  txn_state_t *cur = tx->state->previous_write_tx;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, &original)) {
-      break;
-    }
-    cur = cur->previous_write_tx;
-  }
+  ensure(pages_get(tx->state->db, &original));
 
-  if (!page->address) {
-    if (!page->overflow_size)
-      page->overflow_size = PAGE_SIZE;
+  // <1>
+  ensure(set_page_overflow_size(tx, &original));
 
-    ensure(pages_get(tx->state->db, &original));
-    ensure(set_page_overflow_size(tx, &original));
-  }
-
+  // <2>
   uint32_t pages = page->overflow_size / PAGE_SIZE +
                    (page->overflow_size % PAGE_SIZE ? 1 : 0);
 
+  // <3>
   ensure(palmem_allocate_pages(&page->address, pages),
          msg("Unable to allocate memory for a COW page"));
 
@@ -322,15 +291,9 @@ result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
                           page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  txn_state_t *cur = tx->state;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, &metadata_page)) {
-      break;
-    }
-    cur = cur->previous_write_tx;
-  }
-  if (!metadata_page.address)
+  if (!lookup_entry_in_tx(tx->state, &metadata_page)) {
     ensure(pages_get(tx->state->db, &metadata_page));
+  }
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
@@ -339,15 +302,10 @@ result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
                              page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  txn_state_t *cur = tx->state;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, &metadata_page)) {
-      break;
-    }
-    cur = cur->previous_write_tx;
+  if (!lookup_entry_in_tx(tx->state, &metadata_page)) {
+    ensure(pages_get(tx->state->db, &metadata_page));
   }
-  if (!metadata_page.address)
-    ensure(txn_modify_page(tx, &metadata_page));
+  ensure(txn_modify_page(tx, &metadata_page));
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
