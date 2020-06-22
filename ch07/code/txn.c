@@ -40,6 +40,7 @@ result_t txn_commit(txn_t *tx) {
   tx->state->db->last_write_tx = tx->state;
   return success();
 }
+// end::txn_commit[]
 
 result_t txn_apply(txn_t *tx) {
   txn_state_t *state = tx->state;
@@ -70,8 +71,6 @@ void txn_cleanup(txn_state_t *state) {
   free(state);
 }
 
-// end::txn_commit[]
-
 // tag::txn_close[]
 result_t txn_close(txn_t *tx) {
   if (!tx->state)
@@ -86,6 +85,7 @@ result_t txn_close(txn_t *tx) {
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
 
+  // <3>
   if (flags == READ_TX) {
     tx->state = db->state->last_write_tx;
     return success();
@@ -101,6 +101,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   state->allocated_size = initial_size;
   state->flags = flags;
   state->db = db->state;
+  // <4>
   state->previous_write_tx = db->state->last_write_tx;
   state->tx_id = db->state->last_write_tx->tx_id + 1;
   tx->state = state;
@@ -219,7 +220,6 @@ static result_t allocate_entry_in_tx(txn_state_t **state_ptr, page_t *page) {
 }
 // end::allocate_entry_in_tx[]
 
-// tag::txn_get_page[]
 static result_t set_page_overflow_size(txn_t *tx, page_t *p) {
   page_metadata_t *metadata;
   // need to avoid recursing into metadata if this _is_
@@ -234,10 +234,12 @@ static result_t set_page_overflow_size(txn_t *tx, page_t *p) {
   return success();
 }
 
+// tag::txn_get_page[]
 result_t txn_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
   txn_state_t *cur = tx->state;
+  // <1>
   while (cur) {
     if (lookup_entry_in_tx(cur, page)) {
       return success();
@@ -257,13 +259,16 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
+  // <1>
   ensure(tx->state->flags == WRITE_TX,
          msg("Read transactions cannot modify the pages"));
 
+  // <2>
   if (lookup_entry_in_tx(tx->state, page)) {
     return success();
   }
 
+  // <3>
   page_t original = {.page_num = page->page_num};
   txn_state_t *cur = tx->state->previous_write_tx;
   while (cur) {
@@ -273,6 +278,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
     cur = cur->previous_write_tx;
   }
 
+  // <4>
   if (!page->address) {
     if (!page->overflow_size)
       page->overflow_size = PAGE_SIZE;
@@ -281,6 +287,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
     ensure(set_page_overflow_size(tx, &original));
   }
 
+  // <5>
   uint32_t pages = page->overflow_size / PAGE_SIZE +
                    (page->overflow_size % PAGE_SIZE ? 1 : 0);
 
@@ -289,7 +296,6 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
 
   size_t cancel_defer = 0;
   try_defer(free, page->address, cancel_defer);
-  // <4>
   memcpy(page->address, original.address, PAGE_SIZE * pages);
 
   ensure(allocate_entry_in_tx(&tx->state, page),
@@ -299,8 +305,6 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   return success();
 }
 // end::txn_modify_page[]
-
-// tag::page_metadata[]
 
 static result_t get_metadata_entry(uint64_t page_num, page_t *metadata_page,
                                    page_metadata_t **metadata) {
@@ -318,19 +322,13 @@ static result_t get_metadata_entry(uint64_t page_num, page_t *metadata_page,
   return success();
 }
 
+// tag::page_metadata[]
+// <6>
 result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
                           page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  txn_state_t *cur = tx->state;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, &metadata_page)) {
-      break;
-    }
-    cur = cur->previous_write_tx;
-  }
-  if (!metadata_page.address)
-    ensure(pages_get(tx->state->db, &metadata_page));
+  ensure(txn_get_page(&tx, &metadata_page));
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
@@ -339,15 +337,7 @@ result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
                              page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  txn_state_t *cur = tx->state;
-  while (cur) {
-    if (lookup_entry_in_tx(cur, &metadata_page)) {
-      break;
-    }
-    cur = cur->previous_write_tx;
-  }
-  if (!metadata_page.address)
-    ensure(txn_modify_page(tx, &metadata_page));
+  ensure(txn_modify_page(&tx, &metadata_page));
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }

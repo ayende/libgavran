@@ -9,8 +9,8 @@
 #include "platform.fs.h"
 #include "platform.mem.h"
 
-// tag::allocate_page_and_use_it[]
-static result_t allocate_page_and_use_it() {
+// tag::mvcc[]
+static result_t mvcc() {
   db_t db;
   database_options_t options = {.minimum_size = 4 * 1024 * 1024};
   ensure(db_create("/tmp/db/orev", &options, &db));
@@ -40,10 +40,10 @@ static result_t allocate_page_and_use_it() {
 
   return success();
 }
-// end::allocate_page_and_use_it[]
+// end::mvcc[]
 
 int main() {
-  if (!allocate_page_and_use_it()) {
+  if (!mvcc()) {
     errors_print_all();
   }
   printf("Done\n");

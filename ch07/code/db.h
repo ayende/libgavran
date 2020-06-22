@@ -7,12 +7,15 @@
 #include "defer.h"
 #include "errors.h"
 
+// tag::tx_flags[]
+// <1>
+#define WRITE_TX 1
+#define READ_TX 2
+// end::tx_flags[]
+
 // tag::paging_api[]
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
-
-#define WRITE_TX 1
-#define READ_TX 2
 
 typedef struct page_metadata page_metadata_t;
 

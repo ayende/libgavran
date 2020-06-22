@@ -10,8 +10,10 @@
 // tag::transaction_state[]
 struct transaction_state {
   db_state_t *db;
+  // <2>
   uint64_t tx_id;
   size_t allocated_size;
+
   uint32_t flags;
   uint32_t modified_pages;
   txn_state_t *previous_write_tx;
@@ -25,6 +27,7 @@ struct database_state {
   struct mmap_args mmap;
   file_handle_t *handle;
   file_header_t header;
+  // <1>
   char _padding[6];
   txn_state_t *last_write_tx;
   txn_state_t *current_write_tx;

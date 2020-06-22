@@ -32,14 +32,144 @@ before the write transaction and closed afterward. Only read transaction no. 3 w
 Gavran is going to implement *snapshot isolation* for transactions. Once a transaction is opened, it will have a consistent and unchanging view of the 
 database. A write transaction commit will only impact _later_ transactions.
 
-This behavior is the first task in the road for ACID, the question is, how are we going to implement it? 
+This behavior is the first task in the road for ACID, the question is, how are we going to implement it? We already have _some_ of it down. While a 
+transaction is running, other transactions are unaware of the changes that it is making because we use Copy On Write. What if we would extend that 
+approach a bit and see where it takes us?
 
-txn_create
-txn_modify_metadata
-txn_get_metadata
-txn_get_page
-txn_modify_page
-txn_commit
+Consider the following timeline of operations, which shows what we have now.
+
+1. Write tx is created
+2. Read tx is created 
+3. Write tx modifies page 2
+3. Read tx reads page 2, see no changes (the data is held in buffer private to the write tx)
+4. Write tx commits & closed
+5. Read tx reads page 2,, see the changes that happened because `txn_commit` wrote it.
+
+That is the current behavior of Gavran, and it is almost where we want it to be. The only change in behavior we need is that when the write transaction
+commits, already opened transactions will _not_ see the changes. How can we implement this? Well, the reason that they can see the changes is that 
+we write them to the file, which is shared. What would happened if we _won't_ write to the file? Let's find out. 
+
+=== Implementing isolation between transactions
+
+I'm afraid that I had to touch quite a few locations for this to work. I'm going to show them in pieces, so we can paint the whole picture. We'll start
+with Listing 7.1.
+
+[source]
+.Listing 7.1 - txn.c - Delay writing the modified pages to the data file.
+```
+include::./code/txn.c[tags=txn_commit]
+
+include::./code/txn.c[tags=txn_close]
+```
+
+The behavior of `txn_commit` and `txn_close` have changed drastically. No longer are we writing to the data file or freeing the copies of the modified pages.
+In fact, there is very little that is going there at all. In `txn_commit`, we are updating a value at the _db_ level, the `last_write_tx`. Let's us see what 
+this is used for and see the changes for `txn_create` in Listing 7.2.
+
+[source]
+.Listing 7.2 - db.h, impl.h & txn.c - Modifications to the transaction creation
+```
+// from db.h
+include::./code/db.h[tags=tx_flags]
+
+// from impl.h
+include::./code/impl.h[tags=transaction_state]
+
+// from txn.c
+include::./code/txn.c[tags=txn_create]
+```
+<1> We now have flags that we must pass to the `txn_create` function, checking if the transaction is a read or write transaction.
+<2> New fields in the `txn_state_t` structure to support the new behavior.
+<3> If we have a read transaction, we use the state from the `last_write_tx`. 
+<4> New code here, setting the `previous_write_tx` from the `last_write_tx` for write transactions and incrementing the transaction id.
+
+Things start to get interesting now. Read transactions now require no allocation or work to build. And write transaction set themselves up to be the next 
+state for all future read transactions. What is actually going on in the code for implementing transactions? Let's check Listing 7.3.
+
+.Thread safety, what's that?
+****
+I'm currently building Gavran with absolutely no thread safety. That is intentional, since thread safety adds a significant overhead for the code and I want
+to first get the design laid out before we start touching on additional concerns. 
+
+We'll have complete thread safety, mind you, but I want to add that once all the moving pieces has stopped shaking.
+****
+
+[source]
+.Listing 7.3 - txn.c - Get a page, from the current transaction or a past one or the file.
+```
+include::./code/txn.c[tags=txn_get_page]
+```
+<1> Here we iterate over the past transactions and try to find a modified copy of the page. Only if it doesn't exist do we go to the file.
+
+Listing 7.3 shows the beauty of this approach, when we need to find a page, we start search the modified page map, just like before. But we are going to look
+in our own map as well as the maps of _past transactions_. The `previous_write_tx` creates a linked list of transactions (and their modified pages) that we
+can use to find the most recent version of a page. We'll only check the data file for the page if there is no transaction in the list that has this page. 
+
+You can see how that works in Figure 14, we have 5 transactions there, 3 writes and 2 read transactions. You can see how the effective pages for each one
+of those transactions.
+
+image::{img-src}/fig14.png[]
+
+For read transaction 2, the effective value of page 3 is from transaction 1 while it is the value from transaction 3 for read transaction 3. This allow each
+transaction to have its own view of the world and protect us from data being modified while we read the data. Listing 7.4 show how implement `txn_modify_page`
+with the new behavior.
+
+[source]
+.Listing 7.4 - txn.c - Modify a page whose source may be the data file or a previous transaction
+```
+include::./code/txn.c[tags=txn_modify_page]
+
+include::./code/txn.c[tags=page_metadata]
+```
+<1> We validate that this is a write transaction, read transaction cannot modify the database.
+<2> We first check if the page was modified already in this transaction
+<3> We scan through the previous transactions to see if we have a copy of the page.
+<4> If we can't find the page, we'll read it from the file.
+<5> We create a copy of the page and register it in the transaction.
+<6> I've also simplified `txn_get_metadata` and `txn_modify_metadata`, to express them based on our existing API rather than repeat ourselves.
+
+The `txn_modify_page` function now checks older transactions for updated copies of the page before reading it from disk. It is important to note that if the
+page was found in an older transaction, we'll create a _copy_ of the page. That is because other transactions may be looking at it, so we need to maintain
+the immutability of the data from already committed transactions. In effect, we do another Copy On Write on top of the older copy. 
+This approach allows us to maintain multiple _levels_ of isolation in our transactions.
+
+.MVCC - Multi version concurrency control
+****
+This style of work, when we have multiple concurrent version of the data at play, is called MVCC. This is used by databases such as LMDB, Sqlite, PostgreSQL 
+and Voron. The _manner_ in which they achieve this ability is very different, however. If you want to read more about it, 
+https://ayende.com/blog/175073/voron-internals-mvcc-all-the-moving-parts[I have a post about Voron's MVCC implementation], and 
+https://medium.com/@kousiknath/how-mvcc-databases-work-internally-84a27a380283[this post discusses PostgreSQL, LMDB and CouchDB's implementations].
+****
+
+What about when we have _no_ previous transactions? This is handle at the database startup, as shown in Listing 7.5.
+
+[source]
+.Listing 7.5 - impl.h & db.c - Setting up the `last_write_tx` as part of the database startup
+```
+// from impl.h
+include::./code/impl.h[tags=database_state]
+
+// from db.c - inside db_create
+include::./code/db.c[tags=default_read_tx]
+```
+<1> Added new fields to track the most recent write transaction.
+<2> Added a default `txn_state_t` to the allocated size for `db_state_t`.
+<3> Setup the default read transaction which will be used as the base for `txn_get_page` and `txn_modify_page`.
+
+And that is pretty much it. We have MVCC and isolation between transactions. We are well on our way to having _real_ transactions. Hurray!
+Listing 7.6 shows working code using this feature.
+
+[source]
+.Listing 7.6 - main.c - Using MVCC features to check a page that was modified in a write transaction created after the read transaction.
+```
+include::./code/main.c[tags=mvcc]
+```
+
+As you can see, `rtx` was created after `wtx`, but it isn't aware of anything that happened inside `wtx`, even after the commit of `wtx`. 
+
+=== Writing to disk again
+
+The approach we 
+
 txn_apply
 txn_cleanup
-db_create

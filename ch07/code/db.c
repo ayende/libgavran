@@ -189,9 +189,11 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
     options = &default_options;
   }
 
+  // tag::default_read_tx[]
   size_t db_state_size;
   ensure(palfs_compute_handle_size(path, &db_state_size));
   db_state_size += sizeof(db_state_t);
+  // <2>
   db_state_size += sizeof(txn_state_t);
 
   ptr = calloc(1, db_state_size);
@@ -203,6 +205,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
       (file_handle_t *)((char *)ptr + sizeof(txn_state_t) + sizeof(db_state_t));
   memcpy(&ptr->options, options, sizeof(database_options_t));
 
+  // <3>
   ptr->default_read_tx = (txn_state_t *)(ptr + 1);
 
   ptr->default_read_tx->allocated_size = sizeof(txn_state_t);
@@ -213,6 +216,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   ptr->default_read_tx->tx_id = 0;
 
   ptr->last_write_tx = ptr->default_read_tx;
+  // end::default_read_tx[]
 
   ensure(palfs_create_file(path, ptr->handle), with(path, "%s"));
   try_defer(palfs_close_file, ptr->handle, done);
