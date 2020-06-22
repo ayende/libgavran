@@ -9,8 +9,9 @@
 
 // tag::tx_flags[]
 // <1>
-#define WRITE_TX 1
-#define READ_TX 2
+#define TX_WRITE (1 << 1)
+#define TX_READ (1 << 2)
+#define TX_COMMITED (1 << 24)
 // end::tx_flags[]
 
 // tag::paging_api[]
@@ -74,7 +75,6 @@ result_t txn_close(txn_t *tx);
 enable_defer(txn_close);
 
 result_t txn_commit(txn_t *tx);
-result_t txn_apply(txn_t *tx);
 
 // <8>
 result_t txn_get_page(txn_t *tx, page_t *page);

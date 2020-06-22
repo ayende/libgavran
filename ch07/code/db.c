@@ -69,7 +69,7 @@ static result_t initialize_freespace_bitmap(db_t *db, txn_t *tx,
 
 static result_t initialize_file_structure(db_t *db) {
   txn_t tx;
-  ensure(txn_create(db, WRITE_TX, &tx));
+  ensure(txn_create(db, TX_WRITE, &tx));
   defer(txn_close, &tx);
 
   page_t metadata_page = {.page_num = 0};
@@ -99,7 +99,7 @@ static result_t handle_newly_opened_database(db_t *db) {
 
   {
     txn_t tx;
-    ensure(txn_create(db, READ_TX, &tx));
+    ensure(txn_create(db, TX_READ, &tx));
     defer(txn_close, &tx);
     page_t first_page = {.page_num = 0};
     ensure(txn_get_page(&tx, &first_page));
@@ -122,7 +122,7 @@ static result_t handle_newly_opened_database(db_t *db) {
     // need a new tx here, because we might have committed changes to init the
     // file
     txn_t tx;
-    ensure(txn_create(db, READ_TX, &tx));
+    ensure(txn_create(db, TX_READ, &tx));
     defer(txn_close, &tx);
     page_t first_page = {.page_num = 0};
     ensure(txn_get_page(&tx, &first_page));
@@ -210,11 +210,8 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
 
   ptr->default_read_tx->allocated_size = sizeof(txn_state_t);
   ptr->default_read_tx->db = ptr;
-  ptr->default_read_tx->flags = READ_TX;
-  ptr->default_read_tx->modified_pages = 0;
-  ptr->default_read_tx->previous_write_tx = 0;
-  ptr->default_read_tx->tx_id = 0;
-
+  // only the default read tx has this setup
+  ptr->default_read_tx->flags = TX_READ | TX_COMMITED;
   ptr->last_write_tx = ptr->default_read_tx;
   // end::default_read_tx[]
 

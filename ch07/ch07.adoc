@@ -65,8 +65,10 @@ include::./code/txn.c[tags=txn_close]
 ```
 
 The behavior of `txn_commit` and `txn_close` have changed drastically. No longer are we writing to the data file or freeing the copies of the modified pages.
-In fact, there is very little that is going there at all. In `txn_commit`, we are updating a value at the _db_ level, the `last_write_tx`. Let's us see what 
-this is used for and see the changes for `txn_create` in Listing 7.2.
+In fact, there is very little that is going there at all. In `txn_commit`, we are updating a value at the _db_ level, the `last_write_tx`. Note that we now
+mark the transaction as committed on `txn_commit` and use the flag to decide if the transaction was aborted and we _do_ need to cleanup the data. 
+For now, we'll ignore the `txn_try_apply`, we'll talk about it later in this chapter.
+Let's us see why we keep the pages around for committed transactions as well as the changes for `txn_create` in Listing 7.2.
 
 [source]
 .Listing 7.2 - db.h, impl.h & txn.c - Modifications to the transaction creation
@@ -167,12 +169,41 @@ Listing 7.6 shows working code using this feature.
 ```
 include::./code/main.c[tags=mvcc]
 ```
+<1> There is nothing to output here, this transaction cannot see changes that happened after it was started.
 
 As you can see, `rtx` was created after `wtx`, but it isn't aware of anything that happened inside `wtx`, even after the commit of `wtx`. 
 
 === Writing to disk again
 
-The approach we 
+The approach we used is pretty elegant, we get to use Copy on Write to automatically maintain a consistent view of the world even when there 
+are ongoing changes. It is also _highly_ problematic, because we haven't addressed a number of issues:
+
+* When can we write the data to the data file?
+* When can we `free` the memory that we use for Copy on Write?
+
+As it currently stands, we have a transient dataset as well as a memory leak. And as we have more and more transactions, the need to iterate
+over the past transactions is going to make our code slower and slower. We need some way to clean this up, so we need to decide when we can 
+write to the disk. Let's take a look at Figure 15 and see what we can do about this issue.
+
+.At the top, committed write transactions, at the bottom, read transactions that refers to them
+image::{img-src}/fig15.png[]
+
+What we can see in Figure 15 is that _all_ the read transactions belong to transaction 4 or higher. There are no read transactions associated
+with transaction 3. What does this mean? It means that we can be sure that no transaction is going to to try to read the data from the file
+for the pages modified by transaction 3. 
+
+At the point in time shown in Figure 15, it would be safe to write all the pages from transaction 3 or lower to the data file. It wouldn't 
+be possible for us to _release_ the transaction yet, however. The other transactions may still refer to the pages that it holds. We would
+need to wait until all of _those_ transactions are closed before we can free the memory held by those transactions.
+
+In other words, we have two events that we need to consider here:
+
+* Writing the data from the transaction to the file can be done as soon as there are no transactions that are looking at the transaction 
+_or any older transaction_. 
+* Freeing the memory from the transaction can be done after all the transactions that were open at the time that we wrote to the data file
+are closed.
+
+To handle the first task, we have the `usages` field in the `txn_state_t` struct. 
 
 txn_apply
 txn_cleanup

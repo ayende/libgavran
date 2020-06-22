@@ -17,7 +17,7 @@ static result_t mvcc() {
   defer(db_close, &db);
 
   txn_t wtx;
-  ensure(txn_create(&db, WRITE_TX, &wtx));
+  ensure(txn_create(&db, TX_WRITE, &wtx));
   defer(txn_close, &wtx);
 
   page_t page = {.page_num = 2};
@@ -27,7 +27,7 @@ static result_t mvcc() {
   strncpy(page.address, msg, strlen(msg) + 1);
 
   txn_t rtx;
-  ensure(txn_create(&db, READ_TX, &rtx));
+  ensure(txn_create(&db, TX_READ, &rtx));
   defer(txn_close, &rtx);
 
   ensure(txn_commit(&wtx));

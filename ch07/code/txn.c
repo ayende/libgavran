@@ -11,6 +11,8 @@
 #define get_number_of_buckets(state)                                           \
   ((state->allocated_size - sizeof(txn_state_t)) / sizeof(page_t))
 
+static result_t allocate_entry_in_tx(txn_state_t **state_ptr, page_t *page);
+
 static bool lookup_entry_in_tx(txn_state_t *state, page_t *page) {
   uint64_t page_num = page->page_num;
   size_t number_of_buckets = get_number_of_buckets(state);
@@ -37,13 +39,19 @@ static bool lookup_entry_in_tx(txn_state_t *state, page_t *page) {
 result_t txn_commit(txn_t *tx) {
   errors_assert_empty();
 
+  // no modified pages, nothing to do here
+  if (!tx->state->modified_pages)
+    return success();
+
+  tx->state->flags |= TX_COMMITED;
+  tx->state->usages = 1;
+  tx->state->db->last_write_tx->next_transaction = tx->state;
   tx->state->db->last_write_tx = tx->state;
   return success();
 }
 // end::txn_commit[]
 
-result_t txn_apply(txn_t *tx) {
-  txn_state_t *state = tx->state;
+static result_t txn_apply(txn_state_t *state) {
   size_t number_of_buckets = get_number_of_buckets(state);
 
   for (size_t i = 0; i < number_of_buckets; i++) {
@@ -57,7 +65,7 @@ result_t txn_apply(txn_t *tx) {
   return success();
 }
 
-void txn_cleanup(txn_state_t *state) {
+static void txn_cleanup(txn_state_t *state) {
   size_t number_of_buckets = get_number_of_buckets(state);
   for (size_t i = 0; i < number_of_buckets; i++) {
     page_t *entry = &state->entries[i];
@@ -65,18 +73,96 @@ void txn_cleanup(txn_state_t *state) {
       continue;
 
     free(entry->address);
-    entry->address = 0;
   }
 
   free(state);
 }
 
+static void txn_cleanup_list(txn_state_t *state) {
+  if (!state)
+    return;
+  txn_state_t *default_read_tx = state->db->default_read_tx;
+  while (state != default_read_tx) {
+    txn_state_t *cur = state;
+    state = state->previous_write_tx;
+    txn_cleanup(cur);
+  }
+}
+
+static result_t txn_try_apply(txn_state_t *state) {
+  txn_state_t *latest_unused = state->db->default_read_tx;
+  if (latest_unused->usages)
+    // transactions looking at the file directly, cannot proceed
+    return success();
+
+  while (latest_unused->next_transaction &&
+         latest_unused->next_transaction->usages == 0) {
+    latest_unused = latest_unused->next_transaction;
+  }
+  if (latest_unused == state->db->default_read_tx)
+    return success(); // no work to be done
+
+  // build a table of all the pages that we want to write
+  txn_state_t *prev_unused = latest_unused->previous_write_tx;
+  while (prev_unused) {
+    size_t number_of_buckets = get_number_of_buckets(prev_unused);
+    for (size_t i = 0; i < number_of_buckets; i++) {
+      page_t *entry = &state->entries[i];
+      if (!entry->address)
+        continue;
+
+      if (lookup_entry_in_tx(latest_unused, entry))
+        continue; // newer value exists, skip
+
+      ensure(allocate_entry_in_tx(&latest_unused, entry));
+    }
+
+    prev_unused = prev_unused->previous_write_tx;
+  }
+
+  // write all these pages to disk
+  ensure(txn_apply(latest_unused));
+
+  // free memory from other transactions that became unreachable
+  txn_cleanup_list(latest_unused->transactions_to_free);
+
+  // update the chain
+  if (latest_unused->next_transaction) {
+    state->db->default_read_tx->next_transaction =
+        latest_unused->next_transaction;
+
+    // we can only free when all the current transactions are closed
+    latest_unused->transactions_to_free =
+        state->db->last_write_tx->transactions_to_free;
+    state->db->last_write_tx->transactions_to_free = latest_unused;
+
+  } else {
+    state->db->last_write_tx = state->db->default_read_tx;
+    state->db->default_read_tx->next_transaction = 0;
+    // no one is watching, we can clear this
+    txn_cleanup_list(latest_unused);
+  }
+
+  return success();
+}
+
 // tag::txn_close[]
+
 result_t txn_close(txn_t *tx) {
-  if (!tx->state)
+  txn_state_t *state = tx->state;
+  tx->state = 0;
+  if (!state)
     return success(); // probably double close?
 
-  tx->state = 0;
+  // we have a rollback, no need to keep the memory
+  if (!(state->flags & TX_COMMITED)) {
+    txn_cleanup(state);
+    return success();
+  }
+
+  state->usages--;
+  ensure(txn_try_apply(state));
+
   return success();
 }
 // end::txn_close[]
@@ -86,8 +172,9 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
 
   // <3>
-  if (flags == READ_TX) {
+  if (flags & TX_READ) {
     tx->state = db->state->last_write_tx;
+    tx->state->usages++;
     return success();
   }
   ensure(!db->state->current_write_tx,
@@ -260,7 +347,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
   // <1>
-  ensure(tx->state->flags == WRITE_TX,
+  ensure(tx->state->flags & TX_WRITE,
          msg("Read transactions cannot modify the pages"));
 
   // <2>
