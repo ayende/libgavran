@@ -36,6 +36,7 @@ static result_t mvcc() {
   page_t rp = {.page_num = 2};
   ensure(txn_get_page(&rtx, &rp));
 
+  // <1>
   printf("Value: %s\n", rp.address);
 
   return success();

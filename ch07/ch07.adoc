@@ -27,7 +27,9 @@ With concurrent readers, we need to decide on the concurrency strategy for Gavra
 image::{img-src}/fig13.png[]
 
 Read transaction no. 1 was started after the write transaction and ended after the write transaction was committed. Read transaction no. 2 was created
-before the write transaction and closed afterward. Only read transaction no. 3 was created after the write transaction commit. 
+before the write transaction and closed afterward. Only read transaction no. 3 was created after the write transaction commit. Only the third transaction
+is going to be able to see the modifications made by the write transaction. The other two transactions are frozen at the time of their creation, seeing
+unchanging data of the last transaction that has committed when they were opened.
 
 Gavran is going to implement *snapshot isolation* for transactions. Once a transaction is opened, it will have a consistent and unchanging view of the 
 database. A write transaction commit will only impact _later_ transactions.
@@ -41,11 +43,11 @@ Consider the following timeline of operations, which shows what we have now.
 1. Write tx is created
 2. Read tx is created 
 3. Write tx modifies page 2
-3. Read tx reads page 2, see no changes (the data is held in buffer private to the write tx)
-4. Write tx commits & closed
-5. Read tx reads page 2,, see the changes that happened because `txn_commit` wrote it.
+4. Read tx reads page 2, see no changes (the data is held in buffer private to the write tx)
+5. Write tx commits & closed
+6. Read tx reads page 2, see the changes that happened because `txn_commit` wrote it.
 
-That is the current behavior of Gavran, and it is almost where we want it to be. The only change in behavior we need is that when the write transaction
+That is the _current_ behavior of Gavran, and it is almost where we want it to be. The only change in behavior we need is that when the write transaction
 commits, already opened transactions will _not_ see the changes. How can we implement this? Well, the reason that they can see the changes is that 
 we write them to the file, which is shared. What would happened if we _won't_ write to the file? Let's find out. 
 
@@ -108,6 +110,7 @@ can use to find the most recent version of a page. We'll only check the data fil
 You can see how that works in Figure 14, we have 5 transactions there, 3 writes and 2 read transactions. You can see how the effective pages for each one
 of those transactions.
 
+.Multiple concurrent read transactions each with their own immutable view of the world based on past write transactions mapping
 image::{img-src}/fig14.png[]
 
 For read transaction 2, the effective value of page 3 is from transaction 1 while it is the value from transaction 3 for read transaction 3. This allow each

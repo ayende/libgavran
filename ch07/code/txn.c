@@ -328,7 +328,7 @@ result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
                           page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  ensure(txn_get_page(&tx, &metadata_page));
+  ensure(txn_get_page(tx, &metadata_page));
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
@@ -337,7 +337,7 @@ result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
                              page_metadata_t **metadata) {
   page_t metadata_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
 
-  ensure(txn_modify_page(&tx, &metadata_page));
+  ensure(txn_modify_page(tx, &metadata_page));
 
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
