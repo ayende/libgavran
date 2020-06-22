@@ -245,6 +245,17 @@ result_t db_close(db_t *db) {
     errors_push(EIO, msg("Unable to properly close the database"),
                 with(palfs_get_filename(db->state->handle), "%s"));
   }
+  if (db->state->last_write_tx != db->state->default_read_tx) {
+    failure = true;
+    errors_push(
+        EUCLEAN,
+        msg("db_close called with active transactions that weren't closed,"
+            " memory leak and/or imminent crash are to be expected"),
+        with(palfs_get_filename(db->state->handle), "%s"));
+  }
+  // if these are transactions that are simply abandoned, we can
+  // still close them and hope for the best
+  txn_free_transactions(db->state->last_write_tx);
 
   free(db->state);
   db->state = 0;

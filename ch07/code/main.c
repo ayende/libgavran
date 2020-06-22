@@ -16,6 +16,7 @@ static result_t mvcc() {
   ensure(db_create("/tmp/db/orev", &options, &db));
   defer(db_close, &db);
 
+  // <1>
   txn_t wtx;
   ensure(txn_create(&db, TX_WRITE, &wtx));
   defer(txn_close, &wtx);
@@ -26,17 +27,19 @@ static result_t mvcc() {
   const char *msg = "Hello Gavran";
   strncpy(page.address, msg, strlen(msg) + 1);
 
+  // <2>
   txn_t rtx;
   ensure(txn_create(&db, TX_READ, &rtx));
   defer(txn_close, &rtx);
 
+  // <3>
   ensure(txn_commit(&wtx));
   ensure(txn_close(&wtx));
 
   page_t rp = {.page_num = 2};
   ensure(txn_get_page(&rtx, &rp));
 
-  // <1>
+  // <4>
   printf("Value: %s\n", rp.address);
 
   return success();

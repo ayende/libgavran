@@ -17,8 +17,8 @@ struct transaction_state {
 
   uint32_t flags;
   uint32_t modified_pages;
-  txn_state_t *previous_write_tx;
-  txn_state_t *next_transaction;
+  txn_state_t *previous_tx;
+  txn_state_t *next_tx;
   txn_state_t *transactions_to_free;
   page_t entries[];
 };
@@ -35,12 +35,13 @@ struct database_state {
   txn_state_t *last_write_tx;
   txn_state_t *current_write_tx;
   txn_state_t *default_read_tx;
-  char _padding2[8];
 };
 // end::database_state[]
 
 result_t pages_get(db_state_t *db, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
+
+void txn_free_transactions(txn_state_t *state);
 
 // tag::search_free_range_in_bitmap[]
 typedef struct bitmap_search_state {
