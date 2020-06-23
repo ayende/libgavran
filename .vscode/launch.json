@@ -13,6 +13,9 @@
         "131072",
         "35225"
       ],
+      "sourceFileMap": {
+        "/build/glibc-OTsEL5": "/usr/src/glibc"
+      },
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],

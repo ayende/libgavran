@@ -74,12 +74,10 @@ class PalFS:
         self.handle = None
         file = path.encode('utf-8')
         size = c_size_t()
-        if not gvn.palfs_compute_handle_size(file, pointer(size)):
-            Errors.Raise()
-        self.handle = create_string_buffer(size.value)
-        if not gvn.palfs_create_file(file, self.handle):
-            self.handle = None
-            Errors.Raise()
+        gvn.palfs_compute_handle_size(file, pointer(size))
+        h = create_string_buffer(size.value)
+        gvn.palfs_create_file(file, h)
+        self.handle = h
 
     def __del__(self):
         self.close()
@@ -93,33 +91,28 @@ class PalFS:
     def close(self):
         if self.handle is None:
             return
-        if not gvn.palfs_close_file(self.handle):
-            Errors.Raise()
+        gvn.palfs_close_file(self.handle)
         self.handle = None
 
     def size(self):
         size = c_size_t()
-        if not gvn.palfs_get_filesize(self.handle, pointer(size)):
-            Errors.Raise()
+        gvn.palfs_get_filesize(self.handle, pointer(size))
         return size.value
 
     def name(self):
         return gvn.palfs_get_filename(self.handle).decode('utf-8')
 
     def set_size(self, len):
-        if not gvn.palfs_set_file_minsize(self.handle, c_long(len)):
-            Errors.Raise()
+        gvn.palfs_set_file_minsize(self.handle, c_long(len))
 
     def map(self, offset, size):
         args = mmap_args()
         args.size = size
-        if not gvn.palfs_mmap(self.handle,c_long(offset), pointer(args)):
-            Errors.Raise()
+        gvn.palfs_mmap(self.handle,c_long(offset), pointer(args))
         return MapRange(args)
 
     def write(self, offset, val):
-        if not gvn.palfs_write_file(self.handle, c_long(offset), val, len(val)):
-            Errors.Raise()
+        gvn.palfs_write_file(self.handle, c_long(offset), val, len(val))
 
 class MapRange:
     def __init__(self, args):
@@ -137,8 +130,7 @@ class MapRange:
     def close(self):
         if self.args is None:
             return
-        if not gvn.palfs_unmap(pointer(self.args)):
-            Errors.Raise()
+        gvn.palfs_unmap(pointer(self.args))
         self.args = None
 
 class DatabaseOptions(Structure):
@@ -157,31 +149,26 @@ class Transaction:
     def allocate(self, size = 8192, nearby=0):
         p = Page()
         p.overflow_size = size
-        if not gvn.txn_allocate_page(pointer(self.s), pointer(p), c_long(nearby)):
-            Errors.Raise()
+        gvn.txn_allocate_page(pointer(self.s), pointer(p), c_long(nearby))
         return p
 
     def free(self, page):
-        if not gvn.txn_free_page(pointer(self.s), pointer(page)):
-            Errors.Raise()
+        gvn.txn_free_page(pointer(self.s), pointer(page))
         
     def get(self, num):
         p = Page()
         p.page_num = num
-        if not gvn.txn_get_page(pointer(self.s), pointer(p)):
-            Errors.Raise()
+        gvn.txn_get_page(pointer(self.s), pointer(p))
         return p
 
     def modify(self, num):
         p = Page()
         p.page_num = num
-        if not gvn.txn_modify_page(pointer(self.s), pointer(p)):
-            Errors.Raise()
+        gvn.txn_modify_page(pointer(self.s), pointer(p))
         return p
 
     def commit(self):
-        if not gvn.txn_commit(pointer(self.s)):
-            Errors.Raise()
+        gvn.txn_commit(pointer(self.s))
 
     def __del__(self):
         self.close()
@@ -195,8 +182,7 @@ class Transaction:
     def close(self):
         if self.s is None:
             return
-        if not gvn.txn_close(pointer(self.s)):
-            Errors.Raise()
+        gvn.txn_close(pointer(self.s))
         self.s = None
 
 class Database:
@@ -206,11 +192,21 @@ class Database:
             Errors.Raise()
         self.s = s
 
+    def test_get_map_at(self, page):
+        address = c_void_p()
+        gvn.TEST_db_get_map_at(pointer(self.s), c_long(page), pointer(address))
+        return address
+
     def txn(self, flags):
         t = DbOrTx()
-        if not gvn.txn_create(pointer(self.s), flags, pointer(t)):
-            Errors.Raise()
+        gvn.txn_create(pointer(self.s), flags, pointer(t))
         return Transaction(t)
+
+    def write_txn(self):
+        return self.txn(3)
+    
+    def read_txn(self):
+        return self.txn(4)
 
     def __del__(self):
         self.close()
@@ -224,10 +220,12 @@ class Database:
     def close(self):
         if self.s is None:
             return
-        if not gvn.db_close(pointer(self.s)):
-            Errors.Raise()
+        gvn.db_close(pointer(self.s))
         self.s = None
 
+def check_for_errors(result, func, args):
+    if not result:
+        Errors.Raise()
 
 def setup_errors(gvn):
     methods = [
@@ -279,6 +277,7 @@ def setup_db(gvn):
         ("txn_modify_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
         ("txn_free_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
         ("txn_allocate_page", [POINTER(DbOrTx), POINTER(Page), c_long], c_void_p),
+        ("TEST_db_get_map_at", [POINTER(DbOrTx), c_long, POINTER(mmap_args)], c_void_p),
     ]
 
     for method in methods:
@@ -290,6 +289,7 @@ def setup_db(gvn):
             
         setattr(m, "argtypes", method[1])
         setattr(m, "restype", method[2])
+        setattr(m, "errcheck", check_for_errors)
 
 gvn = cdll.LoadLibrary("./build/gavran.so")  
 

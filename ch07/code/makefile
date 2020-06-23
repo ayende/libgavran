@@ -22,7 +22,7 @@ DEFINES = -D_FILE_OFFSET_BITS=64
 
 CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC 
 
-LDFLAGS =  -lm #-shared
+LDFLAGS =  -lm -shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)

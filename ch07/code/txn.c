@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "db.h"
@@ -48,6 +49,7 @@ result_t txn_commit(txn_t *tx) {
   tx->state->usages = 1;
   tx->state->db->last_write_tx->next_tx = tx->state;
   tx->state->db->last_write_tx = tx->state;
+  tx->state->db->last_tx_id = tx->state->tx_id;
   return success();
 }
 // end::txn_commit[]
@@ -69,7 +71,7 @@ static result_t txn_write_state_to_disk(txn_state_t *state) {
 // end::txn_write_state_to_disk[]
 
 // tag::free_tx[]
-static void txn_free_single_tx(txn_state_t *state) {
+void txn_free_single_tx(txn_state_t *state) {
   size_t number_of_buckets = get_number_of_buckets(state);
   for (size_t i = 0; i < number_of_buckets; i++) {
     page_t *entry = &state->entries[i];
@@ -77,12 +79,12 @@ static void txn_free_single_tx(txn_state_t *state) {
       continue;
 
     free(entry->address);
+    entry->address = 0;
   }
-
   free(state);
 }
 
-void txn_free_transactions(txn_state_t *state) {
+static void txn_free_transactions(txn_state_t *state) {
   if (!state)
     return;
   txn_state_t *default_read_tx = state->db->default_read_tx;
@@ -105,11 +107,12 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
       page_t *entry = &prev->entries[i];
       if (!entry->address)
         continue;
-
-      if (lookup_entry_in_tx(state, entry))
+      page_t check = {.page_num = entry->page_num};
+      if (lookup_entry_in_tx(state, &check))
         continue;
 
       ensure(allocate_entry_in_tx(&state, entry));
+      entry->address = 0; // we moved ownership, detached from original tx
     }
 
     prev = prev->previous_tx;
@@ -120,16 +123,32 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
 // end::txn_merge_unique_pages[]
 
 // tag::txn_cleanup_now_or_register[]
+static void txn_place_in_free_tx_list(db_state_t *db, txn_state_t *state) {
+  if (state == db->default_read_tx)
+    return;
+
+  state->can_free_after_tx_id = db->last_tx_id + 1;
+
+  txn_state_t **cur = &db->transactions_to_free;
+
+  while (*cur && (*cur)->tx_id < state->tx_id) {
+    cur = &(*cur)->next_tx_in_free_list;
+  }
+  if (*cur && (*cur)->tx_id == state->tx_id) {
+    return; // already registered
+  }
+  state->next_tx_in_free_list = *cur;
+  *cur = state;
+}
+
 static void txn_cleanup_now_or_register(db_state_t *db, txn_state_t *state) {
   // update the chain
   if (state->next_tx) {
-    db->default_read_tx->next_tx = state->next_tx;
 
-    txn_state_t *tx_to_attach_to =
-        db->current_write_tx ? db->current_write_tx : db->last_write_tx;
-    // we can only free when all the current transactions are closed
-    state->transactions_to_free = tx_to_attach_to->transactions_to_free;
-    tx_to_attach_to->transactions_to_free = state;
+    db->default_read_tx->next_tx = state->next_tx;
+    state->next_tx->previous_tx = db->default_read_tx;
+
+    txn_place_in_free_tx_list(db, state);
 
   } else {
     db->last_write_tx = db->default_read_tx;
@@ -141,15 +160,17 @@ static void txn_cleanup_now_or_register(db_state_t *db, txn_state_t *state) {
 // end::txn_cleanup_now_or_register[]
 
 // tag::txn_free_registered_transactions[]
-static void txn_free_registered_transactions(txn_state_t *state) {
-  txn_state_t *default_read_tx = state->db->default_read_tx;
-  while (state != default_read_tx) {
-    while (state->transactions_to_free) {
-      txn_state_t *cur = state->transactions_to_free;
-      state->transactions_to_free = cur->transactions_to_free;
-      txn_free_transactions(cur);
-    }
-    state = state->previous_tx;
+static void txn_free_registered_transactions(db_state_t *state) {
+  txn_state_t *oldest_tx = state->default_read_tx->next_tx;
+  while (state->transactions_to_free) {
+    txn_state_t *cur = state->transactions_to_free;
+
+    if (oldest_tx && cur->can_free_after_tx_id > oldest_tx->tx_id)
+      break;
+
+    state->transactions_to_free = cur->next_tx_in_free_list;
+
+    txn_free_single_tx(cur);
   }
 }
 // end::txn_free_registered_transactions[]
@@ -162,12 +183,15 @@ static result_t txn_gc_tx(txn_state_t *state) {
     // transactions looking at the file directly, cannot proceed
     return success();
 
+  db_state_t *db = state->db;
   // <2>
   while (latest_unused->next_tx && latest_unused->next_tx->usages == 0) {
     latest_unused = latest_unused->next_tx;
   }
-  if (latest_unused == state->db->default_read_tx)
+  if (latest_unused == db->default_read_tx) {
+    txn_place_in_free_tx_list(db, state);
     return success(); // no work to be done
+  }
 
   // <3>
   ensure(txn_merge_unique_pages(latest_unused));
@@ -175,11 +199,16 @@ static result_t txn_gc_tx(txn_state_t *state) {
   // <4>
   ensure(txn_write_state_to_disk(latest_unused));
 
-  // <5>
-  txn_free_registered_transactions(latest_unused);
+  // a later transaction closed before this one
+  // but we need to account for the current close tx
+  if (latest_unused->tx_id > state->tx_id)
+    latest_unused = state;
 
   // <6>
-  txn_cleanup_now_or_register(state->db, latest_unused);
+  txn_cleanup_now_or_register(db, latest_unused);
+
+  // <5>
+  txn_free_registered_transactions(db);
 
   return success();
 }
@@ -193,6 +222,10 @@ result_t txn_close(txn_t *tx) {
   if (!state)
     return success(); // probably double close?
 
+  if (state == state->db->active_write_tx) {
+    state->db->active_write_tx = 0;
+  }
+
   // <2>
   // we have a rollback, no need to keep the memory
   if (!(state->flags & TX_COMMITED)) {
@@ -203,10 +236,6 @@ result_t txn_close(txn_t *tx) {
   // <3>
   state->usages--;
   ensure(txn_gc_tx(state));
-
-  if (state->db->current_write_tx == state) {
-    state->db->current_write_tx = 0;
-  }
 
   return success();
 }
@@ -222,7 +251,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
     tx->state->usages++;
     return success();
   }
-  ensure(!db->state->current_write_tx,
+  ensure(!db->state->active_write_tx,
          msg("There can only be a single write transaction at a time, but "
              "asked for a write transaction when one is already opened"));
 
@@ -235,8 +264,9 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   state->db = db->state;
   // <4>
   state->previous_tx = db->state->last_write_tx;
-  state->tx_id = db->state->last_write_tx->tx_id + 1;
+  state->tx_id = db->state->last_tx_id + 1;
   tx->state = state;
+  db->state->active_write_tx = state;
   return success();
 }
 // end::txn_create[]
@@ -393,7 +423,8 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
 
   // <1>
   ensure(tx->state->flags & TX_WRITE,
-         msg("Read transactions cannot modify the pages"));
+         msg("Read transactions cannot modify the pages"),
+         with(tx->state->flags, "%d"));
 
   // <2>
   if (lookup_entry_in_tx(tx->state, page)) {

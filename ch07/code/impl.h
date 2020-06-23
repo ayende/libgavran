@@ -10,16 +10,18 @@
 // tag::transaction_state[]
 struct transaction_state {
   db_state_t *db;
-  // <2>
-  uint64_t tx_id;
-  size_t allocated_size;
-  size_t usages;
-
   uint32_t flags;
   uint32_t modified_pages;
   txn_state_t *previous_tx;
   txn_state_t *next_tx;
-  txn_state_t *transactions_to_free;
+  txn_state_t *next_tx_in_free_list;
+
+  // <2>
+  uint64_t tx_id;
+  size_t allocated_size;
+  size_t usages;
+  uint64_t can_free_after_tx_id;
+
   page_t entries[];
 };
 // end::transaction_state[]
@@ -33,15 +35,17 @@ struct database_state {
   // <1>
   char _padding[6];
   txn_state_t *last_write_tx;
-  txn_state_t *current_write_tx;
+  txn_state_t *active_write_tx;
   txn_state_t *default_read_tx;
+  txn_state_t *transactions_to_free;
+  uint64_t last_tx_id;
 };
 // end::database_state[]
 
 result_t pages_get(db_state_t *db, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
 
-void txn_free_transactions(txn_state_t *state);
+void txn_free_single_tx(txn_state_t *state);
 
 // tag::search_free_range_in_bitmap[]
 typedef struct bitmap_search_state {

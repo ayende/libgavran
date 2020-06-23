@@ -327,6 +327,25 @@ _snapshot isolation_ model for consistency. Once a read transaction is opened, t
 time, we may create and commit write transactions and not have to do any coordination. There is a hurdle that we need to go through. Managing exactly when
 we can write the data to disk and at what point we can actually free the memory is not trivial.
 
+.The downside of MVCC
+****
+Using a system with MVCC is easy. You don't need to worry about locks or contentions. The way we implemented it in Gavran means that we have full snapshot
+isolation without really having to do much work at all. However...
+
+The design we have here has a weakness that must be considered. Gavran is only able to write to the data file (and discard Copy on Write memory) when there
+are no more read transactions that reference those pages. That means that if you have a read transaction active, it is going to block Gavran from writing
+to the disk anything that was written after that read transaction was opened.
+
+In other words, if you have a long lived read transaction, you are going to stall the process of writing to disk. In practice, in embedded databases there
+is rarely much need for long lived read transactions. And the issue only happens when you have:
+
+* A long lived read transaction.
+* A _lot_ of write transactions.
+
+It takes both issues to cause the problem to manifest, and the combination is quite uncommon. Nevertheless, it is something to be aware of. The same issue
+is also present with other databases implementing MVCC.
+****
+
 What we _don't_ have yet is the durability story. We are doing buffered I/O, which means that it is entirely possible for a power failure to cause us to
 lose data or corrupt the data file. There is a good path forward from where we are now to get to durable system, which we'll explore in the next chapter.
 And now, let's get to unit testing...
