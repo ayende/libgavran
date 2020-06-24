@@ -20,9 +20,9 @@ INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments
 DEFINES = -D_FILE_OFFSET_BITS=64
 
-CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC 
+CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN)
 
-LDFLAGS =  -lm -shared
+LDFLAGS = -lm -shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)

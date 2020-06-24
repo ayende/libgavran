@@ -30,11 +30,11 @@ static result_t assert_raw(db_t *db, uint32_t expected) {
   return success();
 }
 
-// tag::mvcc[]
-static result_t mvcc() {
+// tag::interleaved_transactions[]
+static result_t interleaved_transactions() {
   db_t db;
   database_options_t options = {.minimum_size = 4 * 1024 * 1024};
-  ensure(db_create("/tmp/db/orev", &options, &db));
+  ensure(db_create("/tmp/db/orev2", &options, &db));
   defer(db_close, &db);
 
   txn_t t2, t3, t4, t5, t6, t7, t8, t9;
@@ -46,6 +46,10 @@ static result_t mvcc() {
 
   ensure(assert_raw(&db, 0)); // no writes
 
+  txn_t noop;
+  ensure(txn_create(&db, TX_WRITE, &noop));
+  ensure(txn_close(&noop));
+
   ensure(txn_close(&t2));
   ensure(assert_raw(&db, 2));
   ensure(txn_close(&t3));
@@ -55,10 +59,12 @@ static result_t mvcc() {
 
   ensure(txn_close(&t5));
   ensure(assert_raw(&db, 3));
+
+  ensure(write_and_return_rtx(&db, 8, &t8));
+
   ensure(txn_close(&t4));
   ensure(assert_raw(&db, 5));
 
-  ensure(write_and_return_rtx(&db, 8, &t8));
   ensure(write_and_return_rtx(&db, 9, &t9));
 
   ensure(txn_close(&t9));
@@ -68,29 +74,42 @@ static result_t mvcc() {
   ensure(assert_raw(&db, 7));
   ensure(txn_close(&t8));
   ensure(assert_raw(&db, 9));
+  return success();
+}
+// end::interleaved_transactions[]
 
-  // defer(txn_close, &wtx);
+// tag::mvcc[]
+static result_t mvcc() {
+  db_t db;
+  database_options_t options = {.minimum_size = 4 * 1024 * 1024};
+  ensure(db_create("/tmp/db/orev", &options, &db));
+  defer(db_close, &db);
 
-  // page_t page = {.page_num = 2};
-  // ensure(txn_modify_page(&wtx, &page));
+  // <1>
+  txn_t wtx;
+  ensure(txn_create(&db, TX_WRITE, &wtx));
+  defer(txn_close, &wtx);
 
-  // const char *msg = "Hello Gavran";
-  // strncpy(page.address, msg, strlen(msg) + 1);
+  page_t page = {.page_num = 2};
+  ensure(txn_modify_page(&wtx, &page));
 
-  // // <2>
-  // txn_t rtx;
-  // ensure(txn_create(&db, TX_READ, &rtx));
-  // defer(txn_close, &rtx);
+  const char *msg = "Hello Gavran";
+  strncpy(page.address, msg, strlen(msg) + 1);
 
-  // // <3>
-  // ensure(txn_commit(&wtx));
-  // ensure(txn_close(&wtx));
+  // <2>
+  txn_t rtx;
+  ensure(txn_create(&db, TX_READ, &rtx));
+  defer(txn_close, &rtx);
 
-  // page_t rp = {.page_num = 2};
-  // ensure(txn_get_page(&rtx, &rp));
+  // <3>
+  ensure(txn_commit(&wtx));
+  ensure(txn_close(&wtx));
 
-  // // <4>
-  // printf("Value: %s\n", rp.address);
+  page_t rp = {.page_num = 2};
+  ensure(txn_get_page(&rtx, &rp));
+
+  // <4>
+  printf("Value: %s\n", rp.address);
 
   return success();
 }
@@ -98,7 +117,11 @@ static result_t mvcc() {
 
 int main() {
   system("rm  /tmp/db/*");
-  if (!mvcc()) {
+
+  if ((1) && !interleaved_transactions()) {
+    errors_print_all();
+  }
+  if ((1) && !mvcc()) {
     errors_print_all();
   }
   printf("Done\n");

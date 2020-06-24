@@ -212,6 +212,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   ptr->default_read_tx->db = ptr;
   // only the default read tx has this setup
   ptr->default_read_tx->flags = TX_READ | TX_COMMITED;
+  ptr->default_read_tx->can_free_after_tx_id = UINT64_MAX;
   ptr->last_write_tx = ptr->default_read_tx;
   // end::default_read_tx[]
 
@@ -248,7 +249,9 @@ result_t db_close(db_t *db) {
 
   while (db->state->transactions_to_free) {
     txn_state_t *cur = db->state->transactions_to_free;
-    db->state->transactions_to_free = cur->next_tx_in_free_list;
+    db->state->transactions_to_free = cur->next_tx;
+    if (db->state->default_read_tx == cur)
+      continue; // can't free the default one
     txn_free_single_tx(cur);
   }
 

@@ -74,25 +74,7 @@ def test_will_not_write_to_disk_with_read_tx():
         rtx.close() # not it should write it
         assert b'Hello Garvan Python' == ctypes.string_at(address)
 
-
-def write_and_return_rtx(db, n):
-    with db.write_txn() as wtx:
-        p = wtx.modify(2)
-        b = str(n).zfill(2).encode('utf-8')
-        ctypes.memmove(p.address, b, len(b))
-        wtx.commit()
-        return db.read_txn()
-
-def assert_raw(db, expected):
-    b = str(expected).zfill(2).encode('utf-8')
-    if expected == 0:
-        b = b''
-
-    address = db.test_get_map_at(2)
-    assert b == ctypes.string_at(address)
-
-
-def test_figure_16():        
+def test_interleaved_transactions():        
     with Database(path,  DatabaseOptions(128*1024)) as db:
         assert_raw(db, 0) # initial state
 
@@ -126,7 +108,18 @@ def test_figure_16():
         rtx7.close()
         assert_raw(db, 8) # to the end
 
+def write_and_return_rtx(db, n):
+    with db.write_txn() as wtx:
+        p = wtx.modify(2)
+        b = str(n).zfill(2).encode('utf-8')
+        ctypes.memmove(p.address, b, len(b))
+        wtx.commit()
+        return db.read_txn()
 
-      
+def assert_raw(db, expected):
+    b = str(expected).zfill(2).encode('utf-8')
+    if expected == 0:
+        b = b''
 
-
+    address = db.test_get_map_at(2)
+    assert b == ctypes.string_at(address)

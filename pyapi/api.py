@@ -92,11 +92,13 @@ class PalFS:
         if self.handle is None:
             return
         gvn.palfs_close_file(self.handle)
+        Errors.Raise()
         self.handle = None
 
     def size(self):
         size = c_size_t()
         gvn.palfs_get_filesize(self.handle, pointer(size))
+        Errors.Raise()
         return size.value
 
     def name(self):
@@ -104,15 +106,18 @@ class PalFS:
 
     def set_size(self, len):
         gvn.palfs_set_file_minsize(self.handle, c_long(len))
+        Errors.Raise()
 
     def map(self, offset, size):
         args = mmap_args()
         args.size = size
         gvn.palfs_mmap(self.handle,c_long(offset), pointer(args))
+        Errors.Raise()
         return MapRange(args)
 
     def write(self, offset, val):
         gvn.palfs_write_file(self.handle, c_long(offset), val, len(val))
+        Errors.Raise()
 
 class MapRange:
     def __init__(self, args):
@@ -131,6 +136,7 @@ class MapRange:
         if self.args is None:
             return
         gvn.palfs_unmap(pointer(self.args))
+        Errors.Raise()
         self.args = None
 
 class DatabaseOptions(Structure):
@@ -150,25 +156,31 @@ class Transaction:
         p = Page()
         p.overflow_size = size
         gvn.txn_allocate_page(pointer(self.s), pointer(p), c_long(nearby))
+        Errors.Raise()
         return p
 
     def free(self, page):
         gvn.txn_free_page(pointer(self.s), pointer(page))
+        Errors.Raise()
         
     def get(self, num):
         p = Page()
         p.page_num = num
         gvn.txn_get_page(pointer(self.s), pointer(p))
+        Errors.Raise()
         return p
 
     def modify(self, num):
         p = Page()
         p.page_num = num
         gvn.txn_modify_page(pointer(self.s), pointer(p))
+        Errors.Raise()
         return p
 
     def commit(self):
         gvn.txn_commit(pointer(self.s))
+        Errors.Raise()
+        pass
 
     def __del__(self):
         self.close()
@@ -183,27 +195,30 @@ class Transaction:
         if self.s is None:
             return
         gvn.txn_close(pointer(self.s))
+        Errors.Raise()
         self.s = None
 
 class Database:
     def __init__(self, path, options):
         s = DbOrTx()
-        if not gvn.db_create(path.encode('utf-8'), pointer(options), pointer(s)):
-            Errors.Raise()
+        gvn.db_create(path.encode('utf-8'), pointer(options), pointer(s))
+        Errors.Raise()
         self.s = s
 
     def test_get_map_at(self, page):
         address = c_void_p()
         gvn.TEST_db_get_map_at(pointer(self.s), c_long(page), pointer(address))
+        Errors.Raise()
         return address
 
     def txn(self, flags):
         t = DbOrTx()
         gvn.txn_create(pointer(self.s), flags, pointer(t))
+        Errors.Raise()
         return Transaction(t)
 
     def write_txn(self):
-        return self.txn(3)
+        return self.txn(2)
     
     def read_txn(self):
         return self.txn(4)
@@ -221,27 +236,9 @@ class Database:
         if self.s is None:
             return
         gvn.db_close(pointer(self.s))
+        Errors.Raise()
         self.s = None
 
-def check_for_errors(result, func, args):
-    if not result:
-        Errors.Raise()
-
-def setup_errors(gvn):
-    methods = [
-        ("errors_get_count", [], c_size_t),
-        ("errors_get_codes", [POINTER(c_size_t)], POINTER(c_int)),
-        ("errors_get_messages", [POINTER(c_size_t)], POINTER(c_char_p)),
-        ("errors_clear", [], None),
-        ("errors_print_all", [], None),
-        ("errors_append_message", [c_char_p] , c_void_p),
-        ("errors_push_new", [c_char_p,c_int, c_char_p, c_int], c_void_p)
-    ]
-
-    for method in methods:
-        m = getattr(gvn, method[0])
-        setattr(m, "argtypes", method[1])
-        setattr(m, "restype", method[2])
 
 def setup_palfs(gvn):
     methods = [
@@ -289,7 +286,23 @@ def setup_db(gvn):
             
         setattr(m, "argtypes", method[1])
         setattr(m, "restype", method[2])
-        setattr(m, "errcheck", check_for_errors)
+
+
+def setup_errors(gvn):
+    methods = [
+        ("errors_get_count", [], c_size_t),
+        ("errors_get_codes", [POINTER(c_size_t)], POINTER(c_int)),
+        ("errors_get_messages", [POINTER(c_size_t)], POINTER(c_char_p)),
+        ("errors_clear", [], None),
+        ("errors_print_all", [], None),
+        ("errors_append_message", [c_char_p] , c_void_p),
+        ("errors_push_new", [c_char_p,c_int, c_char_p, c_int], c_void_p)
+    ]
+
+    for method in methods:
+        m = getattr(gvn, method[0])
+        setattr(m, "argtypes", method[1])
+        setattr(m, "restype", method[2])
 
 gvn = cdll.LoadLibrary("./build/gavran.so")  
 

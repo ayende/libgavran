@@ -12,13 +12,12 @@ struct transaction_state {
   db_state_t *db;
   uint32_t flags;
   uint32_t modified_pages;
-  txn_state_t *previous_tx;
-  txn_state_t *next_tx;
-  txn_state_t *next_tx_in_free_list;
+  size_t allocated_size;
 
   // <2>
+  txn_state_t *prev_tx;
+  txn_state_t *next_tx;
   uint64_t tx_id;
-  size_t allocated_size;
   size_t usages;
   uint64_t can_free_after_tx_id;
 
@@ -38,6 +37,7 @@ struct database_state {
   txn_state_t *active_write_tx;
   txn_state_t *default_read_tx;
   txn_state_t *transactions_to_free;
+  uint64_t oldest_active_tx;
   uint64_t last_tx_id;
 };
 // end::database_state[]

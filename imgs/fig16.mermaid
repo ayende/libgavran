@@ -1,0 +1,23 @@
+graph TD
+    rtx(default_read_tx)-->|next_tx| tx_4(Transaction #4<br/>usages =  0<br/>can_free_after_tx_id = 6)
+    
+    tx_4-->|next_tx| tx_5(Transaction #5<br/>usages = 0<br/>can_free_after_tx_id = 6)
+    tx_5-->|prev_tx| tx_4
+
+    tx_5-->|next_tx| tx_6(Transaction #6<br/>usages = 3)
+    tx_6-->|prev_tx| rtx
+
+    tx_6-->|next_tx| tx_7(Transaction #7<br/>usages = 2)
+    tx_7-->|prev_tx| tx_6
+
+    tx_8(Transaction #8<br/>Active write transaction)
+    tx_8-->|prev_tx| tx_7 
+
+    ftx[transactions_to_free]-->tx_4
+
+    style tx_8 stroke:#333,stroke-width:4px
+    style ftx stroke:#333,stroke-width:4px
+    style rtx stroke:#333,stroke-width:4px
+
+    classDef default text-align:left;
+
