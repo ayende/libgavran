@@ -1,0 +1,9 @@
+* Hashing of transactions
+* Diffing the pages
+* Compressing the transactions
+
+* Multiple WAL files
+* Hash on the file header
+* Last WAL file
+* Check the size of the WAL file
+* Avoid writing the same page multiple times

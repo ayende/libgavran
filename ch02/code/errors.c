@@ -1,7 +1,7 @@
 // tag::declarations[]
+#undef _GNU_SOURCE
 
 #include "errors.h"
-
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

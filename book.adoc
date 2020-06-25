@@ -30,3 +30,5 @@ include::./ch05/ch05.adoc[]
 include::./ch06/ch06.adoc[]
 
 include::./ch07/ch07.adoc[]
+
+include::./ch08/ch08.adoc[]

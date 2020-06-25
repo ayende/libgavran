@@ -1,0 +1,368 @@
+== Implementing durable writes
+
+We now have transactions that support Atomicity and Isolation, but all our writes are done using buffered I/O. That means that we are subject to a whole
+_host_ of potential issues. The most obvious one is power loss. If we pull the plug on the system immediately after a transaction is committed, we'll
+lose data. 
+
+For that matter, we only write data to disk after all existing transactions are no longer looking at it. If we have a long running transaction, that may
+prevent us from writing to the disk for a _while_, significantly increasing the risk of data lose. Listing 8.1 shows an example of losing data.
+
+[source]
+.Listing 8.1 - main.c - Losing committed writes because of a process crash
+```
+include::./code/main.c[tags=data_loss]
+```
+<1> Opening a read transaction which will prevent us from writing to disk.
+<2> Committing a write transaction
+<3> Crashing the process before the data actually hits the disk
+
+If you'll run the code in Listing 8.1 multiple times, you'll see that the value the read transaction see never change. The changes never made it to disk.
+There are valid reasons why you'll want to have a storage engine with this behavior. Performance is usually the cited concern, and for some systems, that
+is an appropriate choice. Not for Gavran, I want it to be _transactional_, which means full durability.
+
+.It doesn't end with a `write()`
+****
+In Listing 8.1, the issue is that we aren't writing to the disk. If we _were_ to write to the disk, however, it would only mask the problem. Writing to the
+disk is anything but easy, if you care about durability. We talked about this a bit in Chapter 3, when we had to jump through hoops to get the file creation
+to persist regardless of what is going on.
+
+When writing to a file, we need to take into account that calling `write()` is just the start. The OS may decide to arbitrarily delay the actual write to disk
+and even the disk may buffer the writes. The order in which you issue writes and the order in which they are persisted is not guaranteed. And writes to the
+disk are _not_ atomic. 
+
+https://danluu.com/deconstruct-files/[Files are fraught with peril] and http://danluu.com/file-consistency/[Files are hard] posts sum up the situation 
+quite nicely. I also referred to the https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-pillai.pdf[All File Systems Are Not Created Equal]
+paper (also called ALICE paper) in Chapter 3. In the paper, a whole bunch of applications (including multiple database engines) were tested and 
+almost all of them had some issues around properly writing to disk. We clearly need more than a simple `write()` to help us.
+****
+
+We know that calling `write()` won't be sufficient, but before we can start on fixing this, we need to first understand where we'll be writing _to_. We
+can't write to the data file, there are transactions that are looking at the data there. We have to write to some other location.
+
+=== Writing to a Write Ahead Log
+
+Instead of writing to the database file directly, we'll write all the changes that we _want_ to make to another file. The technique is also called 
+Write Ahead Log (WAL) and is used by the vast majority of databases that want to achieve durability. There are two exceptions that I can think of with 
+regards to the use of WAL to allow durability of transactions:
+
+* LDMB - Instead of using using WAL, it uses Copy on Write to other pages in the same data file. In other words, you don't have stable page numbers, but
+each time you `modify` a page, a new page number will be allocated for you. That has implications for the amount of data that changes whenever a 
+modification occurs. You have to `modify` not just that particular page but any that references it. On large databases, that can cause a single byte
+change to require dozens of KB to be written to disk. The upside of this approach is that LMDB requires no startup logic or recovery phase.
+* CouchDB - Instead of a WAL, it uses an append only mode. Writes are always done at the end of the file. Similarly to LMDB, a `modify` will cause the
+data as well as anything that reference it to be written to the end of the file again. On startup, the database scans from the end of the file to find
+a commit marker and start from there. An additional downside is that the database needs to run occasional compactions to free wasted disk space.
+
+The idea of a WAL is that we'll write what we _intend_ to do, so if we crash, we can can replay our actions and end up in the same situation as we 
+were before the crash.
+
+We'll start working on the WAL by looking at the interface it exposes, shown in Listing 8.2
+
+[source]
+.Listing 8.2 - impl.h - The internal API for the WAL in Gavran
+```
+include::./code/impl.h[tags=wal_api]
+
+include::./code/impl.h[tags=database_state]
+```
+<1> The `wal_state` field was added to the database's state
+
+There are three functions that we expose for the rest of the system. The `wal_open_and_recover` function is called from `handle_newly_opened_database`, 
+to run over the WAL and apply any changes from committed transactions. The `wal_append` is called from `txn_commit`, that is what ensures that the data is durable. 
+And `wal_checkpoint` is called from `txn_write_state_to_disk` to tell the WAL that the transactions up to the specified `tx_id` have been safely stored in the disk 
+and can be cleared from the WAL.
+
+We'll start looking at the WAL logic from the modifications to the data structures to support it, showing in Listing 8.3.
+
+[source]
+.Listing 8.3 - wal.c - Internal structures used to manage the WAL logic
+```
+include::./code/wal.c[tags=structs]
+```
+
+The `wal_state_t` is used to manage the overall WAL state, it is an in memory structure only, held by the `db_state_t`. The `wal_tx_t` structure, on the other 
+hand, is a _persistent_ value that will be stored in the WAL file. It represents a single transaction that was written to the WAL. And the `wal_tx_page_t`
+structure holds information about a single page modified in that transaction. Those can all be considered as the _metadata_ of the transaction in the WAL.
+Let's see how we are using this in the WAL, Listing 8.4 shows the `wal_append` function, which persists the transaction's operations.
+
+[source]
+.Listing 8.4 - wal.c - Writing a transaction to the WAL
+```
+include::./code/wal.c[tags=wal_append]
+```
+<1> Compute the required size for the transaction, we also need an array of `wal_tx_page_t` to hold the metadata about the writes.
+    We use size in pages because we allocate via `palmem_allocate_pages` because memory alignment will become important shortly.
+<2> It is important that the write will align on 4KB boundary, our pages are already 8KB and aligned on 4KB, so we need to make that the transaction buffer aligns.
+    We do that by using `palmem_allocate_pages` to get the memory. 
+<3> In addition to the transaction buffer, we also allocate `palfs_io_buffer`, to do the actual vectored write operation.
+<4> We iterate through the modified pages in the transactions and set their metadata in the transaction and their address in the buffers.
+<5> Calling `palfs_vectored_write_file` to actually write to disk and persist the data.
+
+There is a _lot_ going on in `wal_append`, but what it _does_ is take all the modified pages in the transaction and write them to the WAL, so we can replay
+them at a later stage if needed.
+We are currently doing normal buffered writes, but we'll switch soon to direct I/O, which has far more stringent alignment and size requirements.
+This is why we compute the size of the transaction buffer and then round up to 4KB. That is the usual block size in modern hardware. 
+
+The `wal_tx_t` holds some metadata about the transaction, such as the `tx_id`, the number of modified pages, etc. We then have an array of `wal_tx_page_t`,
+which are used to hold the metadata about the modified pages. The page number, the location of the page in the transaction buffer and its size. 
+That is called the transaction header, which is aligned to 4KB in size. Next, we have the copies of the pages modified by the transaction.
+
+The actual write to the file is done using the `palfs_vectored_write_file` call, which is new. I wanted to show some more advanced features of 
+using files and it fit the current problem very well. Listing 8.5 shows the implementation, I'll discuss what it means afterward.
+
+[source]
+.Listing 8.4 - fs.c - Using `pwritev` to write a vector of values to the WAL file
+```
+include::./code/fs.c[tags=palfs_vectored_write_file]
+```
+<1> Compute the total size of the write
+<2> Performing the actual write to disk from multiple buffers to a single location on disk
+<3> Error handling, the `pwritev` may write _less_ than requested, so we may need to retry
+
+We are taking advantage here of the `pwritev` system call. That call can take an array of buffers and write them all to a single location on
+disk. This is very convenient for our purposes, since we need to write many pages, which are located in a non consecutive location to the 
+file and we can do that in one system call.  
+As you can see, we are abusing the fact that `struct pal_io_buffer` and `struct iovec` have the same structure to freely cast between 
+them. I'm not going to keep this code as it is for long, so I'm allowing myself to perform such abuse.
+
+.What about cross platform usage?
+****
+We won't be using `pwritev` for long, but I wanted to touch on cross platform compatibility with advanced API. We won't
+be using `pwritev` for other reasons, but it is perfect for many scenarios. On Windows, on the other hand, you have `WriteFileGather` which
+allows you to pass an array of pages. Slightly more complex, but works fairly well. 
+
+For the most part, you can assume that most operating systems will have similar API at the file system level. They all have to work with the
+same constraints, after all. 
+
+That said, `WriteFileGather` is available from 2003 and `pwritev` exists only from 2009. The `writev` system call, on the other hand, goes 
+to about 2001 or so. As a database developer, I love to use API that has been around for a decade or two. It means that most of the bugs
+have been shaken out.
+****
+
+We wrote the transaction to the WAL file, but what did we actually write? Figure 17 shows the structure of a single transaction in the WAL.
+
+.The structure of a single transaction inside the WAL
+image::{img-src}/fig17.png[]
+
+The purpose of the WAL is to make sure that committed transactions aren't lost. In other databases, it is also responsible for rollback uncommitted 
+transactions, but Gavran is using a different model and doesn't have to worry about that. We can no reconstruct committed transactions by looking 
+at the WAL for the pages that they modified.
+
+.A note on error handling
+****
+The PAL code probably deserve some additional checks for error handling. For example, we need to take into account that we may get `EINTR` and 
+need to retry the operation again. There is a _lot_ that goes into proper writing to files, I'm afraid.
+****
+
+Recovering a committed transaction is easy, take the copy of the pages in the WAL and put them in the data file, done. As simple as this is, that
+is all we need to get proper recovery in this scenario.
+
+.The format of write ahead log
+****
+One of the things that make it _hard_ to build a database is that there are so many interconnected details. Consider the impact of the WAL on the
+database design, or how the specifics of an MVCC implementation affect the on disk data format. 
+
+Write ahead logs aren't new, they have been around for as long as there have been transactional databases. They are one of the few ways to _achieve_
+durability and usually the only way that can meet realistic performance goals. A common algorithm that uses WAL is called 
+https://dl.acm.org/doi/10.1145/128765.128770[ARIES] - Algorithms for Recovery and Isolation Exploiting Semantics. It is used by SQL Server, DB2, etc.
+It is an involved system, requiring Redo and Undo logs and a fairly complex dance on startup to ensure that you are back in the same place as you were
+before.
+
+If you'll notice, we aren't doing anything so complicated. We record the pages in the WAL and can apply them in place to recover committed transactions.
+The entire recovery code fits inside a single page and there is no need for an Undo step, because uncommitted changes never hit the WAL.
+****
+
+In Listing 8.1 we have a scenario where a read transaction prevents us from writing to the data file, and then we crash by calling `exit()`. Now that
+we have `wal_append`, we have written the changes in the committed write transaction to disk. The next step is to see how we can recover from such a
+scenario. Take a look at Listing 8.6, where we explore the `wal_open_and_recover`.
+
+[source]
+.Listing 8.6 - wal.c - Opening the WAL and calling `wal_recover` on startup
+```
+include::./code/wal.c[tags=wal_open_and_recover]
+```
+
+The `wal_open_and_recover` function is called as the very first step in `handle_newly_opened_database`. There is a bit of code there, but most of it
+is setting up the WAL filename, opening the file and the memory map, etc. You can see that we added a database option for `wal_size`, which will 
+control the size of the WAL file. The real fun happens in `wal_recover`, shown in Listing 8.7, where we do the actual recover.
+
+[source]
+.Listing 8.7 - wal.c - Recovering committed transactions from the WAL
+```
+include::./code/wal.c[tags=wal_recover]
+```
+
+In `wal_recover`, we scan through the WAL file (memory mapped in `wal->map.address`) and read it one transaction at a time. For each one of the transaction,
+we read the copy of the page stored in the WAL and we copy it to the right place in the data file using `palfs_write_file`. We then update the last valid
+position in the file and we are done. 
+
+The stop condition for `wal_recover` is interesting. Either we run through the entire WAL or we found a transaction whose id is lower than the current
+transaction id. That would indicate to us that we are looking at old transactions, see the checkpoint discussion on when that can happen.
+The use of a marker value ensures that we are reading a real transaction and not garbage, however, we don't currently validate that the 
+_entire_ transaction has been saved properly. In order to handle that, we'll need to compute a hash and validate it.
+
+.Is this a toy implementation?
+****
+You might have noticed that I'm doing the minimum necessary to get things working here. Surprisingly enough, you can take this kind of implementation quite
+far, in real world scenarios. However, we will patch in all the holes in the behavior in the next chapter. There are enough moving wheels in building a proper
+storage engine that I would rather introduce something simple that works and then expand on it rather than try to show you the whole thing all at once.
+
+The WAL we are showing here is a trivial implementation. There are quite a few things that I'm leaving unhandled. I wanted to make sure that I show
+a fully functional system that you can easily reason about before we go and do anything more complex.
+
+For example, we aren't handling partial writes to the WAL. We assume that writes to the WAL are okay, which is _not_ a safe assumption to make. We'll
+deal with that in the next chapter.
+****
+
+With just this code, if we run the code in Listing 8.1, we'll see that after the crash, the data from a committed transaction is properly back in the database.
+Can we shout hurray now? Not quite yet, I'm afraid. We need to also consider a few other things:
+
+* When we recover, we'll run the data over the entire WAL. If a page has been modified multiple times, we'll write to it multiple times.
+* There is no mechanism to trim the size of the log, as it currently stands, transactions will grow the log without any bound.
+
+The answer for that is to let the WAL know when we are saving the pages to the database. This is typically called a checkpoint.
+
+=== Checkpoints and WAL trimming
+
+A checkpoint notify the WAL that the data file has the relevant data. That allows the WAL to trim itself from transactions that are known to be in the data
+file already. That is the role of the `wal_checkpoint` function, which is called from `txn_commit`. When called, it will check to see if the transaction
+that was saved to the data file is the last transaction in effect, which will allow us to reset the WAL location. 
+Listing 8.8 shows how this is done.
+
+[source]
+.Listing 8.8 - wal.c - A checkpoint allows us to trim the WAL
+```
+include::./code/wal.c[tags=wal_checkpoint]
+```
+
+The `wal_checkpoint` does a lot with just a few lines of code. We first check if the transaction that was just written to disk is the same as the most
+recent one. If that is the case, it means that the entire WAL file has been properly saved, and we can just reset it. We do _that_ by resetting the 
+`last_write_position` and then overwriting the first page of the WAL with zeroes. 
+
+What does _that_ do? Let's consider the implications:
+
+* If we restart now, the first page will be zeroed and no recovery will be performed. 
+* If we write another transaction, it will be written to the start of the WAL file. We'll then read that transaction and then try to read the next.
+  The next transaction would either have lower id than the previous one (causing us to stop) or we'll read into a previous page, which will also 
+  cause us to stop.
+
+Either way, by overwriting the first page we have trimmed the recovery to only transactions that happened _after_ the checkpoint, exactly what we wanted 
+to happen.
+
+=== Durability concerns
+
+We now have a WAL that help ensure that our commit isn't lost, surely that is all we need, right? Almost. We still need to make sure that the following
+things will happen:
+
+* When we write to the WAL, the wal file is _durable_.
+* When we checkpoint, the _data file_ will be durable. 
+
+Let's try to address these in order. We currently write to the WAL using buffered I/O. If the system suffer a power loss or a crash, our changes will _not_
+be preserved. We need to ensure that the WAL writes will actually hit the disk. That turns out to be a rather hard thing to do. Disk I/O is _slow_ and there
+are multiple caches in the middle that are design to shield us from the reality of having to wait for the hardware. 
+
+One way to ensure that the data will hit the disk after the write is to use `fsync` after each call to `pwritev`. That will ensure that data actually hits
+the disk, right? This is also _atrociously_ slow. The https://www.percona.com/blog/2018/02/08/fsync-performance-storage-devices/[blog post from Percona] 
+have some interesting numbers on the topic. A dozen years or so ago there was a huge furor 
+http://shaver.off.net/diary/2008/05/25/fsyncers-and-curveballs/[around `fsync` after FireFox started to use this excessively].
+
+The story is quite interesting and touch on of the key issues with `fsync`, it is a Big Hammer approach. It tells the file system and the disk to flush
+the writes to the physical medium. However, even though `fsync` is called with a file descriptor, what actually happens is that the _entire_ drive cache
+is flushed. In some cases, that may mean _seconds_ of wait for the operation to complete. That is... not ideal.
+
+There are some way around it. the `fdatasync` is much better, it flushes the _data_ of the file, not the metadata. Remember how careful we were about 
+the file size? That is part of the reason why it is important. It saves us significant amount of time on an ongoing basis. 
+The `fdatasync` call is still expensive, but pretty much _all_ the calls that touch the real hardware are going to be slow. In the Percona post they 
+tested _NVMe_ drives have meaningful latency for `fsync` and `fdatasync`. 
+
+The key issue is that we need to flush the drive buffers. First we write to the file, which does buffered I/O and then we flush it using `fdatasync`. 
+These buffers may have already been flushed down to the drive / disk level, where the association to the actual file is lost. We now need to just issue
+a "flush it all", which is expensive. 
+
+We can do better by bypassing the buffered mode entirely. If we could tell the operating system that we want to send the data directly to disk, that would
+save the need to flush the entire cache. It turns out that there is a way to do so, when we open the file, we can mark is using `O_DIRECT | O_DSYNC`. That 
+would do just that, as far as the operating system is concerned. On Windows, we'll need to use `FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH` in order
+to get the same behavior.
+
+Enabling those flags impose certain alignment requirements on the writes you can make. All you operations must be 4KB aligned. This is because using these
+flags, you are using DMA (Direct Memory Transfer), so the write needs to be page aligned. The `O_DSYNC` or `FILE_FLAG_WRITE_THROUGH` will tell the system
+to send a FUA (Force Unit Access) flag to the disk. This tells the disk that it needs to put the data on persistent medium. That applies to a particular
+write and saves us from flushing caches.
+
+The issue of durable writes is _complex_ and there are a lot of material about it. 
+The https://bobsql.com/sql-server-on-linux-forced-unit-access-fua-internals/[SQL Server On Linux: Forced Unit Access (Fua) Internals] post talks about this
+extensively and can give you some idea about the challenges involved in making sure that data is properly durable. 
+The LWN article about https://lwn.net/Articles/457667/[Ensuring data reaches disk] is also a good read that is worth pursuing.
+
+.The design of the WAL and the hidden benefits
+****
+A _lot_ of thought has gone into the design of the WAL. I know that it doesn't _looks_ like it, right now the whole WAL code is under 200 lines of code, but
+it was setup in such a way that we have major benefits:
+
+* The WAL pre-allocates the file size. Which means that we will have reduce file fragmentation and likely have more sequential disk space allocated to us.
+* Not needing to modify the file size means that we can use data sync, not full sync, reducing the I/O costs substantively.
+* All writes are done on page boundary and are sequential in nature. That is the _best_ way to get speed from the hardware. 
+* There are no reads or any random I/O during normal operations and a simple sequential scan when recovery is running.
+****
+
+Listing 8.9 shows the changes required to get durable writes to the WAL. There isn't much of them, thankfully. We set things up so that would be easy.
+
+[source]
+.Listing 8.9 - platform.fs.h & fs.c - Changes to PAL to allow durable writes
+```
+// from platform.fs.h
+include::./code/platform.fs.h[tags=palfs_create_file]
+
+// from fs.c - inside palfs_create_file
+include::./code/fs.c[tags=file_creation]
+```
+
+.Handling partial writes
+****
+We have durable writes to the WAL file, which ensure that our transaction data will be safe. That still isn't enough. What happens if we crash midway
+through writing a transaction? Since the call didn't complete, we have no guarantees what will actually be on the device. We need to have insurance from
+partial writes. 
+
+This time, there are no flags that we can set, we have to use our initiative and write some code to ensure everything will work. The way to _handle_ that
+is to run a hash on the data and then validate the result during recovery. Good options for hashing are either `xxHash64` or `Blake2B` hash. The major
+difference between the two is that the first is non cryptographic hash while the `Blake2B` is a cryptographic hash. 
+The `xxHash64` produce an 8 bytes (64 bits) value while the `Blake2B` produce a 32 bytes (256 bits) value. 
+
+A cryptographic hash has a number of https://en.wikipedia.org/wiki/Cryptographic_hash_function[required properties], which boil down to what you think
+is your threat vector. If you are concerned about the missing data or disk corruption, you can probably suffice with CRC or something similar, although
+CRC is actually _slower_ than `xxHash`. The `xxHash64` in a fast, in the order of 10GB / sec and gives good indication that the data was modified. 
+The `Blake2B` function is also fast, but only in the company of other cryptographic hashes. It gets to 0.95 GB / sec, significantly slower that `xxHash64`. 
+The advantage is that you can safely assume that no one is going to be able to manufacture collisions for your data. 
+
+Given that CRC was used for this purpose for a long time, and that `Blake2B` is actually _faster_ than CRC, I'm leaning toward just going for `Blake2B`.
+I'll defer that decision for the next chapter.
+****
+
+The remaining issue is how do we make sure that the _data file_ is safe when we checkpoint. Here, there are no clever options available, we need to call 
+`fsync` to ensure that the data is safely on disk. Let's look at Listing 8.10 and then we'll discuss what are the implications of this approach.
+
+[source]
+.Listing 8.10 -fs.c and txn.c - Checkpoint the WAL when needed, after `fsync`-ing the data file
+```
+// from fs.h
+include::./code/fs.c[tags=palfs_fsync_file]
+
+// from txn.c
+include::./code/txn.c[tags=txn_write_state_to_disk]
+```
+
+The `txn_write_state_to_disk` is called when we can write to the modified pages to disk. After we wrote the pages to disk, we check if the WAL can
+checkpoint. That can happen when we wrote _all_ the pending transactions to disk. At this point, we call `palfs_fsync_file`, which calls `fdatasync` 
+internally. With the data safe, we can checkpoint the WAL and be sure that we suffer from no data loss.
+
+[TIP]
+.Trace the system to understand what is going on
+====
+A good tool to use is `strace`, which can tell you what system call are generated by a process. That is very useful when trying to understand what
+your code is _actually_ doing, rather than what you _think_ it is doing. 
+====
+
+=== Unit Tests
+
+This chapter doesn't have its own unit tests. Mostly because it is hard to test a process crash and that we are going to spend the next chapter 
+massively improving the WAL. We'll have to suffice with the unit tests for that.
