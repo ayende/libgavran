@@ -77,6 +77,7 @@ class PalFS:
         gvn.palfs_compute_handle_size(file, pointer(size))
         h = create_string_buffer(size.value)
         gvn.palfs_create_file(file, h)
+        Errors.Raise()
         self.handle = h
 
     def __del__(self):
@@ -91,6 +92,7 @@ class PalFS:
     def close(self):
         if self.handle is None:
             return
+        print("Closing...")
         gvn.palfs_close_file(self.handle)
         Errors.Raise()
         self.handle = None

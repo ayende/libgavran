@@ -12,8 +12,8 @@ do
     cd $DIR_CODE
     echo "Building $DIR_CODE"
 
-    make clean
-    make
+    make -f ../../makefile clean
+    make -f ../../makefile
 
     ./test.sh
 

@@ -183,6 +183,6 @@ result_t txn_allocate_page(txn_t *tx, page_t *page, uint64_t nearby_hint) {
     return success();
   }
   failed(ENOSPC, msg("No more room left in the file to allocate"),
-         with(palfs_get_filename(tx->state->db->data_file_handle), "%s"));
+         with(palfs_get_filename(tx->state->db->handle), "%s"));
 }
 // end::txn_allocate_page[]
