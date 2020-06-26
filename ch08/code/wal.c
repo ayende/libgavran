@@ -174,3 +174,7 @@ result_t wal_checkpoint(db_state_t *db, uint64_t tx_id) {
   return success();
 }
 // end::wal_checkpoint[]
+
+uint64_t TEST_wal_get_last_write_position(db_t *db) {
+  return db->state->wal_state->last_write_pos;
+}

@@ -364,5 +364,15 @@ your code is _actually_ doing, rather than what you _think_ it is doing.
 
 === Unit Tests
 
-This chapter doesn't have its own unit tests. Mostly because it is hard to test a process crash and that we are going to spend the next chapter 
-massively improving the WAL. We'll have to suffice with the unit tests for that.
+This chapter has just a few unit tests, showing what happens when we close the database with an outstanding read transaction. That transaction 
+prevent us from writing to the data file, so we need to run recovery to get the data from the committed transactions.
+We also have a test to check that checkpoint-ing works and we don't do any recovery in that case. 
+
+Testing the storage layer in this manner test to be hard, we'll be doing a lot more with that using ALICE toward the end of the book, to make
+sure that we are _properly_ using the system and not leaving ourselves open to some rare alignment of the stars. 
+
+[source,python]
+.Listing 8.11 - Unit testing recovery of database after startup
+----
+include::../pyapi/tests08.py[]
+----

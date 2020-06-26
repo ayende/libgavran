@@ -212,6 +212,12 @@ class Database:
         gvn.TEST_db_get_map_at(pointer(self.s), c_long(page), pointer(address))
         Errors.Raise()
         return address
+    
+    def test_wal_last_pos(self):
+        pos = gvn.TEST_wal_get_last_write_position(pointer(self.s))
+        Errors.Raise()
+        return pos
+    
 
     def txn(self, flags):
         t = DbOrTx()
@@ -277,6 +283,7 @@ def setup_db(gvn):
         ("txn_free_page", [POINTER(DbOrTx), POINTER(Page)], c_void_p),
         ("txn_allocate_page", [POINTER(DbOrTx), POINTER(Page), c_long], c_void_p),
         ("TEST_db_get_map_at", [POINTER(DbOrTx), c_long, POINTER(mmap_args)], c_void_p),
+        ("TEST_wal_get_last_write_position", [POINTER(DbOrTx)], c_long),
     ]
 
     for method in methods:

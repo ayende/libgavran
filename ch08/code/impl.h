@@ -119,3 +119,5 @@ struct page_metadata {
 _Static_assert(sizeof(page_metadata_t) == 64,
                "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]
+
+uint64_t TEST_wal_get_last_write_position(db_t *db);
