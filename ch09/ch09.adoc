@@ -1,0 +1,6 @@
+== Improving the Write Ahead Log
+
+Hashing the transactions in the log
+
+Diffing the pages
+
