@@ -57,7 +57,7 @@ result_t txn_commit(txn_t *tx) {
 // end::txn_commit[]
 
 // tag::txn_write_state_to_disk[]
-static result_t txn_write_state_to_disk(txn_state_t *state) {
+result_t txn_write_state_to_disk(txn_state_t *state) {
   size_t number_of_buckets = get_number_of_buckets(state);
 
   for (size_t i = 0; i < number_of_buckets; i++) {
@@ -391,6 +391,42 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
 }
 // end::txn_get_page[]
 
+result_t txn_modify_page_raw(txn_t *tx, page_t *page) {
+  errors_assert_empty();
+  // <1>
+  ensure(tx->state->flags & TX_WRITE,
+         msg("Read transactions cannot modify the pages"),
+         with(tx->state->flags, "%d"));
+
+  bool valid_raw_page_size =
+      page->overflow_size && (page->overflow_size % PAGE_SIZE) == 0;
+  ensure(valid_raw_page_size,
+         msg("Overflow size must be a multiple of PAGE_SIZE"),
+         with(page->overflow_size, "%d"));
+
+  if (lookup_entry_in_tx(tx->state, page)) {
+    return success();
+  }
+  page_t original = {.page_num = page->page_num};
+  ensure(pages_get(tx->state->db, &original));
+
+  uint32_t pages = page->overflow_size / PAGE_SIZE;
+
+  ensure(palmem_allocate_pages(&page->address, pages),
+         msg("Unable to allocate memory for a COW page"));
+
+  size_t cancel_defer = 0;
+  try_defer(free, page->address, cancel_defer);
+  memcpy(page->address, original.address, PAGE_SIZE * pages);
+  page->previous = original.address;
+
+  ensure(allocate_entry_in_tx(&tx->state, page),
+         msg("Failed to allocate entry"));
+
+  cancel_defer = 1;
+  return success();
+}
+
 // tag::txn_modify_page[]
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
@@ -433,6 +469,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   size_t cancel_defer = 0;
   try_defer(free, page->address, cancel_defer);
   memcpy(page->address, original.address, PAGE_SIZE * pages);
+  page->previous = original.address;
 
   ensure(allocate_entry_in_tx(&tx->state, page),
          msg("Failed to allocate entry"));

@@ -14,7 +14,6 @@
 #define TX_COMMITED (1 << 24)
 // end::tx_flags[]
 
-// tag::paging_api[]
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
@@ -22,8 +21,10 @@
 
 typedef struct page_metadata page_metadata_t;
 
+// tag::paging_api[]
 typedef struct page {
   void *address;
+  void *previous; // relevant only for modified page
   uint64_t page_num;
   uint32_t overflow_size;
   uint32_t _padding;

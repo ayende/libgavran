@@ -7,7 +7,7 @@ result_t palmem_free_page(page_t *p) in chapter 4!
 * restrict keyword on everything
 * replace multi parameter signatures with structs
 * explain code structure
-
+* Backup
 
 Thread safety:
 

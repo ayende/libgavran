@@ -91,10 +91,9 @@ static result_t initialize_file_structure(db_t *db) {
 
 // tag::handle_newly_opened_database[]
 static result_t handle_newly_opened_database(db_t *db) {
+  ensure(wal_open_and_recover(db));
+
   db_state_t *state = db->state;
-
-  ensure(wal_open_and_recover(state));
-
   // at this point state->header is zeroed
   // if the file header is zeroed, we are probably dealing with a new
   // database

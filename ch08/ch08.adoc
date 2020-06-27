@@ -90,12 +90,12 @@ Let's see how we are using this in the WAL, Listing 8.4 shows the `wal_append` f
 ```
 include::./code/wal.c[tags=wal_append]
 ```
-<1> Compute the required size for the transaction, we also need an array of `wal_tx_page_t` to hold the metadata about the writes.
+<1> We iterate through the modified pages in the transactions and set their metadata in the transaction and their address in the buffers.
+<2> Compute the required size for the transaction, we also need an array of `wal_tx_page_t` to hold the metadata about the writes.
     We use size in pages because we allocate via `palmem_allocate_pages` because memory alignment will become important shortly.
-<2> It is important that the write will align on 4KB boundary, our pages are already 8KB and aligned on 4KB, so we need to make that the transaction buffer aligns.
+<3> It is important that the write will align on 4KB boundary, our pages are already 8KB and aligned on 4KB, so we need to make that the transaction buffer aligns.
     We do that by using `palmem_allocate_pages` to get the memory. 
-<3> In addition to the transaction buffer, we also allocate `palfs_io_buffer`, to do the actual vectored write operation.
-<4> We iterate through the modified pages in the transactions and set their metadata in the transaction and their address in the buffers.
+<4> In addition to the transaction buffer, we also allocate `palfs_io_buffer`, to do the actual vectored write operation.
 <5> Calling `palfs_vectored_write_file` to actually write to disk and persist the data.
 
 There is a _lot_ going on in `wal_append`, but what it _does_ is take all the modified pages in the transaction and write them to the WAL, so we can replay
@@ -303,6 +303,9 @@ it was setup in such a way that we have major benefits:
 * Not needing to modify the file size means that we can use data sync, not full sync, reducing the I/O costs substantively.
 * All writes are done on page boundary and are sequential in nature. That is the _best_ way to get speed from the hardware. 
 * There are no reads or any random I/O during normal operations and a simple sequential scan when recovery is running.
+* We are writing to the data file using buffered I/O as soon as we can, but calling `fsync` only when the last transaction in the WAL has been committed. 
+  That gives the file system _time_. Time to do background writes to disk so when we call `fsync`, we won't have a huge pile of data that needs to be sent
+  all at once. It isn't a _massive_ performance boost, but every little bit helps.
 ****
 
 Listing 8.9 shows the changes required to get durable writes to the WAL. There isn't much of them, thankfully. We set things up so that would be easy.

@@ -104,31 +104,15 @@ result_t wal_close(db_state_t *db) {
 }
 
 // tag::wal_append[]
-result_t wal_append(txn_state_t *tx) {
-  wal_state_t *wal = tx->db->wal_state;
-  // <1>
-  uint32_t required_pages = size_to_pages(
-      sizeof(wal_tx_t) + tx->modified_pages * sizeof(wal_tx_page_t));
-  // <2>
-  void *tmp_buf;
-  ensure(palmem_allocate_pages(&tmp_buf, required_pages));
-  memset(tmp_buf, 0, required_pages * PAGE_SIZE);
-  defer(palmem_free_page, &tmp_buf);
-  wal_tx_t *wt = tmp_buf;
-
-  // <3>
-  struct palfs_io_buffer *io_buffers =
-      calloc(tx->modified_pages + 1, sizeof(struct palfs_io_buffer));
-  ensure(io_buffers, msg("Unable to allocate IO buffers for append"));
-  defer(free, io_buffers);
-
+// <1>
+static size_t wal_setup_transaction_for_file(txn_state_t *tx, wal_tx_t *wt,
+                                             struct palfs_io_buffer *io_buffers,
+                                             uint32_t required_pages) {
   io_buffers[0].address = wt;
   wt->tx_size = io_buffers[0].size = required_pages * PAGE_SIZE;
   wt->number_of_modified_pages = tx->modified_pages;
   wt->tx_id = tx->tx_id;
-  wt->magic = TX_MAGIC_MARKER;
   size_t index = 0;
-  // <4>
   size_t number_of_buckets = get_number_of_buckets(tx);
   for (size_t i = 0; i < number_of_buckets; i++) {
     page_t *entry = &tx->entries[i];
@@ -145,6 +129,30 @@ result_t wal_append(txn_state_t *tx) {
 
     wt->tx_size += io_buffers[index].size;
   }
+
+  return index;
+}
+
+result_t wal_append(txn_state_t *tx) {
+  wal_state_t *wal = tx->db->wal_state;
+  // <2>
+  uint32_t required_pages = size_to_pages(
+      sizeof(wal_tx_t) + tx->modified_pages * sizeof(wal_tx_page_t));
+  // <3>
+  void *tmp_buf;
+  ensure(palmem_allocate_pages(&tmp_buf, required_pages));
+  memset(tmp_buf, 0, required_pages * PAGE_SIZE);
+  defer(palmem_free_page, &tmp_buf);
+  wal_tx_t *wt = tmp_buf;
+
+  // <4>
+  struct palfs_io_buffer *io_buffers =
+      calloc(tx->modified_pages + 1, sizeof(struct palfs_io_buffer));
+  ensure(io_buffers, msg("Unable to allocate IO buffers for append"));
+  defer(free, io_buffers);
+
+  size_t index =
+      wal_setup_transaction_for_file(tx, wt, io_buffers, required_pages);
 
   // <5>
   ensure(palfs_vectored_write_file(wal->handle, wal->last_write_pos, io_buffers,

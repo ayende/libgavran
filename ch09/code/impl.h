@@ -9,7 +9,7 @@
 
 // tag::wal_api[]
 typedef struct wal_state wal_state_t;
-result_t wal_open_and_recover(db_state_t *db);
+result_t wal_open_and_recover(db_t *db);
 result_t wal_append(txn_state_t *tx);
 bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id);
 result_t wal_checkpoint(db_state_t *db, uint64_t tx_id);
@@ -119,3 +119,7 @@ struct page_metadata {
 _Static_assert(sizeof(page_metadata_t) == 64,
                "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]
+
+result_t txn_write_state_to_disk(txn_state_t *state);
+
+result_t txn_modify_page_raw(txn_t *tx, page_t *page);

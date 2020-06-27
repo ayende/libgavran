@@ -17,12 +17,12 @@ DEPS := $(OBJS:.o=.d)
 INC_DIRS := $(she ll find $(SRC_DIRS) -type d)
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
-WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments -Wno-reserved-id-macro
+WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments -Wno-pointer-arith -Wno-reserved-id-macro
 DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
 CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN)
 
-LDFLAGS = -lm -lsodium -shared
+LDFLAGS = -lm -lsodium #-shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)

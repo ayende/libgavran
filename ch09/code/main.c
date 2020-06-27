@@ -18,7 +18,6 @@ static result_t data_loss() {
   // <1>
   txn_t rtx;
   ensure(txn_create(&db, TX_READ, &rtx));
-  defer(txn_close, &rtx);
   page_t rp = {.page_num = 2};
   ensure(txn_get_page(&rtx, &rp));
   printf("Value: %s\n", rp.address);
@@ -34,15 +33,12 @@ static result_t data_loss() {
   ensure(txn_commit(&wtx));
   ensure(txn_close(&wtx));
 
-  // <3>
-  exit(-1);
-
   return success();
 }
 // end::data_loss[]
 
 int main() {
-  // system("rm  /tmp/db/*");
+  system("rm  /tmp/db/*");
 
   if (!data_loss()) {
     errors_print_all();
