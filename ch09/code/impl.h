@@ -51,7 +51,7 @@ struct database_state {
   wal_state_t *wal_state;
 
   txn_state_t *last_write_tx;
-  txn_state_t *active_write_tx;
+  uint64_t active_write_tx;
   txn_state_t *default_read_tx;
   txn_state_t *transactions_to_free;
   uint64_t oldest_active_tx;
@@ -121,6 +121,8 @@ _Static_assert(sizeof(page_metadata_t) == 64,
                "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]
 
-result_t txn_write_state_to_disk(txn_state_t *state);
+result_t txn_write_state_to_disk(txn_state_t *state, bool can_checkpoint);
 
 result_t txn_modify_page_raw(txn_t *tx, page_t *page);
+
+uint64_t TEST_wal_get_last_write_position(db_t *db);

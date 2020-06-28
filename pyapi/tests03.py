@@ -6,14 +6,11 @@ import ctypes
 import os
 import os.path
 
-path = "/tmp/" +  uuid.uuid1().hex
-
 def setup_function(function):
     Errors.clear()
-    if os.path.isfile(path):
-        os.remove(path)
-    if os.path.isdir(path):
-        os.rmdir(path)
+    global path 
+    path = "/tmp/" +  uuid.uuid1().hex
+
 
 def test_can_get_file_name():   
     with PalFS(path) as file:

@@ -188,12 +188,30 @@ empty transaction record. That would solve the WAL reset and maintain the contin
 [source]
 .Listing 9.5- wal.c - Preserving transaction id across WAL reset by writing empty transaction
 ----
-include::./code/wal.c[tags=wal_checkpoint]
+include::./code/wal.c[tags=wal_will_checkpoint]
 ----
 
 We write a single transaction with no actual pages modifications, just so we'll have the proper transaction id persisted regardless of what is going on with the 
 WAL. This is important feature, since we need to make sure that we aren't going back in time with regards to the transaction id. We rely on the sequentiality of
 transaction ids in the WAL processing logic, after all.
+
+=== Optimizing `fsync` calls
+
+I mentioned a few times that `fsync` is expensive, but it bears repeating. Yes, `fsync` is that expensive. Our current system will cause us to call `fsync` 
+whenever there are no active transactions. That means that if we have a set of write transactions that run sequentially, we'll have an `fsync` after every
+transaction. That is going to be _expensive_. 
+
+We can delay that cost very simply. Instead of running a checkpoint whenever there are no active transactions, we'll do so only when there are no active
+transactions _and_ the WAL is over half full.  Listing 9.6 shows how it is done.
+
+[source]
+.Listing 9.6- wal.c - Deciding to checkpoint only when the WAL is over half full, to delay expensive `fsync` calls.
+----
+include::./code/wal.c[tags=wal_will_checkpoint]
+----
+
+The code is minimal, but the implications are profound. We'll now do a checkpoint (and the relevant `fsync`) only when the WAL if over half full, which 
+in most cases means that we can call `fsync` on the changes of _many_ transactions and ameliorate the cost significantly.
 
 === Reducing the cost of writing to the WAL
 
@@ -225,10 +243,10 @@ I have a _lot_ of advantages when writing a diff function like that:
 
 When we call `txn_modify_page`, we do a Copy on Write from the previous instance of the page. If we keep track of that page, we can easily do the diff. 
 I added `previous_address` field to the `page_t` struct and set it to the `original.address` in `txn_modify_page` and the setup was done. Let's see what changes
-are required in our code to make this happen.  Listing 9.6 shows the changes to `wal_append`.
+are required in our code to make this happen.  Listing 9.7 shows the changes to `wal_append`.
 
 [source]
-.Listing 9.6 - wal.c - Using diffs to reduce the amount of data we write to the WAL
+.Listing 9.7 - wal.c - Using diffs to reduce the amount of data we write to the WAL
 ----
 include::./code/wal.c[tags=wal_append]
 ----
@@ -255,25 +273,25 @@ we have to write the same amount of data as the pages that were modified. More c
 even though we allocated a large buffer, we aren't actually paying for that in terms of memory usage.
 ====
 
-You can note in Listing 9.6 that we are no longer using vectored writes. Because we have to build a buffer from the diffs between the page versions
+You can note in Listing 9.7 that we are no longer using vectored writes. Because we have to build a buffer from the diffs between the page versions
 we can allocate the whole thing in one shot and use the standard `write` to send it to disk.
 
-Listing 9.7 shows the code for `wal_setup_transaction_data`, where we go over all the modified pages and write them to the buffer.
+Listing 9.8 shows the code for `wal_setup_transaction_data`, where we go over all the modified pages and write them to the buffer.
 
 [source]
-.Listing 9.7 - wal.c - Preparing the transaction buffer to be written to the WAL
+.Listing 9.8 - wal.c - Preparing the transaction buffer to be written to the WAL
 ----
 include::./code/wal.c[tags=wal_setup_transaction_data]
 ----
 
 The `wal_setup_transaction_data` iterates over the modified pages in the transaction and call `wal_diff_page` on them, figure out whatever the diff
 has successfully reduced the page size and generated a diff or whatever we used the raw page data. The interesting work happens inside the `wal_diff_page` 
-that is shown in LIsting 9.8.
+that is shown in LIsting 9.9.
 
 [source]
-.Listing 9.8 - wal.c - Diffing two versions of a page and produce a list of changes between them
+.Listing 9.9 - wal.c - Diffing two versions of a page and produce a list of changes between them
 ----
-include::./code/wal.c[tags=wal_page_diff_t]
+include::./code/wal.c[tags=wal_page_diff]
 
 include::./code/wal.c[tags=wal_diff_page]
 ----
@@ -297,10 +315,10 @@ I'm using the term page to talk about `wal_diff_page`, but it will operate on mu
 use multiple pages, we'll treat it as a single long page, and not as a series of consecutive pages. 
 ====
 
-We now write diffed records to the WAL, but we need to also handle the other side, recovery. This is shown in Listing 9.9.
+We now write diffed records to the WAL, but we need to also handle the other side, recovery. This is shown in Listing 9.10.
 
 [source]
-.Listing 9.9 - wal.c - Recovering the data from the WAL on startup
+.Listing 9.10 - wal.c - Recovering the data from the WAL on startup
 ----
 include::./code/wal.c[tags=wal_recover]
 ----
@@ -324,7 +342,7 @@ This process has the advantage that we only writing to the data file once _all_ 
 ****
 IOPS means I/O Operations Per Second. And they are something that I constantly think about as a database developer.
 
-Take a look at Listing 9.9 and the call to `txn_write_state_to_disk`, immediately before that we set the `tx_id` to its max value to prevent
+Take a look at Listing 9.10 and the call to `txn_write_state_to_disk`, immediately before that we set the `tx_id` to its max value to prevent
 the call to `txn_write_state_to_disk` from a checkpoint. Why is that needed?
 
 A checkpoint perform the following actions:
@@ -344,10 +362,10 @@ However, with buffered I/O and no `fsync`, we can start the database up much fas
 at the background.
 ****
 
-Note that we aren't calling `txn_modify_page` but to `txn_modify_page_raw`. That function is shown in Listing 9.10.
+Note that we aren't calling `txn_modify_page` but to `txn_modify_page_raw`. That function is shown in Listing 9.11.
 
 [source]
-.Listing 9.10 - txn.c - Getting a raw page from the data file
+.Listing 9.11 - txn.c - Getting a raw page from the data file
 ----
 include::./code/txn.c[tags=txn_modify_page_raw]
 ----
@@ -388,10 +406,10 @@ Zstd is in the same range as Lz4 in terms of compression speed but can offer bet
 meaning we don't need to write any code to manage very large transactions. Because of those reasons, I choose to use Zstd as the compression
 algorithm. 
 
-Listing 9.11 shows the compression routine, which is called just after `wal_setup_transaction_data` by the `wal_append`.
+Listing 9.12 shows the compression routine, which is called just after `wal_setup_transaction_data` by the `wal_append`.
 
 [source]
-.Listing 9.11 - wal.c - Compressing the transaction before it is written to the WAL
+.Listing 9.12 - wal.c - Compressing the transaction before it is written to the WAL
 ----
 include::./code/wal.c[tags=wal_compress_transaction]
 ----
@@ -423,12 +441,37 @@ include::./code/wal.c[tags=wal_get_transaction]
 The format we end up with is a transaction header that is stored uncompressed and followed by the compressed buffer. We decompress the transaction
 data to a separate buffer and copy the transaction header to the beginning, recreating the original transaction data.
 
-The `wal_recover` method defines `tx_buffer` and `tx_buffer_size` that are passed to the `wal_get_transaction` function. These are used to hold the
+The `wal_recover` method uses a `tx_buffer` that is passed passed to the `wal_get_transaction` function. That is used to hold the
 memory required for the transaction buffer. The idea is that we save on allocations by reusing the buffer for the duration of `wal_recover`. The
 `wal_get_transaction` will use `realloc` to increase the size of the buffer as needed. 
 
 === Unit tests
 
-* test corruption of wal - single
-* test corruption of wal - multi
-* test size of wal with big transaction of repeated data
+Testing features such as compression, page diffing or verifying transaction are hard to write. We are not testing the functionality of the system, but 
+the _manner_ in which it acts. As you can see in the tests, that means that I have to rely on testing by inference.
+
+[CAUTION]
+.The bug the tests caught
+====
+If you'll recall, we ensure that we have a single write transaction by using a `db_state_t* active_write_tx` field to track the active transaction.
+During the tests, I started to get errors that a write transaction is already opened. That was strange, because I'm using `defer` in C and `with`
+in Python specifically so I wouldn't have to deal with these kind of issues.
+
+The problem was that we call `realloc` on the `tx_state_t` on some cases, moving the pointer. It usually doesn't matter, the user holds the `txn_t`
+instance that point to it, but if we hold a `txn_state_t*` we have to realize that it may not be stable. That is what happened in this case, the 
+hash table grew and the `txn_state_t` was moved, but the `active_write_tx` value was not updated. 
+
+I changed it to be a `uint64_t active_write_tx` which tracks the transaction _id_, which is stable for the life time of the transaction. But that
+is the kind of bug that would have been messy to figure out later on.
+
+This is another reason why we don't have any multi threading code in Gavran now. Finding issues in single threaded code is _easy_, so I want to 
+keep it that way for as long as possible. It makes my life easier. 
+====
+
+
+[source,python]
+.Listing 9.13 - Unit transaction verification and WAL compression
+----
+include::../pyapi/tests09.py[]
+----
+

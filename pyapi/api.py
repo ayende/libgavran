@@ -1,4 +1,5 @@
 import os
+import uuid
 import errno
 from ctypes import *
 

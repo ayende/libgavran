@@ -67,7 +67,7 @@ static void *wal_diff_page(uint64_t *restrict origin,
                            uint64_t *restrict modified, size_t size,
                            void *output) {
   void *current = output;
-  void *end = current + size;
+  void *end = output + size * sizeof(uint64_t);
   for (size_t i = 0; i < size; i++) {
     if (origin[i] == modified[i]) {
       continue;
@@ -112,7 +112,7 @@ static bool wal_validate_transaction(db_t *db, void *start, void *end) {
   wal_tx_t *tx = start;
   if (start + tx->tx_size > end)
     return false;
-  if (db->state->last_tx_id > tx->tx_id)
+  if (db->state->last_tx_id >= tx->tx_id)
     return false;
   if (tx->tx_size <= crypto_generichash_BYTES)
     return false;
@@ -139,12 +139,17 @@ static result_t wal_recover_validate_after_end_of_transactions(db_t *db,
     if (!wal_validate_transaction(db, cur, end))
       continue;
     wal_tx_t *maybe_tx = cur;
-    if (db->state->last_tx_id < maybe_tx->tx_id) { // probably old tx
-      cur += maybe_tx->tx_size - PAGE_SIZE;        // skip current tx buffer
+    if (db->state->last_tx_id >= maybe_tx->tx_id) { // probably old tx
+      size_t remaining = maybe_tx->tx_size % PAGE_SIZE
+                             ? PAGE_SIZE - (maybe_tx->tx_size % PAGE_SIZE)
+                             : 0;
+
+      cur +=
+          maybe_tx->tx_size + remaining - PAGE_SIZE; // skip current tx buffer
       continue;
     }
 
-    ssize_t corrupted_pos = (char *)wal->map.address - (char *)start;
+    ssize_t corrupted_pos = start - wal->map.address;
     wal_tx_t *corrupted_tx = start;
 
     failed(ENODATA,
@@ -159,17 +164,19 @@ static result_t wal_recover_validate_after_end_of_transactions(db_t *db,
 // end::wal_recover_validate_after[]
 
 // tag::wal_get_transaction[]
-struct buffer {
+struct tx_buffer {
   void *address;
   size_t size;
+  size_t used;
 };
 
-static result_t wal_get_transaction(void *start, struct buffer *buffer,
+static result_t wal_get_transaction(void *start, struct tx_buffer *buffer,
                                     wal_tx_t **txp) {
   // <1>
   wal_tx_t *wt = start;
   if (wt->flags == wal_tx_flags_none) {
     *txp = wt;
+    buffer->used = wt->tx_size;
     return success();
   }
   // <2>
@@ -198,12 +205,13 @@ static result_t wal_get_transaction(void *start, struct buffer *buffer,
   // <4>
   memcpy(buffer->address, start, sizeof(wal_tx_t));
   *txp = buffer->address;
+  buffer->used = res + sizeof(wal_tx_t);
   return success();
 }
 // end::wal_get_transaction[]
 
 // tag::wal_recover[]
-static int free_buffer_pointer(struct buffer *b) {
+static int free_buffer_pointer(struct tx_buffer *b) {
   free(b->address);
   return 1;
 }
@@ -215,11 +223,12 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   void *end = (char *)start + wal->map.size;
   db->state->last_tx_id = 0;
   // <1>
-  struct buffer buffer = {0, 0};
+  struct tx_buffer buffer = {0, 0, 0};
   defer(free_buffer_pointer, &buffer);
   // <2>
   txn_t recovery_tx;
   ensure(txn_create(db, TX_WRITE, &recovery_tx));
+  defer(txn_close, &recovery_tx);
   while (start < end) {
     // <3>
     if (!wal_validate_transaction(db, start, end))
@@ -243,7 +252,7 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
       if (tx->pages[i].flags == wal_tx_page_flags_diff) {
         size_t end_offset = i + 1 < tx->number_of_modified_pages
                                 ? tx->pages[i + 1].offset
-                                : tx->tx_size;
+                                : buffer.used;
         // <7>
         input =
             wal_apply_diff(input, buffer.address + end_offset, &modified_page);
@@ -253,7 +262,10 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
         input += modified_page.overflow_size;
       }
     }
-    start = (char *)start + tx->tx_size;
+    size_t remaining =
+        tx->tx_size % PAGE_SIZE ? PAGE_SIZE - (tx->tx_size % PAGE_SIZE) : 0;
+
+    start = (char *)start + tx->tx_size + remaining;
   }
   wal->last_write_pos = (uint64_t)((char *)start - (char *)wal->map.address);
 
@@ -261,9 +273,9 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   ensure(wal_recover_validate_after_end_of_transactions(db, wal, start, end));
 
   // <9>
-  recovery_tx.state->tx_id = ULONG_MAX; // prevent checkpointing
-  ensure(txn_write_state_to_disk(recovery_tx.state));
-  ensure(txn_close(&recovery_tx)); // discarding the tx
+  ensure(
+      txn_write_state_to_disk(recovery_tx.state, /* can_checkpoint */ false));
+  // recovery_tx is never committed
 
   return success();
 }
@@ -436,9 +448,15 @@ result_t wal_append(txn_state_t *tx) {
 }
 // end::wal_append[]
 
+// tag::wal_will_checkpoint[]
 bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id) {
-  return db->last_tx_id == tx_id;
+  if (!db || !db->wal_state)
+    return false;
+
+  return db->last_tx_id == tx_id &&
+         db->wal_state->last_write_pos > db->options.wal_size / 2;
 }
+// end::wal_will_checkpoint[]
 
 // tag::wal_checkpoint[]
 result_t wal_checkpoint(db_state_t *db, uint64_t tx_id) {
@@ -465,3 +483,7 @@ result_t wal_checkpoint(db_state_t *db, uint64_t tx_id) {
   return success();
 }
 // end::wal_checkpoint[]
+
+uint64_t TEST_wal_get_last_write_position(db_t *db) {
+  return db->state->wal_state->last_write_pos;
+}

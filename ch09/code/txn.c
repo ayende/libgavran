@@ -57,7 +57,7 @@ result_t txn_commit(txn_t *tx) {
 // end::txn_commit[]
 
 // tag::txn_write_state_to_disk[]
-result_t txn_write_state_to_disk(txn_state_t *state) {
+result_t txn_write_state_to_disk(txn_state_t *state, bool can_checkpoint) {
   size_t number_of_buckets = get_number_of_buckets(state);
 
   for (size_t i = 0; i < number_of_buckets; i++) {
@@ -68,7 +68,7 @@ result_t txn_write_state_to_disk(txn_state_t *state) {
     ensure(pages_write(state->db, entry));
   }
 
-  if (wal_will_checkpoint(state->db, state->tx_id)) {
+  if (can_checkpoint && wal_will_checkpoint(state->db, state->tx_id)) {
     ensure(palfs_fsync_file(state->db->handle));
     ensure(wal_checkpoint(state->db, state->tx_id));
   }
@@ -170,7 +170,7 @@ static result_t txn_gc_tx(txn_state_t *state) {
   // <4>
   ensure(txn_merge_unique_pages(latest_unused));
   // <5>
-  ensure(txn_write_state_to_disk(latest_unused));
+  ensure(txn_write_state_to_disk(latest_unused, /* can_checkpoint*/ true));
   // <6>
   txn_try_reset_tx_chain(db, latest_unused);
   // <7>
@@ -187,8 +187,7 @@ result_t txn_close(txn_t *tx) {
   tx->state = 0;
   if (!state)
     return success(); // probably double close?
-
-  if (state == state->db->active_write_tx) {
+  if (state->tx_id == state->db->active_write_tx) {
     state->db->active_write_tx = 0;
   }
 
@@ -214,7 +213,6 @@ result_t txn_close(txn_t *tx) {
 // tag::txn_create[]
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
-
   // <3>
   if (flags == TX_READ) {
     tx->state = db->state->last_write_tx;
@@ -240,7 +238,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   state->prev_tx = db->state->last_write_tx;
   state->tx_id = db->state->last_tx_id + 1;
   tx->state = state;
-  db->state->active_write_tx = state;
+  db->state->active_write_tx = state->tx_id;
   return success();
 }
 // end::txn_create[]

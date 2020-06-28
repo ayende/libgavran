@@ -6,14 +6,11 @@ import ctypes
 import os
 import os.path
 
-path = "/tmp/" +  uuid.uuid1().hex
-
 def setup_function(function):
     Errors.clear()
-    if os.path.isfile(path):
-        os.remove(path)
-    if os.path.isdir(path):
-        os.rmdir(path)
+    global path 
+    path = "/tmp/" +  uuid.uuid1().hex
+
 
 def test_can_not_see_changes_from_tx_after_me():
     with Database(path,  DatabaseOptions(128*1024)) as db:
