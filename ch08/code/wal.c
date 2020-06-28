@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 
 #include "impl.h"
@@ -112,6 +113,7 @@ static size_t wal_setup_transaction_for_file(txn_state_t *tx, wal_tx_t *wt,
   wt->tx_size = io_buffers[0].size = required_pages * PAGE_SIZE;
   wt->number_of_modified_pages = tx->modified_pages;
   wt->tx_id = tx->tx_id;
+  wt->magic = TX_MAGIC_MARKER;
   size_t index = 0;
   size_t number_of_buckets = get_number_of_buckets(tx);
   for (size_t i = 0; i < number_of_buckets; i++) {
