@@ -70,14 +70,12 @@ I've added a `tx_hash` to the `wal_tx_t` instead of the `magic` field. The code 
 the prefix for the hash itself, then continue to run over all the pages modified in the transaction and update the hash with their contents. Finally, we get the 
 result and store it in the transaction header. 
 
-Validation of the transaction integrity is done by `wal_validate_transaction_hash`, called from  in `wal_recover`, shown in Listing 9.2.
+Validation of the transaction integrity is done by `wal_validate_transaction`, called from  in `wal_recover`, shown in Listing 9.2.
 
 [source]
 .Listing 9.2 - wal.c - Validating the transaction integrity
 ----
-include::./code/wal.c[tags=wal_validate_transaction_hash]
-
-include::./code/wal.c[tags=wal_recover_loop]
+include::./code/wal.c[tags=wal_validate_transaction]
 ----
 
 Validating the transaction is easier than computing the initial hash. In the case of the transaction, all the buffers are in one location and consecutive. That 
@@ -171,7 +169,7 @@ already have this data in the data file. That can happen after the WAL has been 
 If the transaction is valid and come _after_ the last known transaction, we found an error and need to fail the recovery. Note that if we found a valid transaction
 we can skip the whole range of the transaction. If we _didn't_ find such a transaction, we'll move to the next page and the cycle repeats to the end of the WAL.
 
-=== Remember the transaction id
+=== Remembering the transaction id
 
 Gavran maintains the last transaction id in the log. When we checkpoint the log, we write a zero page to the beginning of the WAL. That means that we won't 
 remember the last transaction id if we restart the database and and find a WAL file with no valid transactions to process. That is probably not what we want.
@@ -226,10 +224,211 @@ I have a _lot_ of advantages when writing a diff function like that:
 * Most of the data changes will be 8 bytes aligned and I don't byte level granularity.
 
 When we call `txn_modify_page`, we do a Copy on Write from the previous instance of the page. If we keep track of that page, we can easily do the diff. 
-I added `previous_address` field to the `page_t` struct and set it to the `original.address` in `txn_modify_page` and the setup was done. 
+I added `previous_address` field to the `page_t` struct and set it to the `original.address` in `txn_modify_page` and the setup was done. Let's see what changes
+are required in our code to make this happen.  Listing 9.6 shows the changes to `wal_append`.
 
+[source]
+.Listing 9.6 - wal.c - Using diffs to reduce the amount of data we write to the WAL
+----
+include::./code/wal.c[tags=wal_append]
+----
+<1> Compute the size we need for the WAL transaction. Unlike before, we now also need to account for the modified pages.
+<2> Allocate a single buffer for the transaction header and the modified pages, whereas the last implementation used the already existing modified pages as buffer.
+<3> Setup the actual data that will be written to the WAL. We'll look into that in depth shortly.
+<4> The size of the data we write is no longer a multiple of a `PAGE_SIZE`, but the _Writes_ to the WAL must be (because of the use of `O_DIRECT`), so we make sure
+    that the rest of the data in the page is zeroed.
+<5> Computing the hash over a single continuous buffer is much easier and doesn't require a dedicated function.
+<6> Do the actual write to file using our usual `palfs_write_file` routine.
+
+Instead of pulling the data for the write from individual pages, we are copying them to a single buffer. Of course, the idea is to _not_ copy the entire page but
+to write just the difference between the original and modified versions, so we'll hopefully write a lot less than the full page size.
+
+[TIP]
+.Taking advantage of Linux's memory allocation behavior
+====
+Linux uses lazy memory allocation scheme. When you ask for memory from the operating system, what you'll actually get is _memory reservation_, without
+allocating the physical memory required for this. Using `glibc`, we can assume that allocations greater than 128Kb (16 pages) will go directly to the 
+operating system, which will exhibit this behavior.
+
+Our diff algorithm is going to production output that is up to the size of the diffed pages, so the worse case scenario is that we run the diff and
+we have to write the same amount of data as the pages that were modified. More commonly, we'll be able to see substantial reduction in size and so
+even though we allocated a large buffer, we aren't actually paying for that in terms of memory usage.
+====
+
+You can note in Listing 9.6 that we are no longer using vectored writes. Because we have to build a buffer from the diffs between the page versions
+we can allocate the whole thing in one shot and use the standard `write` to send it to disk.
+
+Listing 9.7 shows the code for `wal_setup_transaction_data`, where we go over all the modified pages and write them to the buffer.
+
+[source]
+.Listing 9.7 - wal.c - Preparing the transaction buffer to be written to the WAL
+----
+include::./code/wal.c[tags=wal_setup_transaction_data]
+----
+
+The `wal_setup_transaction_data` iterates over the modified pages in the transaction and call `wal_diff_page` on them, figure out whatever the diff
+has successfully reduced the page size and generated a diff or whatever we used the raw page data. The interesting work happens inside the `wal_diff_page` 
+that is shown in LIsting 9.8.
+
+[source]
+.Listing 9.8 - wal.c - Diffing two versions of a page and produce a list of changes between them
+----
+include::./code/wal.c[tags=wal_page_diff_t]
+
+include::./code/wal.c[tags=wal_diff_page]
+----
+
+The code in `wal_diff_page` operates in over 8 bytes at a time (`uint64_t`) and try to find the first index where the two versions of the page are 
+different. Once a difference is found, it tries to find how big that range of different values are. We then write a `wal_page_diff_t` header that
+tells us where to place the diff and what is the length of the range that we need to copy. The actual values we copy for each range are stored 
+immediately following the `wal_page_diff_t` value. 
+
+There is a small optimization for zero filled ranges. Those are common enough (for example, zeroing a page) that I deemed it advisable to handle it
+directly. In the case of zero range, we'll store a negative length in `wal_page_diff_t`, without storing a range of zeros afterward. You'll note that
+each different range costs us the size of `wal_page_diff_t`, which is 8 bytes in size. We could probably reduce it further, but there is little need.
+
+If we see that there are a lot of differences in the file, the diffed output will exceed the size of the page and we'll just write the page as is to
+the WAL. That means that we can predict what is the maximum amount of memory that we need to utilize in advance. 
+
+[TIP[
+.I'm saying page, but I mean page_s_
+====
+I'm using the term page to talk about `wal_diff_page`, but it will operate on multiple pages just as well. If we have a value that is big enough to
+use multiple pages, we'll treat it as a single long page, and not as a series of consecutive pages. 
+====
+
+We now write diffed records to the WAL, but we need to also handle the other side, recovery. This is shown in Listing 9.9.
+
+[source]
+.Listing 9.9 - wal.c - Recovering the data from the WAL on startup
+----
+include::./code/wal.c[tags=wal_recover]
+----
+<1> Define a scratch buffer for the transactions, will be used later.
+<2> Crete a transaction for the recovery process, which will hold the modified pages as we apply the diffs to them.
+<3> Verify the transaction.
+<4> The `wal_get_transaction` is used to get the transaction, will be used later.
+<5> Compute the start of the diff stream and and iterate over the modified pages.
+<6> Get the _raw_ page from the data file, bypassing the metadata system.
+<7> Apply the diff to the page.
+<8> Or copy the whole page from the WAL if it wasn't diffed.
+<9> Write the modified pages from the recovery transaction to the data file, then close the transaction without committing.
+
+Quite a lot is going on in `wal_recover`. The first new change is that we are now using a transaction in the recovery process. A single page may appear
+multiple times in the recovery, and we need to apply the changes to the page in order. Instead of writing to the data file on each change, we use a
+transaction as a container of modified pages for the recovery process. Once the recovery process is complete, we'll not commit this transaction but 
+write them out to disk directly using `txn_write_state_to_disk`. 
+This process has the advantage that we only writing to the data file once _all_ the transactional data has been properly processed and validated. 
+
+.Preventing a checkpoint on database startup to reduce IOPS
+****
+IOPS means I/O Operations Per Second. And they are something that I constantly think about as a database developer.
+
+Take a look at Listing 9.9 and the call to `txn_write_state_to_disk`, immediately before that we set the `tx_id` to its max value to prevent
+the call to `txn_write_state_to_disk` from a checkpoint. Why is that needed?
+
+A checkpoint perform the following actions:
+
+* Call `fsync` to flush all the data to disk
+* Reset the WAL
+
+Both of them are things that are _desirable_, but at the database startup, we cannot afford them. Consider Gavran running on a HDD volume. Or
+using a cloud drive with low amount of IOPS. The recovery process uses buffered I/O _intentionally_. If we have a large WAL to go through we
+may be modifying a _lot_ of pages in the data file. Which will result in a _lot_ of IOPS.
+
+I have seen this exact scenario running on a 7,200 RPM hard disk where you can expect to get under 100 IOPS for random writes. And in the cloud
+the situation isn't much better. Assume that we have a 16MB WAL file and that have changes to 3,000 pages in it (you'll likely get _many_ more).
+That means that it will take 30 seconds with 100 IOPS to call `fsync`. 
+
+However, with buffered I/O and no `fsync`, we can start the database up much faster. We'll still need to do a checkpoint, but we can do that
+at the background.
+****
+
+Note that we aren't calling `txn_modify_page` but to `txn_modify_page_raw`. That function is shown in Listing 9.10.
+
+[source]
+.Listing 9.10 - txn.c - Getting a raw page from the data file
+----
+include::./code/txn.c[tags=txn_modify_page_raw]
+----
+
+The major difference between `txn_modify_page_raw` and `txn_modify_page` is the way they deal with metadata. The `txn_modify_page` uses the metadata 
+from the metadata pages to compute the size of the page while `txn_modify_page_raw` rely on the values passed to it and get the data directly from the
+file. Because we can't be sure in what order the pages will be processed, we must rely on the data in the WAL itself.
+
+Using diffs instead of writing the full page to the WAL will reduce the size that we need, but there are other tricks that we can play to reduce the 
+size of the WAL writes even further. 
 
 === Compressing the transactions
 
+I'm spending a lot of time in this chapter on reducing the amount of data that we write to the WAL, why is that? I/O is _expensive_, as in _really_
+expensive. Reading a 4KB value from a _good_ SSD will take about 150 μs (microseconds), in comparison compressing the same 4KB will take 8 μs. 
+The source is https://gist.github.com/jboner/2841832[Latency Numbers that Every Programmer Should Know]. For durable writes, the situation is _much_
+worse. 
 
-=== Extending the size of the WAL
+Interestingly enough, the size of the write doesn't matter all that much, what matter is the _scale_. Writing 8KB or 16KB makes very little difference 
+when we are talking about durable writes. My assumption is that we are looking at sequential write speeds and we need to switch to different block or 
+segment in the disk that will likely cause the performance to matter. Writing 256KB instead of 1MB, on the other hand, is absolutely noticeable in 
+terms of performance. 
+
+Using diffs can reduce the amount of data we write significantly, but we can do better by adding compression to the mix. Our diff format is actually 
+design to be compressed, that is why I didn't try to squeeze it too much in terms of bytes taken. The nice thing about compression is that it will 
+remove duplication. If we have writes that are big enough to benefit significantly from compression, it is _very_ likely that we'll have duplication
+and get good compression ratio.
+
+The typical algorithms used for data compression are Lz4, Snappy and Zstd. Snappy is optimized for speed over compression ratio, but LZ4 and Zstd 
+are both better in compression ratio _and_ speed these days. It's main advantage is decompression speed, but that isn't a major consideration for
+me. I assume that we'll rarely, if ever, need to actually recover from the WAL during normal operations.
+
+Lz4 is typically better in terms of compression and decompression speed and typically and has better compression ratios. It has a size 
+limitation of about 1.9GB, however. That is a problem because I want to support transactions of any size. In Voron, we use LZ4 and added support 
+for compressing very large transactions 1.9GB at a time. 
+
+Zstd is in the same range as Lz4 in terms of compression speed but can offer better compression ratio. It can also compress values of any size,
+meaning we don't need to write any code to manage very large transactions. Because of those reasons, I choose to use Zstd as the compression
+algorithm. 
+
+Listing 9.11 shows the compression routine, which is called just after `wal_setup_transaction_data` by the `wal_append`.
+
+[source]
+.Listing 9.11 - wal.c - Compressing the transaction before it is written to the WAL
+----
+include::./code/wal.c[tags=wal_compress_transaction]
+----
+<1> We compute the size required by Zstd to compress the transaction data. All compression scheme have inputs that would cause them to _inflate_
+    the size of the data, so we have to account for that.
+<2> In `wal_append` we allocated a buffer that was equal in size to the number of modified pages. We already run a diff on the data, so we might
+    be able to fit the compressed size in the remaining buffer. If so, we'll be able to skip any allocations in this method.
+<3> If we allocated a buffer, `defer` will free it, otherwise, a `free(0)` is a no-op. 
+<4> We run the compression itself and check that it completed with no errors and that the compressed size is smaller than the input. 
+<5> We mark the transaction as compressed and move the memory from the compression buffer to the buffer we're about to write to the WAL. We have
+    to use `memmove` here because if we were able to skip allocating the buffer earlier, the buffers may overlap.
+
+The `wal_compress_transaction` marks the transaction as compressed if it was able to reduce the size of the input. That will be relevant when we
+need to recover from the transaction. This is done in the `wal_get_transaction` which is called from `wal_recover`, you can see the details in
+Listing 9.12.
+
+[source]
+.Listing 9.12 - wal.c - Decompressing the transaction buffer during recovery
+----
+include::./code/wal.c[tags=wal_get_transaction]
+----
+<1> If the transaction isn't compressed, we can just return the buffer we got.
+<2> With Zstd, you can ask what is the decompressed size of a compressed buffer. We use that to compute how much space we need and then allocate
+    a larger value if needed.
+<3> Actual decompression happens here, as well as error checking if we couldn't decompress the data.
+<4> We are using a separate buffer from the compressed data, therefor we copy the header of the transaction to the new buffer and return a pointer
+    to that, with the decompressed data immediately following it.
+
+The format we end up with is a transaction header that is stored uncompressed and followed by the compressed buffer. We decompress the transaction
+data to a separate buffer and copy the transaction header to the beginning, recreating the original transaction data.
+
+The `wal_recover` method defines `tx_buffer` and `tx_buffer_size` that are passed to the `wal_get_transaction` function. These are used to hold the
+memory required for the transaction buffer. The idea is that we save on allocations by reusing the buffer for the duration of `wal_recover`. The
+`wal_get_transaction` will use `realloc` to increase the size of the buffer as needed. 
+
+=== Unit tests
+
+* test corruption of wal - single
+* test corruption of wal - multi
+* test size of wal with big transaction of repeated data

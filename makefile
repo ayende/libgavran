@@ -22,7 +22,7 @@ DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
 CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN)
 
-LDFLAGS = -lm -lsodium #-shared
+LDFLAGS = -lm -lsodium -lzstd -shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)

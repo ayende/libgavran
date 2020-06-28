@@ -391,6 +391,7 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
 }
 // end::txn_get_page[]
 
+// tag::txn_modify_page_raw[]
 result_t txn_modify_page_raw(txn_t *tx, page_t *page) {
   errors_assert_empty();
   // <1>
@@ -426,6 +427,7 @@ result_t txn_modify_page_raw(txn_t *tx, page_t *page) {
   cancel_defer = 1;
   return success();
 }
+// end::txn_modify_page_raw[]
 
 // tag::txn_modify_page[]
 result_t txn_modify_page(txn_t *tx, page_t *page) {
@@ -452,16 +454,15 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
 
   // <4>
   if (!page->address) {
-    if (!page->overflow_size)
-      page->overflow_size = PAGE_SIZE;
-
     ensure(pages_get(tx->state->db, &original));
     ensure(set_page_overflow_size(tx, &original));
+    if (!original.overflow_size)
+      original.overflow_size = PAGE_SIZE;
   }
 
   // <5>
-  uint32_t pages = page->overflow_size / PAGE_SIZE +
-                   (page->overflow_size % PAGE_SIZE ? 1 : 0);
+  uint32_t pages = original.overflow_size / PAGE_SIZE +
+                   (original.overflow_size % PAGE_SIZE ? 1 : 0);
 
   ensure(palmem_allocate_pages(&page->address, pages),
          msg("Unable to allocate memory for a COW page"));
@@ -470,6 +471,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   try_defer(free, page->address, cancel_defer);
   memcpy(page->address, original.address, PAGE_SIZE * pages);
   page->previous = original.address;
+  page->overflow_size = original.overflow_size;
 
   ensure(allocate_entry_in_tx(&tx->state, page),
          msg("Failed to allocate entry"));

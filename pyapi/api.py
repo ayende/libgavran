@@ -92,7 +92,6 @@ class PalFS:
     def close(self):
         if self.handle is None:
             return
-        print("Closing...")
         gvn.palfs_close_file(self.handle)
         Errors.Raise()
         self.handle = None

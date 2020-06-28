@@ -49,12 +49,4 @@ void defer_palfs_close_file(struct cancel_defer *cd);
 
 void defer_palfs_unmap(struct cancel_defer *cd);
 
-struct palfs_io_buffer {
-  void *address;
-  size_t size;
-};
-
-result_t palfs_vectored_write_file(file_handle_t *file, uint64_t offset,
-                                   struct palfs_io_buffer *buffers, size_t len);
-
 result_t TEST_db_get_map_at(db_t *db, uint64_t page_num, void **address);
