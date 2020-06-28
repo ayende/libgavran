@@ -14,6 +14,7 @@ result_t wal_append(txn_state_t *tx);
 bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id);
 result_t wal_checkpoint(db_state_t *db, uint64_t tx_id);
 result_t wal_close(db_state_t *db);
+enable_defer(wal_close);
 // end::wal_api[]
 
 // tag::transaction_state[]

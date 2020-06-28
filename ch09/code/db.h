@@ -24,10 +24,10 @@ typedef struct page_metadata page_metadata_t;
 // tag::paging_api[]
 typedef struct page {
   void *address;
-  void *previous; // relevant only for modified page
   uint64_t page_num;
   uint32_t overflow_size;
   uint32_t _padding;
+  void *previous; // relevant only for modified page
 } page_t;
 // end::paging_api[]
 

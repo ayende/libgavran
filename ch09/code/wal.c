@@ -187,9 +187,9 @@ static result_t wal_get_transaction(void *start, struct buffer *buffer,
   }
 
   // <3>
-  size_t res =
-      ZSTD_decompress(buffer->address + sizeof(wal_tx_t), required_size,
-                      start + sizeof(wal_tx_t), wt->tx_size - sizeof(wal_tx_t));
+  size_t res = ZSTD_decompress(
+      buffer->address + sizeof(wal_tx_t), required_size - sizeof(wal_tx_t),
+      start + sizeof(wal_tx_t), wt->tx_size - sizeof(wal_tx_t));
   if (ZSTD_isError(res)) {
     const char *zstd_error = ZSTD_getErrorName(res);
     failed(ENODATA, msg("Failed to decompress transaction"),
@@ -203,14 +203,20 @@ static result_t wal_get_transaction(void *start, struct buffer *buffer,
 // end::wal_get_transaction[]
 
 // tag::wal_recover[]
+static int free_buffer_pointer(struct buffer *b) {
+  free(b->address);
+  return 1;
+}
+
+enable_defer(free_buffer_pointer);
+
 static result_t wal_recover(db_t *db, wal_state_t *wal) {
   void *start = wal->map.address;
   void *end = (char *)start + wal->map.size;
   db->state->last_tx_id = 0;
-
   // <1>
   struct buffer buffer = {0, 0};
-  defer(free_p, &buffer.address);
+  defer(free_buffer_pointer, &buffer);
   // <2>
   txn_t recovery_tx;
   ensure(txn_create(db, TX_WRITE, &recovery_tx));
@@ -293,14 +299,16 @@ result_t wal_open_and_recover(db_t *db) {
 
   ensure(wal_recover(db, wal));
 
-  cancel_defer = 1;
   db->state->wal_state = wal;
+  cancel_defer = 1;
 
   return success();
 }
 // end::wal_open_and_recover[]
 
 result_t wal_close(db_state_t *db) {
+  if (!db->wal_state)
+    return success();
   // need to proceed even if there are failures
   bool failure = !palfs_unmap(&db->wal_state->map);
   failure |= !palfs_close_file(db->wal_state->handle);

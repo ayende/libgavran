@@ -76,7 +76,7 @@ class PalFS:
         size = c_size_t()
         gvn.palfs_compute_handle_size(file, pointer(size))
         h = create_string_buffer(size.value)
-        gvn.palfs_create_file(file, h)
+        gvn.palfs_create_file(file, h, 0)
         Errors.Raise()
         self.handle = h
 
@@ -147,7 +147,7 @@ class DbOrTx(Structure):
     _fields_ = [("state", c_void_p)]
 
 class Page(Structure):
-    _fields_ =[("address", c_void_p), ("page_num", c_long), ("overflow_size", c_size_t)]
+    _fields_ =[("address", c_void_p), ("page_num", c_long), ("overflow_size", c_int), ("_padding", c_int), ("previous",c_void_p)]
 
 class Transaction:
     def __init__(self, s):
@@ -192,6 +192,9 @@ class Transaction:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
         
+    def abandon(self):
+        self.s = None
+
     def close(self):
         if self.s is None:
             return
@@ -201,6 +204,7 @@ class Transaction:
 
 class Database:
     def __init__(self, path, options):
+        self.s = None
         s = DbOrTx()
         gvn.db_create(path.encode('utf-8'), pointer(options), pointer(s))
         Errors.Raise()
@@ -250,7 +254,7 @@ class Database:
 def setup_palfs(gvn):
     methods = [
         ("palfs_compute_handle_size", [c_char_p, POINTER(c_size_t)], c_void_p),
-        ("palfs_create_file", [c_char_p, c_void_p], c_void_p),
+        ("palfs_create_file", [c_char_p, c_void_p], c_void_p, c_int),
         ("palfs_get_filename", [c_void_p], c_char_p),
         ("palfs_set_file_minsize", [c_void_p, c_long], c_void_p),
         ("palfs_close_file", [c_void_p], c_void_p),

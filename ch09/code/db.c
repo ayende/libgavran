@@ -92,7 +92,9 @@ static result_t initialize_file_structure(db_t *db) {
 // tag::handle_newly_opened_database[]
 static result_t handle_newly_opened_database(db_t *db) {
   ensure(wal_open_and_recover(db));
-
+  
+  size_t cancel_defer = 0;
+  try_defer(wal_close, db->state, cancel_defer);
   db_state_t *state = db->state;
   // at this point state->header is zeroed
   // if the file header is zeroed, we are probably dealing with a new
@@ -157,6 +159,8 @@ static result_t handle_newly_opened_database(db_t *db) {
 
     memcpy(&db->state->header, file_header, sizeof(file_header_t));
   }
+
+  cancel_defer = 1;
 
   return success();
 }

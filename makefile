@@ -5,7 +5,7 @@ CC = clang
 #  -g    adds debugging information to the executable file
 #  -Wall turns on most, but not all, compiler warnings
   
-TARGET_EXEC ?= gavran.so
+TARGET_EXEC ?= gavran
 
 BUILD_DIR ?= ./build
 SRC_DIRS ?= ./
@@ -22,10 +22,11 @@ DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
 CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN)
 
-LDFLAGS = -lm -lsodium -lzstd -shared
+LDFLAGS = -lm -lsodium -lzstd #-shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+	$(CC) $(OBJS) -o $@.so $(LDFLAGS) -shared
+	$(CC) $(OBJS) -o $@ $(LDFLAGS) 
 
 # c source 
 $(BUILD_DIR)/%.c.o: %.c
