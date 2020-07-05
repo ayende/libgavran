@@ -1,0 +1,3 @@
+* Multiple WAL files
+* Hash on the file header
+* Check the size of the WAL file

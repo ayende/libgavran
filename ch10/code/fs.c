@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -7,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -43,6 +45,130 @@ const char *palfs_get_filename(file_handle_t *handle) {
   return handle->filename;
 }
 // end::handle_impl[]
+
+static result_t closedir_null_safe(void *p) {
+  if (!p)
+    return success();
+  ensure(closedir(p) != -1, msg("Failed to close director"));
+  return success();
+}
+enable_defer(closedir_null_safe);
+
+static bool try_parse_number(const char *src, char **end, int64_t *value) {
+  errno = 0;
+  *value = strtol(src, end, 10);
+  if (*value) // if the value is not zero, we're good
+    return true;
+  if (src == *end)
+    return false; // no digits
+  if (errno)
+    return false;
+  return true; // really read 0
+}
+
+static int compare_wal_file_number(const void *a, const void *b) {
+  const struct numbered_file *x = a;
+  const struct numbered_file *y = b;
+  if (x->number == y->number)
+    return 0;
+  return (x->number > y->number) ? 1 : -1;
+}
+
+result_t palfs_release_wal_files(struct files_list *list) {
+  if (!list)
+    return success();
+  for (size_t i = 0; i < list->size; i++) {
+    free(list->files[i]);
+  }
+  free(list);
+  return success();
+}
+result_t palfs_get_wal_files(file_handle_t *datbase_file,
+                             struct files_list **list) {
+  DIR *dir = 0;
+  char *mutable_file = 0;
+  defer(free, mutable_file);
+  defer(closedir_null_safe, dir);
+
+  size_t file_name_len = strlen(datbase_file->filename);
+  mutable_file = malloc(MAX(2, file_name_len + 1));
+  if (!mutable_file) {
+    goto no_mem;
+  }
+  memcpy(mutable_file, datbase_file->filename, file_name_len + 1);
+  char *last = strrchr(mutable_file, '/');
+  size_t directory_size_to_copy;
+  if (!last) {
+    dir = opendir(".");
+    directory_size_to_copy = 0;
+  } else {
+    *last = 0;
+    dir = opendir(mutable_file);
+    // leave just the file name here
+    directory_size_to_copy = (size_t)(last - mutable_file);
+    file_name_len = file_name_len - directory_size_to_copy - 1;
+    memmove(mutable_file, last + 1, file_name_len);
+    mutable_file[file_name_len] = 0;
+  }
+  if (!dir) {
+    failed(errno, msg("Unable to open directory"),
+           with(datbase_file->filename, "%s"));
+  }
+
+  *list = calloc(sizeof(struct files_list), 1);
+  if (!list) {
+    goto no_mem;
+  }
+  while (true) {
+    struct dirent *file = readdir(dir);
+    if (!file)
+      break;
+    size_t cur_file_len = strlen(file->d_name);
+    if (cur_file_len < file_name_len + 8) // using prefix "-000.wal"
+      continue;
+    if (strncmp(file->d_name, mutable_file, file_name_len))
+      continue; // not a match
+    char *num_end;
+    int64_t wal_num;
+    if (!try_parse_number(file->d_name + file_name_len, &num_end, &wal_num) ||
+        !*num_end || wal_num >= 0) // we check for <0 for the - separator
+      continue;
+    if (strncmp(num_end, ".wal", 4))
+      continue;
+    // we found a file whose name is [dbname]-[num].wal
+    struct numbered_file *wf =
+        malloc(sizeof(struct files_list) + directory_size_to_copy + 1 +
+               cur_file_len + 1);
+    if (!wf)
+      goto no_mem;
+    wf->number = (uint64_t)(wal_num * -1);
+    memcpy(wf->name, datbase_file->filename, directory_size_to_copy + 1);
+    strcpy(wf->name + directory_size_to_copy + 1, file->d_name);
+    struct files_list *n = realloc(*list, sizeof(struct files_list) +
+                                              sizeof(struct numbered_file *) *
+                                                  ((*list)->size + 1));
+    if (!n) {
+      free(wf);
+      goto no_mem;
+    }
+    *list = n;
+    (*list)->files[(*list)->size++] = wf;
+  }
+  // return in sorted order, we can't assume sorting from the file system.
+  qsort((*list)->files, (*list)->size, sizeof(struct wal_file *),
+        compare_wal_file_number);
+  return success();
+
+no_mem:
+  if (*list) {
+    for (size_t i = 0; i < (*list)->size; i++) {
+      free((*list)->files[i]);
+    }
+  }
+  free(*list);
+  *list = 0;
+  failed(ENOMEM, msg("Unable to allocate memory for wal_files"));
+}
 
 // tag::fsync_parent_directory[]
 static result_t fsync_parent_directory(char *file) {
@@ -163,7 +289,6 @@ result_t palfs_get_filesize(file_handle_t *handle, uint64_t *size) {
   failed(errno, msg("Unable to stat"), palfs_get_filename(handle));
 }
 
-// tag::palfs_enable_writes[]
 result_t palfs_enable_writes(void *address, size_t size) {
   if (mprotect(address, size, PROT_READ | PROT_WRITE) == -1) {
     failed(errno, msg("Unable to modify the memory protection flags"));
@@ -177,7 +302,6 @@ result_t palfs_disable_writes(void *address, size_t size) {
   }
   return success();
 }
-// end::palfs_enable_writes[]
 
 // tag::palfs_mmap[]
 
@@ -187,6 +311,7 @@ result_t palfs_mmap(file_handle_t *handle, uint64_t offset,
   m->address =
       mmap(0, m->size, PROT_READ, MAP_SHARED, handle->fd, (off_t)offset);
   if (m->address == MAP_FAILED) {
+    m->address = 0;
     failed(errno, msg("Unable to map file"),
            with(palfs_get_filename(handle), "%s"), with(m->size, "%lu"));
   }
@@ -194,6 +319,8 @@ result_t palfs_mmap(file_handle_t *handle, uint64_t offset,
 }
 
 result_t palfs_unmap(struct mmap_args *m) {
+  if (!m->address)
+    return success();
   if (munmap(m->address, m->size) == -1) {
     failed(EINVAL, msg("Unable to unmap"), with(m->address, "%p"));
   }
@@ -204,6 +331,8 @@ result_t palfs_unmap(struct mmap_args *m) {
 
 // tag::palfs_close_file[]
 result_t palfs_close_file(file_handle_t *handle) {
+  if (!handle)
+    return success();
   if (close(handle->fd) == -1) {
     failed(errno, msg("Failed to close file"),
            with(palfs_get_filename(handle), "%s"), with(handle->fd, "%i"));

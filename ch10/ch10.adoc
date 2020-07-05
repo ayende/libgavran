@@ -1,0 +1,411 @@
+== Dynamic file growth
+
+We are in Chapter 10 and we still have a fairly big limit in Gavran. We have to define, upfront, the size of the data file. Once we hit the limit of the file size, we
+will start getting `ENOSPC` errors when we try to allocate new pages. We are currently using a default of 128KB file, which means that we have merely 16 pages to work 
+with. That is... not ideal. Let's see how we can fix that.
+
+.Considerations for file size growth
+****
+It turns out that there is a _lot_ of things to consider when thinking about how Gavran should increase its file size. These range from technical considerations 
+to social ones. 
+
+For example, one easy option is to specify what would be the maximum size of the file. We can specify a high value, such as 10 GB or a 100 GB and be done with it.
+That is how LMDB works, for example. That has a limit in the sense that you must restart the DB when the maximum size is hit. Another issue is how you allocate
+disk space. 
+
+LMDB uses a neat trick. On Linux it use mmap with a file size that is much larger than the file, then when it need more pages, it will `write` to the end of 
+the file, extending it. That will allow the new file to be accessed via the original map. That has the disadvantage of asking the file system for disk space
+one page at a time, which is no efficient. Allocating the whole file at once, on the other hand, cause users to complain.
+****
+
+=== Increasing the size of the data file
+
+Gavran is going to have the following behavior regarding extending the file:
+
+* We will allow to increase the file on the fly.
+* We will pre-allocate disk space in advance.
+
+These two requirements are contradictory to one another, but we can make them work. Instead of allocating the file one page at a time, we are going to use
+the following formula to increase file size:
+
+* Increase by 10% of the existing file size, rounded to the next power of two.
+* A minimum of 1 MB and a maximum of 1GB.
+
+The logic behind this is that we want to maintain reasonable file size as we grow, while balancing how much we need to grow the file. Growing the file is 
+an expensive operation. We need to increase the file size itself, which means that the file system needs to allocate it size on disk. We are intentionally
+asking for large increases, so the file system can allocate us continuous ranges as much as possible.
+Then there is the work that Gavran needs to do, remapping of the memory and setting up the new free space accounting. 
+
+On the one hand, we want to reduce the number of times that we grow the file, but we also have to take into account the fact that users expect the file 
+to be as small as possible. Listing 10.1 shows the logic behind increasing the file size.
+
+[source]
+.Listing 10.1 - db.c - Computing the next size fo the file when it is needed
+----
+include::./code/db.c[tags=db_find_next_db_size]
+----
+
+We'll increase the file by 10% each time, rounded to power of two, except when we are near a power of two of the file. Then we'll prefer that. This is mostly
+for my peace of mind, because I like seeing round numbers in the file size. It doesn't have any meaningful difference from a technical perspective.
+
+We'll currently fail with `ENOSPC` in the `txn_allocate_page`, which we can't find enough free pages. Let's see what we need to do in order to increase the
+file size. I modified the end of `txn_allocate_page` to attempt to increase the size of the file, as shown in Listing 10.2.
+
+[source]
+.Listing 10.2 - txh.alloc.c - Increasing the size of the file if we have no more room available
+-----
+if (db_try_increase_file_size(tx, pages) && !errors_get_count()) {
+    return txn_allocate_page(tx, page, nearby_hint);
+}
+
+failed(ENOSPC, msg("No more room left in the file to allocate"),
+        with(palfs_get_filename(tx->state->db->handle), "%s"));
+-----
+
+In other words, we'll try to increase the size by calling `db_try_increase_file_size`, if we are successful, we'll recurse into `txn_allocate_page` again 
+to perform the actual allocation. If we can't, we'll return `ENOSPC` as we previously did. 
+
+The fact that we need to handle file size growth lead to a bunch of complication for the code. We currently have a single `struct mmap_args` instance that 
+is kept on the `db_state_t` level. All the transactions are making use of it. But now we need to mess around in it, and that lead to problems. 
+We haven't explicitly stated it, but there is a great importance in managing the state of the system in particular place and order. While the `mmap_args`
+was the same for the duration of the `db_state_t` lifetime, that caused no issues. But now we need to modify it, and that brings a whole set of trouble.
+
+.The responsibilities of components in Gavran
+****
+The `db_state_t` holds the global state of the system, generally things that either never change (like the file we use) for the duration of the database
+instance or modified and used only by the current write transaction.
+
+The `txn_state_t` holds the state for a particular transaction. If it is a read transaction, it is a frozen state, which cannot be altered. We intend to 
+allow the use of a single state from multiple concurrent threads, so that is a hard requirement. 
+For the write transaction, we allow to modify the state, but we take into account that the transaction may be rolled back. So any change that we do in the
+write transaction cannot be made public to the rest of the system until the transaction commits.
+
+That means that we have a cycle. There is some state that is modified by the write transaction, and on commit becomes the state of the whole system. It is
+also the (frozen) state of the read transaction that is created from the committed write transaction.
+****
+
+Before we get into exactly why the `mmap_args` being modified is problematic, let's take one step back. _Why_ do we need to modify it in the first place?
+Take a look at Figure 19, where we see a file that was expanded.
+
+.A file whose size was expanded, with the old and new memory mapping
+image::{img-src}/fig19.png[]
+
+In Figure 19, we have two memory mapping for the same file. The first one (on the top) maps the first 1MB of the file. Then we expanded the file and need
+to have access to the newly allocated space, how do we get it? We remap the whole file _again_. That is the second map (on the bottom). The first 1 MB of
+the file is _shared_ between those two mappings. There are two virtual address ranges that will point to the same physical memory. 
+
+[TIP]
+.Can't we map the new data at the end of the old range?
+====
+Linux and Windows both have APIs that allow you to ask to map a file at a particular address. We can use that to map the new portions of the file at the 
+end of the old mapping, effectively extending it. In fact, Linux has a dedicated system call for this `mremap`. The problem is that this may fail, and we
+need to write the code to handle the scenario when there isn't enough virtual memory available at the current location to expand the file. I
+
+Since we need to write this code anyway, it reduce complexity for us to just have one way of expanding the memory, but remapping it to another location 
+in the new size. We waste a bit of virtual address space, but we can usually treat that as "large enough that we don't care" anyway.
+====
+
+Virtual memory is a wonderful thing, we map the same range in the file twice, and changes that happened there will be reflected in both. A good post 
+on the matter in https://devblogs.microsoft.com/oldnewthing/20031007-00/?p=42263[Raymond Chen talking about Stupid memory-mapping tricks]. The ability
+to retain the old mapping is important, we have read transactions that are actively working against that old mapping. If we were to drop the memory
+mapping, they would suddenly try to access invalid memory. That leads to the crux of our problem. With the mmap range no longer being static, we need
+to think about how to manage the new state of the system.
+
+I dealt with the issue by introducing the notion of a global state, shown in Listing 10.3. 
+
+[source]
+.Listing 10.3 - impl.h - Global state is the state of Gavran at a current point in time
+-----
+typedef struct db_global_state {
+  char _padding[6];
+  file_header_t header;
+  struct mmap_args mmap;
+} db_global_state_t;
+-----
+
+The idea behind `db_global_state_t` is that a read transaction has a frozen view of the world, including all the state that we have on the system. 
+That includes the memory map that was effective at the time of the transaction.
+
+[TIP]
+.Why do we start the `db_global_state_t` with padding?
+====
+The `file_header_t` structure is used here and in the `page_metadata_t`. In the `page_metadata_t`, we already use the first 6 bytes of the struct,
+so the `file_header_t` assumes that it has an alignment of +6.  The first two fields in `file_header_t` are `uint8_t` and the rest are `uint64_t`.
+By assuming +6 alignment, all the fields in the `page_metadata_t` and `file_header_t` have native alignment. We have carried that over for 
+`db_global_state_t` to make things align nicely, but that isn't strictly required.
+====
+
+Listing 10.4 shows the changes in the model for both `db_state_t` and `txn_state_t` as a result of the introduction of `db_global_state_t`. 
+
+[source]
+.Listing 10.4 - impl.h - Modifications to db and txn structures to accommodate the new global state
+-----
+struct transaction_state {
+  // .. same as before ..
+ 
+  + struct cleanup_act *on_forget;
+  + struct cleanup_act *on_rollback;
+  + db_global_state_t global_state;
+};
+
+struct database_state {
+  + db_global_state_t global_state;
+  - struct mmap_args mmap;
+  - file_header_t header;
+  - char _padding[6];
+  - uint64_t last_tx_id;
+};
+-----
+
+As you can see, we added the `db_global_state_t` to both `txn_state_t` and `db_state_t`. In the case of the later, that meant that we had to _remove_
+the fields that now reside in the `db_global_state_t`. The `last_tx_id`, on the other hand, was moved to the `file_header_t` structure. 
+Another thing worth noting in Listing 10.5 is the `on_forget` and `on_rollback` on the `txn_state_t`. What are those? The `struct cleanup_act` is shown
+on Listing 10.5. This is used to hold the required state for cleanups, which is something that we now need to take into account.
+
+[source]
+.Listing 10.5 - impl.h - Struct to hold the state for a cleanup action
+----
+struct cleanup_act {
+  void (*func)(void *state);
+  struct cleanup_act *next;
+  char state[];
+};
+----
+
+Consider the case of trying to create a new mapping for the file size increase as part of a transaction. And then that transaction fails for some other
+reason. Because the transaction did not commit, we must discard all its state, including the new file mapping. That is the purpose of the `on_rollback` 
+callback field, to allow to invoke cleanup code if the transaction has been rolled back.
+
+Conversely, when we have successfully committed a transaction after increasing the file size, we need to unmap the _old_ mapping. We can't do that 
+immediately, because there are older read transactions that may be using it. We are going to reuse the same cleanup concept we have for writing for the
+disk. If there are no transactions that are old enough to want to look at old pages, we can write them to disk. In the same vein, we can wait until all
+the active transactions are newer than the current write transaction and then close the old mapping. All the current transactions are now looking only
+at the new one. That is the purpose of the `on_forget` callback back.
+
+With all of this background in place, let's look at the code to actually increase the file size, shown in Listing 10.6.
+
+[source]
+.Listing 10.6 - db.c - Increasing the data file size
+----
+include::./code/db.c[tags=db_try_increase_file_size]
+----
+
+There isn't much going on there. We compute the new size of the file and map it again. Note that there is a small dance here with the error handling.
+After we map the file we use `try_defer` to ensure that a failure to register the rollback will not cause us to leak the new memory map. We register
+a deletion of the _existing_ memory map when the transaction is forgotten. When no one is using this transaction or any older transaction, as we saw
+in the previous chapter. 
+
+[IMPORTANT]
+.The free space bitmap also need some space
+====
+In Listing 10.6, you can see a call to `db_new_size_can_fit_free_space_bitmap`, this is meant to handle a very specific edge case. When we increase
+the size of the file, we also need to update the free space bitmap. Usually we can do that by marking the bits in the bitmap, but if the size of the
+file grew beyond the capacity of the bitmap, we need to move it. And we have to assume that there is _no_ available free space in the existing file
+for the bitmap. 
+
+We limit our file growth to 1 GB in size, but that can cause us issues. If the size of the _free space bitmap_ is more than 1 GB and we need to move 
+it, we may run into a case where we increase the file and then fail because there is not enough free space for the new free space bitmap. Given a 
+maximum size of 1 GB, it means that the file would need to have over 64 TB in size before we'll actually have to deal with it. But I'm not planning
+on having limits that I don't absolutely have to have. Therefor, `db_new_size_can_fit_free_space_bitmap` is here to ensure that any growth in the
+file will have enough space to accommodate the free space bitmap. That is also why the call to `db_try_increase_file_size` is immediately followed
+by a recursion into `txn_allocate_page`. It is possible (although unlikely) that we'll need to increase the file _twice_ before we can satisfy the
+allocation request. First to move the free space bitmap and then to allocate the actual pages requested.
+====
+
+Listing 10.7 shows how we handle the registration on the transaction. 
+
+[source]
+.Listing 10.7 - txn.c - Registering callbacks on the transaction
+----
+include::./code/txn.c[tags=txn_add_action]
+----
+
+There are a couple of things that are very important to note here. First, we maintain a _copy_ of the state that was passed to us, not maintain a
+reference to it. That means that we can discard the value after we call the register function. Second, we use a single allocation to hold the new
+`struct cleanup_act` and its state. These two behaviors simplify memory handling significantly, both inside the registration / invocation code 
+paths and for the callers. You can see how they are being used in Listing 10.8.
+
+[source]
+.Listing 10.8 - txn.c - Changes in the rollback behavior of a transaction
+----
+// inside txn_close
+include::./code/txn.c[tags=txn_close_rollback]
+
+include::./code/txn.c[tags=free_tx]
+----
+<1> Invoke all the `on_rollback` callbacks and releasing the memory for them, since we are now closing a transaction that wasn't committed.
+<2> Here we `free` but *not* invoke the `on_forget` callbacks.
+<3> We call `txn_free_single_tx` which is also called when the `txn_gc_tx` is run to finish cleaning up the transaction.
+<4> Calling the `on_forget` callbacks and then freeing the memory, since the transaction is now forgotten.
+
+In Listing 10.8 there is a careful dance in the case of rollback. We need to invoke _just_ the `on_rollback` callback, to discard the new memory map and
+_not_ invoke the `on_forget` callback (which should be invoked only for committed transactions), so we clear that before calling to `txn_free_single_tx`.
+The reason we don't want to call `on_forget` in the case of a rolled back transaction is that it will remove the _existing_ memory map, which will leave
+us hanging badly.
+
+[IMPORTANT]
+.Transactions apply their state on commit, or rollback atomically
+****
+One of the design principles of Gavran is that the transaction is the unit of all changes in the system. We use that to modify the data file safely. We
+also use that to modify the internal structure of Gavran itself. Using this model of pushing all changes through the transaction and accepting them via
+the commit simplify a great deal of state management inside of Gavran.
+****
+
+In Listing 10.6 we see that the last action of `db_try_increase_file_size` is to set the _transaction_'s `global_state.mmap` value and then call to 
+`db_finalize_file_size_increase`. We'll get to `db_finalize_file_size_increase` in a bit, first I want to talk what will happen to the transaction's
+global state. That is handled in `txn_commit`, shown in Listing 10.9.
+
+[source]
+.Listing 10.9 - txn.c - `txn_commit` now handles discarding of `on_rollback` callback as well as setting the global state
+----
+include::./code/txn.c[tags=txn_commit]
+----
+<1> The transaction was already committed, so we can immediately discard all the `on_rollback` callbacks. 
+<2> Here we copy the `global_state` from the current write transaction to the `db_state_t` instance, making it available for future transactions.
+
+The fact that all the modifications to the system state are done on an isolated copy of the `global_state` is a huge relief. We don't need to 
+carefully orchestrate modifying things, we can do everything locally, on a copy, and only publish this as part of the commit. If you are finding
+similarities in the approach to the Copy on Write system we use for page modifications, that is by no means an accident. Being able to reuse 
+concepts and having a single line of thinking simplify the code base significantly.
+
+[CAUTION]
+.I'm skipping the refactoring changes, they aren't interesting
+====
+The change that introduced the `global_state` field affected a _lot_ of the code. Most of the changes were manual ones, changing `mmap` or `header`
+to `global_state.mmap` or `global_state.header`. I decided to spare you the need to go through a diff of similar changes, but I wanted to call it 
+out to your attention.
+====
+
+Just increasing the file size and mapping the memory again isn't enough, I'm afraid to say. We also need to make sure that the free space bitmap
+knows about the new size, that the file header is updated, etc. This is handled in `db_finalize_file_size_increase`, shown in Listing 10.10.
+
+[source]
+.Listing 10.10 - txn.c - Setting up the state of the database after the file size has been increased
+----
+include::./code/txn.c[tags=db_finalize_file_size_increase]
+----
+
+In the common case, we can simply mark the newly available pages in the `db_increase_free_space_bitmap` function. Each free space bitmap page can
+mark 512 MB of data, so growing the free space bitmap should be a rare event, most of the time, we just need to mark the new pages as free and that
+would be it. We'll see how we deal with growing the free space bitmap in `db_move_free_space_bitmap` in a bit.
+
+The rest of `db_finalize_file_size_increase` is just setting the new `number_of_pages` on the page header on the first metadata entry of the file, 
+and that is that. The changes are made to modified pages, which go through the usual Copy on Write, being written to the WAL, copied to the data
+file when there are no read transactions that may observe this, etc. In other words, this part is also part of the transaction, like the `global_state`
+behavior, but it is done using the usual mechanism that we have setup, no need for any special behaviors here.
+
+The behavior is much more involved when we need to actually move the free space bitmap. This is shown in Listing 10.11. What it _does_ in essence is
+to create a new bitmap in memory, with the new size, based on the old bitmap. It uses the new bitmap to find the new location of the bitmap and then
+move the bitmap there. See the notes in the code for the full details.
+
+[source]
+.Listing 10.11 - txn.c - Moving the free space bitmap when we run out of room for it in its old location
+----
+include::./code/txn.c[tags=db_move_free_space_bitmap]
+----
+<1> Get the new size of the bitmap in pages, based on the new file size. We actually use _more_ space than is needed, to reduce the number of times
+that we need to move the free space bitmap.
+<2> Allocate _in memory_ buffer for the bitmap. 
+<3> Mark the entire range as busy and then copy the existing bitmap to the new buffer.
+<4> Set the newly available space as free in the new bitmap.
+<5> Search _the new bitmap_ for available space for the new bitmap. This may be in the new file range or in the old one. We ensure that the new space
+    will have at least enough space for the free space bitmap in `db_new_size_can_fit_free_space_bitmap`.
+<6> Mark the new free space bitmap pages as busy.
+<7> Call `txn_modify_page` on the pages we selected and copy the bitmap to its new location.
+<8> Update the metadata of the new free space bitmap.
+<9> Update the transaction's state to point to the new free space bitmap.
+<10> Free the pages of the old free space bitmap, we are not freeing them in the _new_ bitmap, because we already set `free_space_bitmap_start` in the 
+     transaction's `global_state.header`.
+
+Listing 10.11 is the most complex piece in the data file growth, it ensures that the free space bitmap moves without issue and it has to do quite a lot
+to get things working. Probably the most tricky part is that we copy the bitmap to memory, including the newly available pages and then use that in 
+memory bitmap to find the location of the bitmap. This is a bit recursive, but it ends up working quite nicely in the end. 
+
+I'm actually copying the new bitmap twice, once to an in memory buffer where I'll run my checks and once from the in memory buffer to the page buffer 
+held by the transaction.  At small sizes, it won't matter. But as the size of the data file grows, so would the free space. At 512 GB, if you'll recall,
+the free space bitmap would take 64 MB. It is possible to avoid this cost by making the code more complex, but that is probably not worth it. 
+At 512GB, the free space bitmap would not be 64 MB, we'll actually reserve _70_ MB for that. Meaning that the next time we'll need to move it will be when
+we grow the file by another 48 GB. That far apart, it isn't really worth it to try to optimize the double memory copy.
+
+.What did all of this get us?
+****
+We can now extend the size of the file on the fly, while transactions are still running. The internal metadata will be updated and if needed changed to
+reflect the new change. We also take care to reduce those costs by allocating a bit more than is required when we increase the size of the free space 
+bitmap. 
+
+There is some complexity involved, but the biggest change in the code was just having to from the assumption that the `mmap` value is static to having it
+inside the `global_state`. The rest of the architecture and behavior remained the same and we even have better understanding of how these sort of 
+constraints are going to impact our system in the future. 
+
+The fact that the read transactions are immutable and that we need to keep their state around until they are no longer being used is going to be _huge_ when
+we start to implement multi threading support. And the fact that we are spending so much time at the lowest levels of the system means that we don't need to
+worry about these details at higher levels. We'll see how all of those play out in the next part of the book.
+****
+
+=== Increasing the size of the WAL
+
+We spent a lot of time working on extending the size of the data file, but what about the size of the WAL? We currently define the size of the WAL on 
+startup based on the `database_options_t.wal_size` value. What happens if we aren't able to clear the WAL quickly enough and we reach the end?
+You might expect that we'll get an error, something like the `ENOSPC` that we got when reaching the limits of the data file before we fixed that, but 
+that isn't the case.
+
+[TIP]
+.Avoiding unnecessary limits
+====
+It is very common in databases to have values such as `max_buffer_size` or the like. I don't like these because they are usually set in advance are 
+are not related to the actual resources available on the machine. If I'm using writing to disk, but I have 2 TB of hard disk free, I don't really
+care to stop after 512MB because that is the size of the WAL configuration. 
+
+Such values are bad if the common reaction when you find them is to just bump them upward. I would much rather have configuration that guide us,
+not one that blocks us. Remember that principle when it comes to designing your system configuration. 
+====
+
+As it is currently written, we're using `pwrite` to write to the WAL, and we are going to increment the position to which we write on each call. 
+If we get to the end of the file, the operating system will simply increase the size of the file. The problem with doing this is that we haven't
+updated the parent directory to make sure that the metadata change on the WAL file will be persisted. So this sort of works, but it isn't safe.
+There is also the chance of hitting the limits of the disk, which means that you may get a `ENOSPC` error at any time. I would much rather do 
+things in a more structured manner. 
+
+Just like the manner in which we increase the size of the data file, we can detect and increase the size of the WAL. However, that leads to an 
+interesting question, how should we actually handle the WAL? Right now we have a single file and we reset it occasionally. That isn't 
+necessarily the best way to handle things. We could create a _new_ file when we reach the limits of the WAL. That is how Voron works, for 
+example, as well as RocksDB and many other databases. 
+
+Using multiple files means that we can more easily handle the WAL reset that we are currently managing by resetting the position we write to the 
+file. We'll simply use a new file and we can use the file _name_ as an indication of sequence. So we'll have `db.00001.wal`, `db.00002.wal`, etc.
+That works, but it has a few caveats. First, allocating new files all the time requires that you'll create them and have the file system allocate
+space for them. That isn't ideal. 
+
+We can keep these files around, reusing the allocated disk space. This is what Voron is doing, but it takes an effort. We also need to rename the
+files whenever we create a new WAL. That requires I/O operation for the rename as well as updating the parent directory. We also need to keep track
+of what WAL file we are currently using, what files we can reuse, etc. 
+
+The big advantage of having a single file is the simplicity of implementation. But it has a fatal issue. Consider the timeline shown in Figure 20.
+
+.A time line of concurrent read and write transactions
+image::{img-src}/fig20.png[]
+
+In order to reset the WAL, we need to have _no_ active transactions. If at any given point we have active transactions, we'll never be able to 
+reset the WAL and it will grow without bound. When using multiple files, we can easily handle that because at some point the current transaction
+will be beyond the oldest WAL file, which means that it can be deleted or repurposed. That is not possible to do when you have a single file.
+
+[TIP]
+.Avoiding esoteric features
+====
+Linux actually includes support for `FALLOC_FL_COLLAPSE_RANGE`, which does exactly what we want. We can give it a range at the start of the 
+file and it will truncate it from the _start_. That is just perfect for our situation, but it is sadly really bad idea to actually make use
+of such a feature.
+
+Why is that?
+
+`FALLOC_FL_COLLAPSE_RANGE` exists only on Linux, it has no equivalent on Windows or macOS. It is also limited to specific file systems. And
+one of the key things that I have learned is that people do all _sort_ of crazy things with their systems. You may be running Gavran on 
+Linux on top of ext4 (supporting `FALLOC_FL_COLLAPSE_RANGE`) but you may be running this in a docker instance running on Windows, in which 
+case the volume you use is actually using CIFS (not supporting `FALLOC_FL_COLLAPSE_RANGE`). Or you have a user that put a Gavran database on
+a USB stick (usually formatted with FAT32, certainly not supporting `FALLOC_FL_COLLAPSE_RANGE`). 
+
+It pays to be _really_ conservative with features that we seek to rely on at the file system level. There is a _lot_ of variance between the
+various systems and it is easy to get yourself snagged by those details.
+====
+
+So we need to change our WAL to use multiple files. Let's see what changes are required to make this happen...

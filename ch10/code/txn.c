@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/param.h>
 
 #include "db.h"
 #include "errors.h"
@@ -42,16 +43,25 @@ result_t txn_commit(txn_t *tx) {
   if (!tx->state->modified_pages)
     return success();
 
-  // <1>
   ensure(wal_append(tx->state));
 
   tx->state->flags |= TX_COMMITED;
   tx->state->usages = 1;
   db_state_t *db = tx->state->db;
 
+  // <1>
+  // we will never commit this tx, can free this memory
+  while (tx->state->on_rollback) {
+    struct cleanup_act *cur = tx->state->on_rollback;
+    tx->state->on_rollback = cur->next;
+    free(cur);
+  }
+
   db->last_write_tx->next_tx = tx->state;
   db->last_write_tx = tx->state;
-  db->last_tx_id = tx->state->tx_id;
+  // <2>
+  // copy the committed state of the system
+  db->global_state = tx->state->global_state;
   return success();
 }
 // end::txn_commit[]
@@ -68,9 +78,10 @@ result_t txn_write_state_to_disk(txn_state_t *state, bool can_checkpoint) {
     ensure(pages_write(state->db, entry));
   }
 
-  if (can_checkpoint && wal_will_checkpoint(state->db, state->tx_id)) {
+  if (can_checkpoint &&
+      wal_will_checkpoint(state->db, state->global_state.header.last_tx_id)) {
     ensure(palfs_fsync_file(state->db->handle));
-    ensure(wal_checkpoint(state->db, state->tx_id));
+    ensure(wal_checkpoint(state->db, state->global_state.header.last_tx_id));
   }
   return success();
 }
@@ -86,6 +97,13 @@ void txn_free_single_tx(txn_state_t *state) {
 
     free(entry->address);
     entry->address = 0;
+  }
+  // <4>
+  while (state->on_forget) {
+    struct cleanup_act *cur = state->on_forget;
+    cur->func(cur->state);
+    state->on_forget = cur->next;
+    free(cur);
   }
   free(state);
 }
@@ -124,8 +142,9 @@ static void txn_try_reset_tx_chain(db_state_t *db, txn_state_t *state) {
   // this is the last transaction, need to reset the tx chain to default
   db->last_write_tx = db->default_read_tx;
   db->default_read_tx->next_tx = 0;
+  db->default_read_tx->global_state = state->global_state;
   // can be cleaned up immediately, nothing afterward
-  state->can_free_after_tx_id = db->last_tx_id;
+  state->can_free_after_tx_id = db->global_state.header.last_tx_id;
 }
 // end::txn_try_reset_tx_chain[]
 
@@ -152,7 +171,7 @@ static void txn_free_registered_transactions(db_state_t *state) {
 static result_t txn_gc_tx(txn_state_t *state) {
   // <1>
   db_state_t *db = state->db;
-  state->can_free_after_tx_id = db->last_tx_id + 1;
+  state->can_free_after_tx_id = db->global_state.header.last_tx_id + 1;
   // <2>
   txn_state_t *latest_unused = state->db->default_read_tx;
   if (latest_unused->usages)
@@ -166,7 +185,7 @@ static result_t txn_gc_tx(txn_state_t *state) {
     return success(); // no work to be done
   }
 
-  db->oldest_active_tx = latest_unused->tx_id + 1;
+  db->oldest_active_tx = latest_unused->global_state.header.last_tx_id + 1;
   // <4>
   ensure(txn_merge_unique_pages(latest_unused));
   // <5>
@@ -181,22 +200,38 @@ static result_t txn_gc_tx(txn_state_t *state) {
 // end::txn_gc_tx[]
 
 // tag::txn_close[]
-
 result_t txn_close(txn_t *tx) {
   txn_state_t *state = tx->state;
   tx->state = 0;
   if (!state)
     return success(); // probably double close?
-  if (state->tx_id == state->db->active_write_tx) {
+  if (state->global_state.header.last_tx_id == state->db->active_write_tx) {
     state->db->active_write_tx = 0;
   }
 
-  // <3>
+  // tag::txn_close_rollback[]
   // we have a rollback, no need to keep the memory
   if (!(state->flags & TX_COMMITED)) {
+    // <1>
+    while (state->on_rollback) {
+      struct cleanup_act *cur = state->on_rollback;
+      cur->func(cur->state);
+      state->on_rollback = cur->next;
+      free(cur);
+    }
+    // <2>
+    while (state->on_forget) {
+      // we didn't commit, so we can't execute it, just
+      // discard it
+      struct cleanup_act *cur = state->on_forget;
+      state->on_forget = cur->next;
+      free(cur);
+    }
+    // <3>
     txn_free_single_tx(state);
     return success();
   }
+  // end::txn_close_rollback[]
 
   // <4>
   if (!state->db->transactions_to_free && state != state->db->default_read_tx)
@@ -234,11 +269,13 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   state->allocated_size = initial_size;
   state->flags = flags;
   state->db = db->state;
+  state->global_state = db->state->global_state;
   // <5>
   state->prev_tx = db->state->last_write_tx;
-  state->tx_id = db->state->last_tx_id + 1;
+  state->global_state.header.last_tx_id =
+      state->global_state.header.last_tx_id + 1;
   tx->state = state;
-  db->state->active_write_tx = state->tx_id;
+  db->state->active_write_tx = state->global_state.header.last_tx_id;
   return success();
 }
 // end::txn_create[]
@@ -381,7 +418,7 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
     cur = cur->prev_tx;
   }
 
-  ensure(pages_get(tx->state->db, page));
+  ensure(pages_get(&tx->state->global_state, page));
 
   ensure(set_page_overflow_size(tx, page));
 
@@ -414,7 +451,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
 
   // <4>
   if (!page->address) {
-    ensure(pages_get(tx->state->db, &original));
+    ensure(pages_get(&tx->state->global_state, &original));
     ensure(set_page_overflow_size(tx, &original));
     if (!original.overflow_size)
       original.overflow_size = PAGE_SIZE;
@@ -477,3 +514,29 @@ result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
   return get_metadata_entry(page_num, &metadata_page, metadata);
 }
 // end::page_metadata[]
+
+// tag::txn_add_action[]
+static result_t txn_add_action(struct cleanup_act **head,
+                               void (*action)(void *), void *state_to_copy,
+                               size_t size_of_state) {
+  struct cleanup_act *cur =
+      calloc(1, sizeof(struct cleanup_act) + sizeof(struct mmap_args));
+  if (!cur) {
+    failed(ENOMEM, msg("Unable to allocate memory to register txn action"));
+  }
+  memcpy(cur->state, state_to_copy, size_of_state);
+  cur->func = action;
+  cur->next = *head;
+  *head = cur;
+  return success();
+}
+
+result_t txn_register_on_forget(txn_state_t *tx, void (*action)(void *),
+                                void *state_to_copy, size_t size_of_state) {
+  return txn_add_action(&tx->on_forget, action, state_to_copy, size_of_state);
+}
+result_t txn_register_on_rollback(txn_state_t *tx, void (*action)(void *),
+                                  void *state_to_copy, size_t size_of_state) {
+  return txn_add_action(&tx->on_rollback, action, state_to_copy, size_of_state);
+}
+// end::txn_add_action[]

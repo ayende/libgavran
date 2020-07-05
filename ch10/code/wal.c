@@ -6,10 +6,18 @@
 #include "impl.h"
 #include "platform.mem.h"
 
-typedef struct wal_state {
+struct wal_file_state {
   file_handle_t *handle;
   struct mmap_args map;
   uint64_t last_write_pos;
+  uint64_t can_free_after_tx_id;
+};
+
+typedef struct wal_state {
+  // parallel arrays
+  struct files_list *files;
+  struct wal_file_state *states;
+  uint32_t current_wal_index;
 } wal_state_t;
 
 enum wal_tx_page_flags {
@@ -82,6 +90,8 @@ static void *wal_diff_page(uint64_t *restrict origin,
         break;
       }
     }
+    if (i == size)
+      i--; // reached the end of the buffer, go back
 
     int32_t len = (int32_t)((i - diff_start) * sizeof(uint64_t));
     wal_page_diff_t diff = {.offset = (uint32_t)(diff_start * sizeof(uint64_t)),
@@ -112,7 +122,7 @@ static bool wal_validate_transaction(db_t *db, void *start, void *end) {
   wal_tx_t *tx = start;
   if (start + tx->tx_size > end)
     return false;
-  if (db->state->last_tx_id >= tx->tx_id)
+  if (db->state->global_state.header.last_tx_id >= tx->tx_id)
     return false;
   if (tx->tx_size <= crypto_generichash_BYTES)
     return false;
@@ -131,15 +141,14 @@ static bool wal_validate_transaction(db_t *db, void *start, void *end) {
 // end::wal_validate_transaction[]
 
 // tag::wal_recover_validate_after[]
-static result_t wal_recover_validate_after_end_of_transactions(db_t *db,
-                                                               wal_state_t *wal,
-                                                               void *start,
-                                                               void *end) {
+static result_t wal_recover_validate_after_end_of_transactions(
+    db_t *db, struct wal_file_state *wal, void *start, void *end) {
   for (void *cur = start; cur < end; cur += PAGE_SIZE) {
     if (!wal_validate_transaction(db, cur, end))
       continue;
     wal_tx_t *maybe_tx = cur;
-    if (db->state->last_tx_id >= maybe_tx->tx_id) { // probably old tx
+    if (db->state->global_state.header.last_tx_id >=
+        maybe_tx->tx_id) { // probably old tx
       size_t remaining = maybe_tx->tx_size % PAGE_SIZE
                              ? PAGE_SIZE - (maybe_tx->tx_size % PAGE_SIZE)
                              : 0;
@@ -157,7 +166,7 @@ static result_t wal_recover_validate_after_end_of_transactions(db_t *db,
                "transaction. WAL is probably corrupted"),
            with(corrupted_pos, "%zd"), with(maybe_tx->tx_id, "%lu"),
            with(corrupted_tx->tx_id, "%lu"),
-           with(db->state->last_tx_id, "%lu"));
+           with(db->state->global_state.header.last_tx_id, "%lu"));
   }
   return success();
 }
@@ -224,13 +233,15 @@ static result_t disable_db_mmap_writes(struct mmap_args *m) {
 }
 enable_defer(disable_db_mmap_writes);
 
-static result_t wal_recover(db_t *db, wal_state_t *wal) {
+static result_t wal_recover(db_t *db, struct wal_file_state *wal) {
   void *start = wal->map.address;
   void *end = (char *)start + wal->map.size;
-  db->state->last_tx_id = 0;
+
+  uint64_t last_recovered_tx_id = 0;
   // <1>
-  ensure(palfs_enable_writes(db->state->mmap.address, db->state->mmap.size));
-  defer(disable_db_mmap_writes, &db->state->mmap);
+  ensure(palfs_enable_writes(db->state->global_state.mmap.address,
+                             db->state->global_state.mmap.size));
+  defer(disable_db_mmap_writes, &db->state->global_state.mmap);
   // <2>
   struct tx_buffer buffer = {0, 0, 0};
   defer(free_buffer_pointer, &buffer);
@@ -243,7 +254,7 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
     wal_tx_t *tx;
     ensure(wal_get_transaction(start, &buffer, &tx));
 
-    db->state->last_tx_id = tx->tx_id;
+    last_recovered_tx_id = tx->tx_id;
     // <5>
     void *input = (void *)tx + sizeof(wal_tx_t) +
                   sizeof(wal_tx_page_t) * tx->number_of_modified_pages;
@@ -252,7 +263,7 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
                               .overflow_size =
                                   tx->pages[i].number_of_pages * PAGE_SIZE};
       // <6>
-      ensure(pages_get(db->state, &modified_page));
+      ensure(pages_get(&db->state->global_state, &modified_page));
 
       if (tx->pages[i].flags == wal_tx_page_flags_diff) {
         size_t end_offset = i + 1 < tx->number_of_modified_pages
@@ -276,67 +287,111 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   // <9>
   // we need to check if there are valid transactions _after_ where we stopped
   ensure(wal_recover_validate_after_end_of_transactions(db, wal, start, end));
-  // <10>
-  // note, no fsync called
+
+  if (last_recovered_tx_id != 0) {
+    page_metadata_t *first_page_metadata = db->state->global_state.mmap.address;
+
+    ensure(first_page_metadata->type == page_metadata,
+           msg("First page was not a metadata page?"));
+    ensure(first_page_metadata->file_header.last_tx_id == last_recovered_tx_id,
+           msg("Unable to match recovered transaction ids"),
+           with(first_page_metadata->file_header.last_tx_id, "%lu"),
+           with(last_recovered_tx_id, "%lu"));
+    db->state->global_state.header = first_page_metadata->file_header;
+  } else {
+    // empty db?
+    db->state->global_state.header.number_of_pages =
+        db->state->global_state.mmap.size / PAGE_SIZE;
+  }
+
+  db->state->default_read_tx->global_state = db->state->global_state;
 
   return success();
 }
+
 // end::wal_recover[]
 
 // tag::wal_open_and_recover[]
-result_t wal_open_and_recover(db_t *db) {
-  const char *db_file_name = palfs_get_filename(db->state->handle);
-  size_t db_name_len = strlen(db_file_name);
-  char *wal_file_name = malloc(db_name_len + 1 + 4); // \0 + .wal
-  ensure(wal_file_name, msg("Unable to allocate WAL file name"),
-         with(db_file_name, "%s"));
-  defer(free, wal_file_name);
 
-  memcpy(wal_file_name, db_file_name, db_name_len);
-  memcpy(wal_file_name + db_name_len, ".wal", 5); // include \0
-
-  size_t handle_len;
-  ensure(palfs_compute_handle_size(wal_file_name, &handle_len));
-  handle_len += sizeof(wal_state_t);
-
-  wal_state_t *wal = malloc(handle_len);
-  ensure(wal, msg("Unable to allocate WAL state"), with(db_file_name, "%s"));
-  size_t cancel_defer = 0;
-  try_defer(free, wal, cancel_defer);
-  wal->handle = (void *)(wal + 1);
-  ensure(palfs_create_file(wal_file_name, wal->handle,
-                           palfs_file_creation_flags_durable));
-  ensure(palfs_set_file_minsize(wal->handle, db->state->options.wal_size));
-  ensure(palfs_get_filesize(wal->handle, &wal->map.size));
-  ensure(palfs_mmap(wal->handle, 0, &wal->map));
-  defer(palfs_unmap, &wal->map);
-
-  ensure(wal_recover(db, wal));
-
-  db->state->wal_state = wal;
-  cancel_defer = 1;
-
-  return success();
-}
-// end::wal_open_and_recover[]
-
-result_t wal_close(db_state_t *db) {
-  if (!db->wal_state)
+static result_t free_wal_state(wal_state_t *ws) {
+  if (!ws)
     return success();
-  // need to proceed even if there are failures
-  bool failure = !palfs_unmap(&db->wal_state->map);
-  failure |= !palfs_close_file(db->wal_state->handle);
+  bool failure = false;
+  if (ws->states) {
+    for (size_t i = 0; i < ws->files->size; i++) {
+      struct wal_file_state *cur = &ws->states[i];
+      if (!cur)
+        continue;
+      bool failure = !palfs_unmap(&cur->map);
+      failure |= !palfs_close_file(cur->handle);
+
+      free(cur);
+    }
+  }
+  free(ws->states);
+  ws->states = 0;
+
+  failure |= !palfs_release_wal_files(ws->files);
+  ws->files = 0;
 
   if (failure) {
     errors_push(EIO, msg("Unable to properly close the wal"));
   }
 
-  free(db->wal_state);
-  db->wal_state = 0;
   if (failure) {
     return failure_code();
   }
   return success();
+}
+
+enable_defer(free_wal_state);
+
+result_t wal_open_and_recover(db_t *db) {
+  size_t cancel_defer = 0;
+  wal_state_t *wal_state = malloc(sizeof(wal_state_t));
+  try_defer(free_wal_state, wal_state, cancel_defer);
+  ensure(wal_state, msg("Unable to allocate memory"));
+  ensure(palfs_get_wal_files(db->state->handle, &wal_state->files));
+  wal_state->states =
+      calloc(wal_state->files->size, sizeof(struct wal_file_state *));
+  if (!wal_state->states) {
+    failed(ENOMEM, msg("Unable to allocate states for WAL"));
+  }
+
+  for (size_t i = 0; i < wal_state->files->size; i++) {
+    struct numbered_file *nf = wal_state->files->files[i];
+    size_t handle_len;
+    ensure(palfs_compute_handle_size(nf->name, &handle_len));
+    handle_len += sizeof(struct wal_file_state);
+
+    struct wal_file_state *wal = calloc(1, handle_len);
+    wal_state->states[i] = wal;
+    ensure(wal, msg("Unable to allocate WAL state"), with(nf->name, "%s"));
+    try_defer(free, wal, cancel_defer);
+    wal->handle = (void *)(wal + 1);
+    ensure(palfs_create_file(nf->name, wal->handle,
+                             palfs_file_creation_flags_durable));
+    ensure(palfs_set_file_minsize(wal->handle, db->state->options.wal_size));
+    ensure(palfs_get_filesize(wal->handle, &wal->map.size));
+    ensure(palfs_mmap(wal->handle, 0, &wal->map));
+    defer(palfs_unmap, &wal->map);
+
+    ensure(wal_recover(db, wal));
+  }
+
+  db->state->wal_state = wal_state;
+  cancel_defer = 1;
+  return success();
+}
+// end::wal_open_and_recover[]
+
+result_t wal_close(db_state_t *db) {
+  if (!db || !db->wal_state)
+    return success();
+
+  op_result_t *res = free_wal_state(db->wal_state);
+  db->wal_state = 0;
+  return res;
 }
 
 // tag::wal_setup_transaction_data[]
@@ -420,7 +475,7 @@ result_t wal_append(txn_state_t *tx) {
   defer(palmem_free_page, &tmp_buf);
   wal_tx_t *wt = tmp_buf;
   wt->number_of_modified_pages = tx->modified_pages;
-  wt->tx_id = tx->tx_id;
+  wt->tx_id = tx->global_state.header.last_tx_id;
 
   // <3>
   void *end = wal_setup_transaction_data(tx, wt, tmp_buf + tx_header_size);
@@ -442,11 +497,20 @@ result_t wal_append(txn_state_t *tx) {
                              0),
          msg("Unable to compute hash for transaction"));
 
-  // <6>
-  ensure(palfs_write_file(wal->handle, wal->last_write_pos, tmp_buf,
-                          page_aligned_tx_size));
-  wal->last_write_pos += page_aligned_tx_size;
-  return success();
+  struct wal_file_state *cur_file = &wal->states[wal->current_wal_index];
+  if (cur_file->last_write_pos + page_aligned_tx_size < cur_file->map.size) {
+    ensure(palfs_write_file(cur_file->handle, cur_file->last_write_pos, tmp_buf,
+                            page_aligned_tx_size));
+    cur_file->last_write_pos += page_aligned_tx_size;
+    cur_file->can_free_after_tx_id = tx->db->global_state.header.last_tx_id + 1;
+    return success();
+  }
+  // need a new file
+  for (size_t i = 0; i < wal->files->size; i++) {
+    if (wal->states[i].can_free_after_tx_id >
+        tx->db->global_state.header.last_tx_id)
+      continue;
+  }
 }
 // end::wal_append[]
 
@@ -455,7 +519,7 @@ bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id) {
   if (!db || !db->wal_state)
     return false;
 
-  return db->last_tx_id == tx_id &&
+  return db->global_state.header.last_tx_id == tx_id &&
          db->wal_state->last_write_pos > db->options.wal_size / 2;
 }
 // end::wal_will_checkpoint[]

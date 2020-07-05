@@ -313,66 +313,69 @@ the WAL. That means that we can predict what is the maximum amount of memory tha
 ====
 I'm using the term page to talk about `wal_diff_page`, but it will operate on multiple pages just as well. If we have a value that is big enough to
 use multiple pages, we'll treat it as a single long page, and not as a series of consecutive pages. 
+
+This is also important because the same page may have different sizes in different transactions. Imagine that we allocate page 6 as a single page in
+transaction 17. Then we free the page in transaction 18 and allocate 3 pages in transaction 19. When we recover, we need to be able to handle all
+kind of permutations like that. 
+
+For that reason, in `wal_recover` we are operating at the lowest level, directly on the pages on disk, instead of utilizing higher level concepts such
+as transactions or buffering. 
 ====
 
 We now write diffed records to the WAL, but we need to also handle the other side, recovery. This is shown in Listing 9.10.
 
 [source]
-.Listing 9.10 - wal.c - Recovering the data from the WAL on startup
+.Listing 9.10 - wal.c  - Recovering the data from the WAL on startup
 ----
 include::./code/wal.c[tags=wal_recover]
 ----
-<1> Define a scratch buffer for the transactions, will be used later.
-<2> Crete a transaction for the recovery process, which will hold the modified pages as we apply the diffs to them.
+<1> Enable writes on the data file pages using mmap. This is usually disabled, we enable this solely for the purpose of applying the WAL to the data file. 
+We are using the memory mapped writes to avoid expensive system calls when we modify the data of certain pages many times during the database recovery.
+<2> Define a scratch buffer for the transactions, will be used later.
 <3> Verify the transaction.
 <4> The `wal_get_transaction` is used to get the transaction, will be used later.
 <5> Compute the start of the diff stream and and iterate over the modified pages.
-<6> Get the _raw_ page from the data file, bypassing the metadata system.
+<6> Get the _raw_ page from the data file, this is _mutable_ and will be changed directly by the `wal_apply_diff`.
 <7> Apply the diff to the page.
 <8> Or copy the whole page from the WAL if it wasn't diffed.
-<9> Write the modified pages from the recovery transaction to the data file, then close the transaction without committing.
+<9> Check that there are no additional transactions after the last valid one (may indicate WAL corruption).
+<10> Explicitly _not_ sync the changes to the disk, we'll discuss why shortly. 
 
-Quite a lot is going on in `wal_recover`. The first new change is that we are now using a transaction in the recovery process. A single page may appear
+Quite a lot is going on in `wal_recover`. The first new change is that we are writing directly to the file using memory mapped I/O. A single page may appear
 multiple times in the recovery, and we need to apply the changes to the page in order. Instead of writing to the data file on each change, we use a
-transaction as a container of modified pages for the recovery process. Once the recovery process is complete, we'll not commit this transaction but 
-write them out to disk directly using `txn_write_state_to_disk`. 
-This process has the advantage that we only writing to the data file once _all_ the transactional data has been properly processed and validated. 
+writable memory map for the recovery process. Once the recovery process is complete, we'll mark the memory as read only again. That has the advantage of 
+letting the operating system batch changes to the data file and significantly reduce the number of system calls and memory copies that we need to do.
+It has the disadvantage that if we fail midway through, we modified the data on the file. We don't worry about that, because on recovery, we'll just re-run
+through the WAL again and fix any changes to match what we have in the WAL.
 
-.Preventing a checkpoint on database startup to reduce IOPS
+.Not sync the database changes after recover allows reasonable startup times with slow I/O. 
 ****
 IOPS means I/O Operations Per Second. And they are something that I constantly think about as a database developer.
 
-Take a look at Listing 9.10 and the call to `txn_write_state_to_disk`, immediately before that we set the `tx_id` to its max value to prevent
-the call to `txn_write_state_to_disk` from a checkpoint. Why is that needed?
+Why shouldn't we call `fsync` after we complete all the writes to the database file? That would save us the need to run recovery again the next time, no?
 
-A checkpoint perform the following actions:
-
-* Call `fsync` to flush all the data to disk
-* Reset the WAL
-
-Both of them are things that are _desirable_, but at the database startup, we cannot afford them. Consider Gavran running on a HDD volume. Or
-using a cloud drive with low amount of IOPS. The recovery process uses buffered I/O _intentionally_. If we have a large WAL to go through we
-may be modifying a _lot_ of pages in the data file. Which will result in a _lot_ of IOPS.
+That may be _desirable_, but at the database startup, we cannot afford the cost. Consider Gavran running on a HDD volume. Or
+using a cloud drive with low amount of IOPS. The recovery process uses buffered memory mapped I/O _intentionally_. If we have a large WAL to go through we
+may be modifying a _lot_ of pages in the data file. Which will result in a _lot_ of IOPS. Because we are using memory mapped I/O, the number of actual disk
+writes is going to be minimal. But calling `fsync` would force us to flush everything to the file...
 
 I have seen this exact scenario running on a 7,200 RPM hard disk where you can expect to get under 100 IOPS for random writes. And in the cloud
 the situation isn't much better. Assume that we have a 16MB WAL file and that have changes to 3,000 pages in it (you'll likely get _many_ more).
 That means that it will take 30 seconds with 100 IOPS to call `fsync`. 
 
 However, with buffered I/O and no `fsync`, we can start the database up much faster. We'll still need to do a checkpoint, but we can do that
-at the background.
+at the background. In fact, that is exactly what will happen automatically the next time we'll do a write. Startup time tends to be very expensive and 
+we need to avoid doing things that we can do later during the startup phase.
 ****
 
-Note that we aren't calling `txn_modify_page` but to `txn_modify_page_raw`. That function is shown in Listing 9.11.
+Note that we are explicitly allowing to write to the data file memory map. This is done using `palfs_enable_writes` and reverted using 
+`palfs_disable_writes`, both of them are shown in Listing 9.11.
 
 [source]
-.Listing 9.11 - txn.c - Getting a raw page from the data file
+.Listing 9.11 - fs.c  - Enable and disabling writes to a memory mapped region
 ----
-include::./code/txn.c[tags=txn_modify_page_raw]
+include::./code/fs.c[tags=palfs_enable_writes]
 ----
-
-The major difference between `txn_modify_page_raw` and `txn_modify_page` is the way they deal with metadata. The `txn_modify_page` uses the metadata 
-from the metadata pages to compute the size of the page while `txn_modify_page_raw` rely on the values passed to it and get the data directly from the
-file. Because we can't be sure in what order the pages will be processed, we must rely on the data in the WAL itself.
 
 Using diffs instead of writing the full page to the WAL will reduce the size that we need, but there are other tricks that we can play to reduce the 
 size of the WAL writes even further. 

@@ -18,18 +18,33 @@ enable_defer(wal_close);
 // end::wal_api[]
 
 // tag::transaction_state[]
+
+typedef struct db_global_state {
+  char _padding[6];
+  file_header_t header;
+  struct mmap_args mmap;
+} db_global_state_t;
+
+struct cleanup_act {
+  void (*func)(void *state);
+  struct cleanup_act *next;
+  char state[];
+};
+
 struct transaction_state {
   db_state_t *db;
   uint32_t flags;
   uint32_t modified_pages;
-  size_t allocated_size;
 
-  // <2>
+  struct cleanup_act *on_forget;
+  struct cleanup_act *on_rollback;
+  db_global_state_t global_state;
+
   txn_state_t *prev_tx;
   txn_state_t *next_tx;
-  uint64_t tx_id;
-  size_t usages;
   uint64_t can_free_after_tx_id;
+  size_t usages;
+  size_t allocated_size;
 
   page_t entries[];
 };
@@ -42,10 +57,8 @@ struct transaction_state {
 // tag::database_state[]
 struct database_state {
   database_options_t options;
-  struct mmap_args mmap;
+  db_global_state_t global_state;
   file_handle_t *handle;
-  file_header_t header;
-  char _padding[6];
 
   // <1>
   wal_state_t *wal_state;
@@ -55,11 +68,10 @@ struct database_state {
   txn_state_t *default_read_tx;
   txn_state_t *transactions_to_free;
   uint64_t oldest_active_tx;
-  uint64_t last_tx_id;
 };
 // end::database_state[]
 
-result_t pages_get(db_state_t *db, page_t *p);
+result_t pages_get(db_global_state_t *state, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
 
 void txn_free_single_tx(txn_state_t *state);
@@ -102,19 +114,22 @@ _Static_assert(sizeof(enum page_type) == 1, "Must be a single byte");
 struct page_metadata {
   uint32_t overflow_size;
   enum page_type type;
-  uint8_t number_of_pages_beyond_overflow_size;
+  char _padding;
 
   union {
     struct {
-      char _file_header_padding[2];
       file_header_t file_header;
     };
-    char reserved_future[30];
   };
 
   // these are used for AES GCM metadata for the page
-  char reserved_nonce[12];
-  char reserved_mac[16];
+  union {
+    struct {
+      char reserved_nonce[12];
+      char reserved_mac[16];
+    } aes_gcm_header;
+    char reserved_blake2b_hash[32];
+  };
 };
 
 _Static_assert(sizeof(page_metadata_t) == 64,
@@ -123,4 +138,13 @@ _Static_assert(sizeof(page_metadata_t) == 64,
 
 result_t txn_write_state_to_disk(txn_state_t *state, bool can_checkpoint);
 
+uint64_t db_find_next_db_size(uint64_t current, uint64_t requested_size);
+
 uint64_t TEST_wal_get_last_write_position(db_t *db);
+
+result_t txn_register_on_forget(txn_state_t *tx, void (*action)(void *),
+                                void *state_to_copy, size_t size_of_state);
+result_t txn_register_on_rollback(txn_state_t *tx, void (*action)(void *),
+                                  void *state_to_copy, size_t size_of_state);
+result_t db_try_increase_file_size(txn_t *tx,
+                                   uint64_t required_additional_pages);
