@@ -408,4 +408,52 @@ It pays to be _really_ conservative with features that we seek to rely on at the
 various systems and it is easy to get yourself snagged by those details.
 ====
 
-So we need to change our WAL to use multiple files. Let's see what changes are required to make this happen...
+So we need to change our WAL to use multiple files. Let's see what changes are required to make this happen... The first thing to realize is 
+that working with files in C simply sucks. My first attempt to get a listing of the relevant files from the directory (files with format of
+`<database-name>-<number>.wal` went on for over a 125 lines! To compare, the whole of Gavran at this point is under 2,000 lines of code. 
+I decided that it would be better to refactor how we process the WAL first. Right now `wal_recover` is mixing the actual recovery with iteration
+over the WAL file. That make it very hard to change to multiple files. 
+
+In order to make things easier, I introduced the structure and functions shown in Listing 10.12.
+
+[source]
+.Listing 10.12 - wal.c - Separating the WAL iteration logic from the recovery logic by making iteration independent
+----
+struct wal_recovery_operation {
+  db_t *db;
+  wal_state_t *wal;
+  void *start;
+  void *end;
+  uint64_t last_recovered_tx_id;
+  void *tx_buffer;
+  size_t tx_buffer_size;
+  size_t tx_buffer_used;
+};
+
+static void init_wal_recovery(db_t *db, wal_state_t *wal,
+                              struct wal_recovery_operation *state);
+
+static result_t wal_next_valid_transaction(struct wal_recovery_operation *state,
+                                           wal_tx_t **txp);
+
+static result_t free_wal_recovery(struct wal_recovery_operation *state);
+
+static result_t wal_get_next_range(struct wal_recovery_operation *state,
+                                   void **current, void **end);
+
+static void wal_increment_next_range_start(struct wal_recovery_operation *state,
+        size_t amount);
+
+static result_t wal_complete_recovery(struct wal_recovery_operation *state);
+----
+
+The idea is that we're using the `wal_recovery_operation` to abstract how we iterate over the data in the WAL. We provide functions to get the
+next valid transaction as well as the next range, which may be an old transaction, garbage or indicate that we have a gap in the WAL. The new
+look for `wal_recover` is much better, focused on the recovery action along and is shown in Listing 10.13.
+
+[source]
+.Listing 10.13 - wal.c - The `wal_recover` function after the refactoring
+----
+include::./code/wal.c[tags=wal_recover]
+----
+

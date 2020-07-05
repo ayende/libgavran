@@ -242,8 +242,6 @@ static result_t wal_get_transaction(struct wal_recovery_operation *state,
 }
 // end::wal_get_transaction[]
 
-// tag::wal_recover[]
-
 static result_t disable_db_mmap_writes(struct mmap_args *m) {
   // no way to report it, the errors_get_count() will be triggered
   return palfs_disable_writes(m->address, m->size);
@@ -310,6 +308,7 @@ static result_t wal_complete_recovery(struct wal_recovery_operation *state) {
   return success();
 }
 
+// tag::wal_recover[]
 static result_t wal_recover(db_t *db, wal_state_t *wal) {
   ensure(palfs_enable_writes(db->state->global_state.mmap.address,
                              db->state->global_state.mmap.size));
@@ -351,7 +350,6 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
 
   return success();
 }
-
 // end::wal_recover[]
 
 // tag::wal_open_and_recover[]
