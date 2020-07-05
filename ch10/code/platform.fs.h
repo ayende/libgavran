@@ -36,23 +36,6 @@ struct mmap_args {
   size_t size;
 };
 
-struct numbered_file {
-  uint64_t number;
-  char name[];
-};
-
-struct files_list {
-  size_t size;
-  struct numbered_file *files[];
-};
-
-result_t palfs_release_wal_files(struct files_list *list);
-
-enable_defer(palfs_release_wal_files);
-
-result_t palfs_get_wal_files(file_handle_t *datbase_file,
-                             struct files_list **list);
-
 result_t palfs_mmap(file_handle_t *handle, uint64_t offset,
                     struct mmap_args *m);
 
