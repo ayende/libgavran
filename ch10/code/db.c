@@ -141,7 +141,7 @@ static result_t db_finalize_file_size_increase(txn_t *tx, uint64_t from,
 }
 // end::db_finalize_file_size_increase[]
 
-// tag:db_try_increase_file_size[]
+// tag::db_try_increase_file_size[]
 static void db_clear_old_mmap(void *state) {
   struct mmap_args *args = state;
   // we don't have a good way to respond to an error
@@ -193,6 +193,7 @@ result_t db_try_increase_file_size(txn_t *tx, uint64_t pages) {
   tx->state->global_state.mmap = new_map;
   return db_finalize_file_size_increase(tx, from, to);
 }
+
 // end::db_try_increase_file_size[]
 
 static result_t initialize_freespace_bitmap(txn_t *tx, page_t *metadata_page) {

@@ -146,6 +146,7 @@ struct transaction_state {
   + struct cleanup_act *on_forget;
   + struct cleanup_act *on_rollback;
   + db_global_state_t global_state;
+  - uint64_t tx_id;
 };
 
 struct database_state {
@@ -280,9 +281,9 @@ Just increasing the file size and mapping the memory again isn't enough, I'm afr
 knows about the new size, that the file header is updated, etc. This is handled in `db_finalize_file_size_increase`, shown in Listing 10.10.
 
 [source]
-.Listing 10.10 - txn.c - Setting up the state of the database after the file size has been increased
+.Listing 10.10 - db.c - Setting up the state of the database after the file size has been increased
 ----
-include::./code/txn.c[tags=db_finalize_file_size_increase]
+include::./code/db.c[tags=db_finalize_file_size_increase]
 ----
 
 In the common case, we can simply mark the newly available pages in the `db_increase_free_space_bitmap` function. Each free space bitmap page can
@@ -299,9 +300,9 @@ to create a new bitmap in memory, with the new size, based on the old bitmap. It
 move the bitmap there. See the notes in the code for the full details.
 
 [source]
-.Listing 10.11 - txn.c - Moving the free space bitmap when we run out of room for it in its old location
+.Listing 10.11 - db.c - Moving the free space bitmap when we run out of room for it in its old location
 ----
-include::./code/txn.c[tags=db_move_free_space_bitmap]
+include::./code/db.c[tags=db_move_free_space_bitmap]
 ----
 <1> Get the new size of the bitmap in pages, based on the new file size. We actually use _more_ space than is needed, to reduce the number of times
 that we need to move the free space bitmap.
@@ -389,6 +390,12 @@ In order to reset the WAL, we need to have _no_ active transactions. If at any g
 reset the WAL and it will grow without bound. When using multiple files, we can easily handle that because at some point the current transaction
 will be beyond the oldest WAL file, which means that it can be deleted or repurposed. That is not possible to do when you have a single file.
 
+So we need to change our WAL to use multiple files. Let's see what changes are required to make this happen... The first thing to realize is 
+that working with files in C simply sucks. My first attempt to get a listing of the relevant files from the directory (files with format of
+`<database-name>-<number>.wal` went on for over a 125 lines! To compare, the whole of Gavran at this point is under 2,000 lines of code. 
+I decided that it would be better to refactor how we process the WAL first. Right now `wal_recover` is mixing the actual recovery with iteration
+over the WAL file. That make it very hard to change to multiple files. 
+
 [TIP]
 .Avoiding esoteric features
 ====
@@ -408,12 +415,6 @@ It pays to be _really_ conservative with features that we seek to rely on at the
 various systems and it is easy to get yourself snagged by those details.
 ====
 
-So we need to change our WAL to use multiple files. Let's see what changes are required to make this happen... The first thing to realize is 
-that working with files in C simply sucks. My first attempt to get a listing of the relevant files from the directory (files with format of
-`<database-name>-<number>.wal` went on for over a 125 lines! To compare, the whole of Gavran at this point is under 2,000 lines of code. 
-I decided that it would be better to refactor how we process the WAL first. Right now `wal_recover` is mixing the actual recovery with iteration
-over the WAL file. That make it very hard to change to multiple files. 
-
 In order to make things easier, I introduced the structure and functions shown in Listing 10.12.
 
 [source]
@@ -432,18 +433,13 @@ struct wal_recovery_operation {
 
 static void init_wal_recovery(db_t *db, wal_state_t *wal,
                               struct wal_recovery_operation *state);
-
 static result_t wal_next_valid_transaction(struct wal_recovery_operation *state,
                                            wal_tx_t **txp);
-
 static result_t free_wal_recovery(struct wal_recovery_operation *state);
-
 static result_t wal_get_next_range(struct wal_recovery_operation *state,
                                    void **current, void **end);
-
 static void wal_increment_next_range_start(struct wal_recovery_operation *state,
         size_t amount);
-
 static result_t wal_complete_recovery(struct wal_recovery_operation *state);
 ----
 
@@ -451,9 +447,80 @@ The idea is that we're using the `wal_recovery_operation` to abstract how we ite
 next valid transaction as well as the next range, which may be an old transaction, garbage or indicate that we have a gap in the WAL. The new
 look for `wal_recover` is much better, focused on the recovery action along and is shown in Listing 10.13.
 
+As you can see, we have clear separation of responsibilities here. The abstraction shown in Listing 10.12 allows me to write the recovery logic
+without needing to care about where or how I get the data. That means that we now need to consider how exactly we'll manage the WAL beyond a 
+single file.
+
 [source]
 .Listing 10.13 - wal.c - The `wal_recover` function after the refactoring
 ----
 include::./code/wal.c[tags=wal_recover]
 ----
+
+Having a single file for the WAL is useful, but it also have some important properties. We don't keep messing with the file system, by allocating
+new files and deleting them as we create new WAL files. That can be surprisingly expensive. Another consideration is that it is common for users
+to want to move split the data and the WAL to different locations. Why would a user want to do something like that? Well, consider the _physical_
+architecture that they may have.
+
+If the user have two disks attached to a machine, they may want to have the data reside on one disk and the WAL on another. The requirements that
+we place on the WAL and the data files are _very_ different. The WAL is all about sequential writes and is almost never read (only on recovery)
+while the data file is about random reads and writes, buffered by memory. However, the data file writes are _not_ critical for us. We are currently
+in single threaded mode, but in the future, they will be done in a background thread. The WAL performance, on the other hand, is critical, because
+we cannot complete a transaction until the write to the WAL has successfully completed. 
+
+Given these requirements, it is common to have a big and somewhat slow disk for the data file, which is mostly backed by memory anyway and a smaller
+but faster disk for the WAL. Separating the data disk and WAL disk also gives us better throughput overall, since we don't have competition on the 
+same resource.
+
+[TIP]
+.How do you configure multiple disk layout?
+====
+Multiple disk layout for a database is both an advanced option and something that database administrators are well familiar with and will try to
+apply. It is also a PITA to define in code, because there are so many places that you need to reference it and the root cause of many bugs because
+the code didn't account for the "WAL is in another location" issue. 
+
+Instead, Gavran takes the position that the user can run a `ln -s /db/phones.wal /mnt/fast/wals/phones.wal` and everything will work as expected
+because we are carefully _not_ doing anything to prevent that scenario when we are opening the WAL file.
+
+This means that we have to have _predictable_ file names for the WAL file(s), or use a directory for them. 
+====
+
+I would much rather have a single file, but we can't have that and allow for continuously opened read transactions, as we saw in Figure 20. Creating
+many WAL files has its issues, so we'll avoid it as well. Instead, we'll use double buffering approach. Gavran will have _two_ WAL files. For the
+database `/db/phones` we'll have:
+
+* `/db/phones_a.wal`
+* `/db/phones_b.wal`
+
+These are going to be used as the backing store for the WAL, and we'll switch between them as needed. Because we can switch between them, we can 
+clear the one that isn't being used when there are active transactions and then switch to it, and so on. You can see how that would work in Figure 21.
+
+.Two WAL files used to store the transaction history of a database
+image::{img-src}/fig21.png[]
+
+Figure 21 shows the two files and the transactions that are stored in them. Let's consider the recovery process from such a state.
+
+* We open both files and test the first transaction on both of them.
+* We start with the file with the _oldest_ transaction id.
+* We run through the file normally, applying the diffs from the transaction.
+* When we are done with the valid transactions, we validate the end of the file, as we did before.
+* When we are done with the first file, we do the same on the second one. Again with validation at the end.
+
+In the case of Figure 21, we'll have the following steps:
+
+* Compare tx 14 from the B file to tx 17 from A file and decide to use B.
+* Read transactions 14, 15 and 16 from the B file.
+* Read transaction 12 from the file, discard it as old (previously written).
+* Switch to A file.
+* Read transactions 17, 18 from the A file.
+* Discard transaction 8 from A file because it is old.
+* Discard garbage data at the end of A file.
+
+How would the checkpoint process work with two files, then? Previously, we could only do a real checkpoint when there were no other active transactions.
+Now, we can do a checkpoint when the oldest active transaction is beyond the oldest WAL file. We'll `fsync` the data file and then write a valid empty
+transaction at the beginning of the oldest WAL file. That ensures that we'll no need to apply any of the data in the WAL file. We'll still need to 
+consider the _other_ file, of course, but that is already handled by the steps above.
+
+Let's see how that is actually going to work. I'm going to start by implementing the recovery changes. Because we have an abstraction over the iteration
+of transactions data, we won't need to change the `wal_recover` function.
 

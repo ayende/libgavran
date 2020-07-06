@@ -50,7 +50,7 @@ result_t txn_commit(txn_t *tx) {
   db_state_t *db = tx->state->db;
 
   // <1>
-  // we will never commit this tx, can free this memory
+  // we will never rollback this tx, can free this memory
   while (tx->state->on_rollback) {
     struct cleanup_act *cur = tx->state->on_rollback;
     tx->state->on_rollback = cur->next;
