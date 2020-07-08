@@ -1,5 +1,5 @@
 from gavran import *
-
+import glob
 import secrets
 import uuid
 import pytest
@@ -34,10 +34,14 @@ def write_to_wal_only():
             wtx.commit()
             return db.test_wal_last_pos()
 
+def get_wal_file_name(path):
+    path = path + "*.wal"
+    return glob.glob(path)[0]
+
 def test_corruption_of_wal_will_not_apply_tx():
     last_write_pos = write_to_wal_only()
 
-    with open(path + ".wal","wb") as f:
+    with open(get_wal_file_name(path),"wb") as f:
         f.seek(last_write_pos - 12)
         f.write(b'abc')
 
@@ -46,7 +50,7 @@ def test_corruption_of_wal_will_not_apply_tx():
 def test_wal_truncation_will_cause_tx_to_be_skipped():
     last_write_pos = write_to_wal_only()
 
-    with open(path + ".wal","wb") as f:
+    with open(get_wal_file_name(path),"wb") as f:
         f.truncate(last_write_pos - 12)
 
     assert_empty()

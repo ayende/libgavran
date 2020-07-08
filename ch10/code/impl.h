@@ -8,7 +8,24 @@
 #define PAGES_IN_METADATA_MASK (-128UL)
 
 // tag::wal_api[]
-typedef struct wal_state wal_state_t;
+
+// tag::wal_state_t[]
+struct wal_file_state {
+  file_handle_t *handle;
+  struct mmap_args map;
+  uint64_t last_write_pos;
+  // <1>
+  uint64_t last_tx_id;
+};
+
+typedef struct wal_state {
+  // <2>
+  size_t current_append_file_index;
+  // <3>
+  struct wal_file_state files[2];
+} wal_state_t;
+// end::wal_state_t[]
+
 result_t wal_open_and_recover(db_t *db);
 result_t wal_append(txn_state_t *tx);
 bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id);
@@ -61,7 +78,7 @@ struct database_state {
   file_handle_t *handle;
 
   // <1>
-  wal_state_t *wal_state;
+  wal_state_t wal_state;
 
   txn_state_t *last_write_tx;
   uint64_t active_write_tx;
@@ -148,3 +165,7 @@ result_t txn_register_on_rollback(txn_state_t *tx, void (*action)(void *),
                                   void *state_to_copy, size_t size_of_state);
 result_t db_try_increase_file_size(txn_t *tx,
                                    uint64_t required_additional_pages);
+
+__attribute__((const)) static inline uint64_t next_power_of_two(uint64_t x) {
+  return 1 << (64 - __builtin_clzll(x - 1));
+}

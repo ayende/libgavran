@@ -248,6 +248,32 @@ void defer_palfs_unmap(struct cancel_defer *cd) {
 }
 // end::defer_palfs_close_file[]
 
+// tag::palfs_truncate_file[]
+result_t palfs_truncate_file(file_handle_t *handle, uint64_t new_size) {
+  errors_assert_empty();
+
+  const char *filename = palfs_get_filename(handle);
+
+  int rc = ftruncate(handle->fd, (off_t)new_size);
+
+  if (rc) {
+    failed(rc, msg("Unable to truncate file to size"), with(filename, "%s"),
+           with(new_size, "%lu"));
+  }
+  char filename_mutable[PATH_MAX];
+  size_t name_len = strlen(filename);
+  if (name_len + 1 >= PATH_MAX) {
+    failed(ENAMETOOLONG, msg("The provided name is too long"),
+           with(name_len, "%zu"));
+  }
+  memcpy(filename_mutable, filename, name_len + 1);
+
+  ensure(fsync_parent_directory(filename_mutable));
+
+  return success();
+}
+// end::palfs_truncate_file[]
+
 // tag::palfs_set_file_minsize[]
 result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size) {
   errors_assert_empty();

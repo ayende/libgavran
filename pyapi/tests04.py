@@ -12,10 +12,9 @@ def setup_function(function):
     path = "/tmp/" +  uuid.uuid1().hex
 
 
-options = DatabaseOptions()
-options.minimum_size = 128*1024
+options = DatabaseOptions(128*1024)
 
-def test_can_create_db_and_Tx():
+def test_can_create_db_and_tx():
     with Database(path, options) as db:
         with db.txn(flags =2) as tx:
             pass

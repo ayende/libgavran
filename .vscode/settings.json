@@ -10,6 +10,16 @@
         "unordered_map": "c",
         "vector": "c",
         "string_view": "c",
-        "initializer_list": "c"
+        "initializer_list": "c",
+        "*.tcc": "c",
+        "exception": "c",
+        "fstream": "c",
+        "istream": "c",
+        "new": "c",
+        "ostream": "c",
+        "sstream": "c",
+        "stdexcept": "c",
+        "streambuf": "c",
+        "type_traits": "c"
     }
 }

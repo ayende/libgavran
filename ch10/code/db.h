@@ -59,6 +59,7 @@ typedef struct transaction {
 // <3>
 typedef struct database_options {
   uint64_t minimum_size;
+  uint64_t maximum_size;
   uint64_t wal_size;
 } database_options_t;
 

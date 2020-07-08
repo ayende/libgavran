@@ -142,7 +142,10 @@ class MapRange:
         self.args = None
 
 class DatabaseOptions(Structure):
-    _fields_ = [("minimum_size", c_long)]
+    _fields_ = [("minimum_size", c_ulong),("maximum_size", c_ulong),("wal_size", c_ulong),]
+
+    def __init__(self, min = 0, wal = 0, max = 0):
+        super(DatabaseOptions, self).__init__(min, wal, max)
 
 class DbOrTx(Structure):
     _fields_ = [("state", c_void_p)]

@@ -18,6 +18,12 @@ static inline void defer_free(struct cancel_defer* cd) {
   free(cd->target);
 }
 
+static inline void defer_free_p(struct cancel_defer* cd) {
+  // free void** via indirection, not void* directly
+  if (cd->cancelled && *cd->cancelled) return;
+  free(*(void**)cd->target);
+}
+
 #define CONCAT_(x, y) x##y
 #define CONCAT(x, y) CONCAT_(x, y)
 

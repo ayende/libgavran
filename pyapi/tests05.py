@@ -11,12 +11,8 @@ def setup_function(function):
     global path 
     path = "/tmp/" +  uuid.uuid1().hex
 
-
-options = DatabaseOptions()
-options.minimum_size = 128*1024
-
 def test_can_allocate_pages():
-    with Database(path, options) as db:
+    with Database(path, DatabaseOptions(128*1024)) as db:
         with db.txn(flags =2) as tx:
             p = tx.allocate()
             assert 2 == p.page_num
@@ -24,7 +20,7 @@ def test_can_allocate_pages():
             assert 3 == p.page_num
 
 def test_can_allocate_till_runs_out():
-    with Database(path, options) as db:
+    with Database(path, DatabaseOptions(128*1024,128*1024,128*1024)) as db:
         with db.txn(flags =2) as tx:
             for i in range(14):
                 p = tx.allocate()
@@ -35,7 +31,7 @@ def test_can_allocate_till_runs_out():
             assert "No space left on device" in str(g.value)
 
 def test_can_allocate_then_free_then_allocate():
-    with Database(path, options) as db:
+    with Database(path, DatabaseOptions(128*1024)) as db:
         with db.txn(flags =2) as tx:
             p = tx.allocate()
             num = p.page_num

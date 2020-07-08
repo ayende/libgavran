@@ -24,6 +24,8 @@ const char *palfs_get_filename(file_handle_t *handle);
 
 result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size);
 
+result_t palfs_truncate_file(file_handle_t *handle, uint64_t new_size);
+
 result_t palfs_fsync_file(file_handle_t *handle);
 
 result_t palfs_close_file(file_handle_t *handle);

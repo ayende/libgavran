@@ -82,7 +82,7 @@ static bool filter_small_unacceptable_range(bitmap_search_state_t *search) {
 
   // <3>
   uint64_t start = search->found_position & PAGES_IN_METADATA_MASK;
-  uint64_t end = (search->found_position + search->space_required) &
+  uint64_t end = (search->found_position + search->space_required - 1) &
                  PAGES_IN_METADATA_MASK;
 
   if (start == end) // on the same MB, nothing to do

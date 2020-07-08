@@ -24,10 +24,6 @@ get_number_of_free_space_bitmap_pages(uint64_t number_of_pages,
 }
 
 // tag::db_find_next_db_size[]
-__attribute__((const)) static inline uint64_t next_power_of_two(uint64_t x) {
-  return 1 << (64 - __builtin_clzll(x - 1));
-}
-
 uint64_t db_find_next_db_size(uint64_t current, uint64_t requested_size) {
   uint64_t uint_of_growth = next_power_of_two(current / 10);
   uint64_t suggested = uint_of_growth;
@@ -167,6 +163,10 @@ result_t db_try_increase_file_size(txn_t *tx, uint64_t pages) {
 
   ensure(db_new_size_can_fit_free_space_bitmap(
       tx->state->global_state.mmap.size, &new_size));
+  ensure(new_size < tx->state->db->options.maximum_size,
+         msg("Unable to grow the database beyond the maximum size"),
+         with(new_size, "%lu"), with(pages, "%lu"),
+         with(tx->state->db->options.maximum_size, "%lu"));
 
   file_handle_t *handle = tx->state->db->handle;
   ensure(palfs_set_file_minsize(handle, new_size));
@@ -331,7 +331,10 @@ static result_t handle_newly_opened_database(db_t *db) {
            with((uint32_t)(pow(2, file_header->page_size_power_of_two)), "%d"),
            with(PAGE_SIZE, "%d"));
 
+    // the last_tx_id is stored only in the WAL, so we need to keep it's value
+    uint64_t last_tx_id = db->state->global_state.header.last_tx_id;
     memcpy(&db->state->global_state.header, file_header, sizeof(file_header_t));
+    db->state->global_state.header.last_tx_id = last_tx_id;
   }
 
   cancel_defer = 1;
@@ -340,42 +343,51 @@ static result_t handle_newly_opened_database(db_t *db) {
 }
 // end::handle_newly_opened_database[]
 
-static result_t validate_options(database_options_t *options) {
-  if (!options->minimum_size)
-    options->minimum_size = 128 * 1024;
-  if (!options->wal_size)
-    options->wal_size = 128 * 1024;
+static result_t validate_options(database_options_t *user_options,
+                                 database_options_t *owned_options) {
+  if (user_options->minimum_size)
+    owned_options->minimum_size = user_options->minimum_size;
+  if (user_options->wal_size)
+    owned_options->wal_size = user_options->wal_size;
+  if (user_options->maximum_size)
+    owned_options->maximum_size = user_options->maximum_size;
 
-  if (options->wal_size % PAGE_SIZE) {
+  if (owned_options->wal_size % PAGE_SIZE) {
     failed(EINVAL, msg("The wal size must be page aligned: "),
-           with(options->wal_size, "%lu"));
+           with(owned_options->wal_size, "%lu"));
   }
 
-  if (options->minimum_size < 128 * 1024) {
+  if (owned_options->minimum_size < 128 * 1024) {
     failed(EINVAL,
            msg("The minimum_size cannot be less than the minimum "
                "value of 128KB"),
-           with(options->minimum_size, "%lu"));
+           with(owned_options->minimum_size, "%lu"));
   }
 
-  if (options->minimum_size % PAGE_SIZE) {
+  if (owned_options->minimum_size > owned_options->maximum_size) {
+    failed(EINVAL,
+           msg("The minimum_size cannot be greater than the maximum size"),
+           with(owned_options->minimum_size, "%lu"),
+           with(owned_options->maximum_size, "%lu"));
+  }
+
+  if (owned_options->minimum_size % PAGE_SIZE) {
     failed(EINVAL, msg("The minimum size must be page aligned: "),
-           with(options->minimum_size, "%lu"), with(PAGE_SIZE, "%d"));
+           with(owned_options->minimum_size, "%lu"), with(PAGE_SIZE, "%d"));
   }
 
   return success();
 }
 
 result_t db_create(const char *path, database_options_t *options, db_t *db) {
-  database_options_t default_options = {.minimum_size = 128 * 1024};
+  database_options_t owned_options = {.minimum_size = 128 * 1024,
+                                      .wal_size = 16 * 1024,
+                                      .maximum_size = UINT64_MAX};
 
   db_state_t *ptr = 0;
   size_t done = 0;
-
   if (options) {
-    ensure(validate_options(options));
-  } else {
-    options = &default_options;
+    ensure(validate_options(options, &owned_options));
   }
 
   // tag::default_read_tx[]
@@ -392,7 +404,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
 
   ptr->handle =
       (file_handle_t *)((char *)ptr + sizeof(txn_state_t) + sizeof(db_state_t));
-  memcpy(&ptr->options, options, sizeof(database_options_t));
+  memcpy(&ptr->options, &owned_options, sizeof(database_options_t));
 
   // <3>
   ptr->default_read_tx = (txn_state_t *)(ptr + 1);

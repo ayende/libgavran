@@ -110,9 +110,9 @@ void txn_free_single_tx(txn_state_t *state) {
 // end::free_tx[]
 
 // tag::txn_merge_unique_pages[]
-static result_t txn_merge_unique_pages(txn_state_t *state) {
+static result_t txn_merge_unique_pages(txn_state_t **state) {
   // build a table of all the distinct pages that we want to write
-  txn_state_t *prev = state->prev_tx;
+  txn_state_t *prev = (*state)->prev_tx;
   while (prev) {
     size_t number_of_buckets = get_number_of_buckets(prev);
     for (size_t i = 0; i < number_of_buckets; i++) {
@@ -120,10 +120,10 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
       if (!entry->address)
         continue;
       page_t check = {.page_num = entry->page_num};
-      if (lookup_entry_in_tx(state, &check))
+      if (lookup_entry_in_tx((*state), &check))
         continue;
 
-      ensure(allocate_entry_in_tx(&state, entry));
+      ensure(allocate_entry_in_tx(state, entry));
       entry->address = 0; // we moved ownership, detach from original tx
     }
 
@@ -187,9 +187,19 @@ static result_t txn_gc_tx(txn_state_t *state) {
 
   db->oldest_active_tx = latest_unused->global_state.header.last_tx_id + 1;
   // <4>
-  ensure(txn_merge_unique_pages(latest_unused));
+  size_t merged_tx_size = sizeof(txn_state_t) + sizeof(page_t) * 16;
+  txn_state_t *merged_tx_list = calloc(1, merged_tx_size);
+  ensure(merged_tx_list,
+         msg("Unable to allocate memory to merge transaction changes"));
+  defer(free_p, &merged_tx_list);
+  merged_tx_list->prev_tx = latest_unused;
+  merged_tx_list->db = latest_unused->db;
+  merged_tx_list->global_state = latest_unused->global_state;
+  merged_tx_list->allocated_size = merged_tx_size;
+
+  ensure(txn_merge_unique_pages(&merged_tx_list));
   // <5>
-  ensure(txn_write_state_to_disk(latest_unused, /* can_checkpoint*/ true));
+  ensure(txn_write_state_to_disk(merged_tx_list, /* can_checkpoint*/ true));
   // <6>
   txn_try_reset_tx_chain(db, latest_unused);
   // <7>
@@ -434,6 +444,11 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
          msg("Read transactions cannot modify the pages"),
          with(tx->state->flags, "%d"));
 
+  ensure(tx->state->global_state.header.number_of_pages > page->page_num,
+         msg("Cannot modify a page beyond the end of the file"),
+         with(tx->state->global_state.header.number_of_pages, "%lu"),
+         with(page->page_num, "%lu"));
+
   // <2>
   if (lookup_entry_in_tx(tx->state, page)) {
     return success();
@@ -450,7 +465,7 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
   }
 
   // <4>
-  if (!page->address) {
+  if (!original.address) {
     ensure(pages_get(&tx->state->global_state, &original));
     ensure(set_page_overflow_size(tx, &original));
     if (!original.overflow_size)

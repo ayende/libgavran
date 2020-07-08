@@ -457,7 +457,8 @@ single file.
 include::./code/wal.c[tags=wal_recover]
 ----
 
-Having a single file for the WAL is useful, but it also have some important properties. We don't keep messing with the file system, by allocating
+Having a single file for the WAL is a simple to get started, but it isn't the only reason I chose it. There are some have some important properties 
+that we get by having a single file, we don't keep messing with the file system, by allocating
 new files and deleting them as we create new WAL files. That can be surprisingly expensive. Another consideration is that it is common for users
 to want to move split the data and the WAL to different locations. Why would a user want to do something like that? Well, consider the _physical_
 architecture that they may have.
@@ -489,8 +490,8 @@ I would much rather have a single file, but we can't have that and allow for con
 many WAL files has its issues, so we'll avoid it as well. Instead, we'll use double buffering approach. Gavran will have _two_ WAL files. For the
 database `/db/phones` we'll have:
 
-* `/db/phones_a.wal`
-* `/db/phones_b.wal`
+* `/db/phones-a.wal`
+* `/db/phones-b.wal`
 
 These are going to be used as the backing store for the WAL, and we'll switch between them as needed. Because we can switch between them, we can 
 clear the one that isn't being used when there are active transactions and then switch to it, and so on. You can see how that would work in Figure 21.
@@ -508,13 +509,15 @@ Figure 21 shows the two files and the transactions that are stored in them. Let'
 
 In the case of Figure 21, we'll have the following steps:
 
-* Compare tx 14 from the B file to tx 17 from A file and decide to use B.
-* Read transactions 14, 15 and 16 from the B file.
+* Compare tx 14 from the `B` file to tx 17 from `A` file and decide to use `B`.
+* Read transactions 14, 15 and 16 from the `B` file.
 * Read transaction 12 from the file, discard it as old (previously written).
-* Switch to A file.
-* Read transactions 17, 18 from the A file.
-* Discard transaction 8 from A file because it is old.
-* Discard garbage data at the end of A file.
+* Switch to `A` file.
+* Read transactions 17, 18 from the `A` file.
+* Discard transaction 8 from `A` file because it is old.
+* Discard garbage data at the end of `A` file.
+
+==== Recovery with dual WAL files
 
 How would the checkpoint process work with two files, then? Previously, we could only do a real checkpoint when there were no other active transactions.
 Now, we can do a checkpoint when the oldest active transaction is beyond the oldest WAL file. We'll `fsync` the data file and then write a valid empty
@@ -522,5 +525,205 @@ transaction at the beginning of the oldest WAL file. That ensures that we'll no 
 consider the _other_ file, of course, but that is already handled by the steps above.
 
 Let's see how that is actually going to work. I'm going to start by implementing the recovery changes. Because we have an abstraction over the iteration
-of transactions data, we won't need to change the `wal_recover` function.
+of transactions data, we won't need to change the `wal_recover` function. We'll start with looking into the `wal_recovery_operation` and its associated
+functions. Listing 10.14 shows the changes to the structures.
+
+[source]
+.Listing 10.14 - impl.h & wal.c - Changes to WAL structures to reflect two WAL files
+----
+// from impl.h
+include::./code/impl.h[tags=wal_state_t]
+
+// from wal.c
+include::./code/wal.c[tags=wal_recovery_operation]
+----
+<1> The last transaction id that was written to this WAL file.
+<2> The current WAL file index that will be written to by the next `wal_append` operation.
+<3> Array to hold the two WAL file states. 
+<4> References to the WAL file states, these are *not* necessarily in the same order as the value in the `wal_state_t`. They are sorted on recovery
+by the earliest transaction in the file.
+<5> The current WAL file that we are _recovering_ from, *not* the same as the `current_append_file_index`. 
+
+The `struct wal_recovery_operation` is used solely for the purpose of recovery, while the `wal_state_t` and `struct wal_file_state` are used mostly
+for the purpose of appending to the WAL.
+Note how we have an array of two files in each of the structures. For the `wal_state_t`, the order is that the `A` file is first and `B` file is second.
+For the `struct wal_recovery_operation`, the order is dependant on the value of the earliest transaction recorded. Listing 10.15 shows how we initialize
+`struct wal_recovery_operation`. 
+
+[source]
+.Listing 10.15 - wal.c - Initialize the state of the recovery process
+----
+include::./code/wal.c[tags=wal_init_recover_state]
+----
+
+There is a significant amount of code in `wal_init_recover_state`, but that is mostly to handle all possible options. We start by checking the first
+transaction in each file and then ordering them based on the earliest transaction id. We need to handle the case of `tx_id` being `0`, which indicate
+that there are no valid transactions in the file or a valid transaction with no pages, which is the indicator that the WAL file was reset.
+We do that by only using one element in the `files` array and setting things up so the recovery process will only consider that file. 
+
+Of particular importance is the setting of `current_append_file_index` and `current_recovery_file_index`. These will always be inverse of one another.
+The `current_recovery_file_index` is the first file that we'll start the recover from and `current_append_file_index` is the file that the next call
+to `wal_append` will write to.
+
+After the setup in `wal_init_recover_state`, let's take a look at how we iterate transactions. The `wal_recover` function no longer deals with the 
+mechanics of iteration, that is handled by `wal_next_valid_transaction` which knows how to merge the valid transactions across the different files.
+The code for that is shown in Listing 10.16.
+
+[source]
+.Listing 10.16 - wal.c - Finding the next valid transaction (potentially skipping files)
+----
+include::./code/wal.c[tags=wal_next_valid_transaction]
+----
+<1> Check for end of file or if we have a non valid transaction.
+<2> We now need to check to the end of the file, to see if there are valid transactions after an invalid one (meaning, disk corruption). This used
+to run in `wal_recover`, but we now run it here, because it needs to run on _both_ files.
+<3> If we are at t second file, we are done and can stop the iteration, there are no more possible transactions.
+<4> There is still a file that we need to run through, let's setup the required fields to start iterating there.
+<5> Recursively call ourselves so we'll do validation on the next file transaction, etc.
+<6> Extract the transaction, if required, and advance to the next transaction for the next call.
+
+The rules we setup for the WAL say that if there is an invalid transaction, after that transaction there may be only:
+
+* Invalid data of any kind.
+* Transactions that are valid (have proper hash), but have a transaction id that is lower than the last valid transaction id.
+
+We validate this by scanning through the rest of the file one page at a page (transactions are always written on page boundary).
+If we find a valid (but old) transaction, we can skip its whole size to the next possible location to scan. If we find a valid transaction that has a
+transaction id that is larger than the highest valid transaction id we have, we know that there is a problem. At this point, we run into something
+that broke the chain, there is a missing transaction that we can't apply. That is a cause for alarm and will abort the recovery process with an error.
+The code for doing so is shown in Listing 10.17.
+
+[source]
+.Listing 10.17 - wal.c - Searching the WAL file for valid transactions after invalid data (indicating disk corruption)
+----
+include::./code/wal.c[tags=wal_validate_after_end_of_transactions]
+----
+<1> Get the next range to scan for transactions.
+<2> Check if the transaction is valid (verified using the hash we computed).
+<3> Move forward by one page (we cannot trust the data, so we scan one page at at time).
+<4> Check if the valid transaction is older than the last valid one.
+<5> Move to the next page following the transaction size (we trust the data, it passed the hash test, so it is not corrupted or partial).
+<6> Report the error to the caller and abort the recovery process.
+
+Such steps may seem paranoid at time, but there is a very important rule that we have is: 
+https://docs.microsoft.com/en-us/archive/blogs/larryosterman/one-in-a-million-is-next-tuesday["One in a million is next Tuesday"]. Even the 
+most unlikely of things are _bound_ to happen, and we have to write the code to handle them. This particular validation check was written when Voron
+gained the ability to reuse WAL files (Voron maintains a pool of them, in a more complex format, rather than just the two we have here). We have to 
+rely on the file system and the hardware to maintain data integrity, but we have bitten enough times to be very cautious about it. 
+
+The `wal_validate_after_end_of_transactions` uses a few utility functions that are shown in Listing 10.18, for completion's sake.
+
+[source]
+.Listing 10.18 - wal.c - Abstracting the range access across files and managing the freeing of the buffer used during recovery.
+----
+include::./code/wal.c[tags=wal_range;free_wal_recovery]
+----
+
+The final part of the recovery process is handled by `wal_complete_recovery`, where we update the database's in memory data structures. 
+This is shown in Listing 10.19.
+
+[source]
+.Listing 10.19 - wal.c - Completing the recovery process by updating the in memory state of the database.
+----
+include::./code/wal.c[tags=wal_complete_recovery]
+----
+
+The `wal_complete_recovery` manages the last few details of setting up the in memory state of the database after the WAL recover, from here
+on, it is the database that will complete its own setup. 
+
+===== Implementing checkpoint with dual WAL files
+
+The checkpoint behavior of Gavran has changed with the introduction of dual WAL files. Now, instead of waiting until we reached half the WAL
+and then checkpoint the file, we'll have a slightly more sophisticated behavior, shown in Listing 10.20.
+The `(cur_file_index + 1) & 1` in Listing 10.20 is used to refer to the _other_ WAL file, regardless of what the current one it. This basically
+implements overflow addition in the range [0,1]. 
+
+[source]
+.Listing 10.20 - wal.c - Checkpoint implementation using double buffering between the files
+----
+include::./code/wal.c[tags=wal_checkpoint]
+----
+
+The `wal_will_checkpoint` will return `true` under the following conditions. The current WAL file is over half full and the other WAL file 
+latest transaction is old enough to ensure that no one is looking at the data from it (meaning we wrote it to disk). Note that this may
+also trigger for the _current_ file, if there haven't been enough transactions to fill both WAL files before a checkpoint can occur. 
+
+The `wal_reset_file` will overwrite the first page of the WAL with an empty marker transaction, ensuring that we won't consider that to be 
+a valid transaction and will discard the whole file. And in `wal_checkpoint` we simply reset the other file and see if we can reset the 
+current file as well.
+
+[TIP]
+.Why bother resetting the WAL files early?
+====
+We are going into some trouble to allow the code to reset both WAL files. In fact, unless there are read transactions that prevent it, the
+behavior in Listing 10.20 will make sure that we have just a single WAL file in use. Why bother?
+
+Having to read through the WAL files can add significantly to the startup overhead. By being eager to clear the WAL file when we `fsync` 
+the data, we make sure that our startup times is reduced.
+====
+
+I'm currently using a fairly simplistic metric of half the WAL file being full is enough to trigger an `fsync`. Other strategies may involve
+time (say, do a checkpoint every N seconds) or size (checkpoint every 4 MB). I'm assuming that the WAL size is going to be reasonably small,
+based on actual needs. A WAL size that is 16MB in size will cause us to do a checkpoint every 8MB of WAL writes. That is likely to be a good
+number, but we'll have to wait for benchmarking to confirm it.
+
+[CAUTION]
+.What happens if we can't checkpoint?
+====
+A read transaction being open will prevent us from being able to write the data to disk. That in turn means that we can't checkpoint. New
+writes will accumulate and go to the current WAL file. We'll increase the WAL file as needed, to accommodate the requirement. Eventually,
+the read transaction will close and we'll be able to proceed with the checkpoint process. At this point, we'll also truncate the WAL files
+back to their maximum size.
+====
+
+If the WAL file is too large, we'll need to truncate it, we do that using the `palfs_truncate_file` call, shown in Listing 10.21.
+
+[source]
+.Listing 10.21 - fs.c - Truncating a file
+----
+include::./code/fs.c[tags=palfs_truncate_file]
+----
+
+I'm showing the function here as a reminder of the complexity we have to deal with when we are working with modifying the file metadata. We
+also have to `fsync` the _parent_ directory to make sure that the change "take".
+
+===== Appending to the WAL
+
+Appending to the WAL using dual WAL files didn't change all that much. We just need to be careful not to exceed the size of the file, I moved
+most of the work of preparing the transaction to `wal_prepare_txn_buffer` (diffing the pages, compressing, building the hash, etc). That allows
+us to focus solely on what `wal_append` is doing, shown in Listing 10.22. 
+
+[source]
+.Listing 10.22 - wal.c - Appending a transaction to the current WAL file
+----
+include::./code/wal.c[tags=wal_append]
+----
+
+The real work if now done in `wal_prepare_txn_buffer` and `wal_append` simply check if there is space in the current WAL file and increase the
+size if needed. It _always_ write to the current WAL file. Switching between them is the responsibility of `wal_checkpoint`. 
+
+This turned out to be a much longer chapter than expected. We have learned how to extend the size of the data file safely and how to build double
+buffering for the WAL file to handle continuously running transactions. There has been a _lot_ of changes in the code, but I think we are almost 
+done working at this layer of Gavran. We have one more chapter to go through, and then we can move on to actually using Gavran to store real data.
+
+=== Unit Tests
+
+I actually run into a problem with the unit tests here. In Chapter 5, we tested that we'll get `ENOSPC` if we allocate beyond the size limit. We 
+now have the ability to extend the file, so we actually got a test failure because of this issue. I added a `maximum_size` option to the 
+`database_option_t` structure to allow us to make such a limit. 
+
+.Why not change the test?
+****
+There are actually reasonable scenarios where you might want to have an enforced size limit. For example, assume that you have many databases
+being used, one for each user, and you want to ensure that there is some fairness in using the disk space among all of these. LevelDB, for example,
+was originally intended for use in Chrome, and there you have a size limit per website for how much you can store. That is a use case for this feature
+and it took very little code (add the field, and add a check on `db_try_increase_file_size`), so I implemented it rather than change the test.
+****
+
+
+[source,python]
+.Listing 10.23 - Unit test growing the size of the file and the WAL double buffering mode
+----
+include::../pyapi/tests10.py[]
+----
 
