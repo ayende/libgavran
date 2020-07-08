@@ -473,7 +473,7 @@ keep it that way for as long as possible. It makes my life easier.
 
 
 [source,python]
-.Listing 9.13 - Unit transaction verification and WAL compression
+.Listing 9.13 - Unit test transaction verification and WAL compression
 ----
 include::../pyapi/tests09.py[]
 ----

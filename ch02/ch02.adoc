@@ -145,17 +145,7 @@ compiler to do its magic.
 
 === Building error handling strategy
 
-Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. 
-
-
-* `errors_push` will create a new error and `errors_append_message` will add additional context to it.
-* `errors_assert_empty` can check if we were called with errors that haven't been observed yet. In this case, we immediately return an error to avoid
-  error propagation. 
-* The functions `errors_get_count`, `errors_get_codes`, `errors_get_messages` will all inspect the existing errors if you need to do something programmatically
-  to them. 
-* The function `errors_clear` marks them as observed and `errors_print_all` will print them errors to the console and clear them.
-
-On top of these, several macros and being able to rely on `defer` gives us the right behavior. The rest of the work is done mostly by macros, so let's see them in Listing 2.3.  Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
+Moving on to the error handling, we actually have a few levels inside the error handling that we need to consider. There are a few functions that you can
 use to _report_ errors:
 
 * `errors_push` will create a new error and `errors_append_message` will add additional context to it.
