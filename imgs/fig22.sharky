@@ -1,0 +1,24 @@
++---------------------------+-------------------------------------------------------------+
+|                           |                                                             |
+|  32 bytes   + 32 bytes    |                                                             |
+|             |             |    More metadata entries here                               |
+|  Metadata   | Hash        |                                                             |
+|             |             |                                                             |
+|  page entry +             |                                                             |
+|                           |                                                             |
+|                           |                                                             |
++---------------------------+-------------------------------------------------------------+
+
+      ^            ^          ^                                                        ^
+      |            |          |                                                        |
+      |            |          |                                                        |
+      |            |          |                                                        |
+      |            |          |                                                        |
+      +            +          +   Hash all the data from here, PAGE_SIZE -- 64 bytes    +
+             Hash output
+ Used as                          for metadata page entry header
+             goes here
+ keyed hash
+
+
+-

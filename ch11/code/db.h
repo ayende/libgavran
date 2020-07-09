@@ -1,6 +1,7 @@
 #pragma once
 
 #include <errno.h>
+#include <sodium.h>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -56,12 +57,23 @@ typedef struct transaction {
   txn_state_t *state;
 } txn_t;
 
-// <3>
+// tag::database_page_validation_options[]
+enum database_page_validation_options {
+  page_validation_none = 0,
+  page_validation_once = 1,
+  page_validation_always = 2
+};
+
 typedef struct database_options {
   uint64_t minimum_size;
   uint64_t maximum_size;
   uint64_t wal_size;
+  uint8_t encryption_key[crypto_aead_aes256gcm_KEYBYTES];
+  uint32_t encrypted;
+  enum database_page_validation_options page_validation;
 } database_options_t;
+
+// end::database_page_validation_options[]
 
 // <4>
 result_t db_create(const char *filename, database_options_t *options, db_t *db);

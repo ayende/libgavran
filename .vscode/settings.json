@@ -20,6 +20,9 @@
         "sstream": "c",
         "stdexcept": "c",
         "streambuf": "c",
-        "type_traits": "c"
+        "type_traits": "c",
+        "memory": "c",
+        "optional": "c",
+        "system_error": "c"
     }
 }

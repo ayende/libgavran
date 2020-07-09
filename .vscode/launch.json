@@ -26,7 +26,7 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/ch10/code/build/gavran",
+      "program": "${workspaceRoot}/ch11/code/build/gavran",
       "args": [
         "131072",
         "35225"

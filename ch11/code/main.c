@@ -10,9 +10,10 @@
 #include "platform.mem.h"
 
 // tag::data_loss[]
-static result_t data_loss() {
+static result_t data_loss(uint8_t *s) {
   db_t db;
   database_options_t options = {.minimum_size = 4 * 1024 * 1024};
+  memcpy(options.encryption_key, s, 32);
   ensure(db_create("/tmp/db/orev", &options, &db));
   defer(db_close, &db);
 
@@ -47,11 +48,12 @@ static result_t data_loss() {
 int main() {
 
   system("rm  /tmp/db/*");
-
-  if (!data_loss()) {
+  uint8_t s[32];
+  randombytes_buf(s, 32);
+  if (!data_loss(s)) {
     errors_print_all();
   }
-  if (!data_loss()) {
+  if (!data_loss(s)) {
     errors_print_all();
   }
   printf("Done\n");

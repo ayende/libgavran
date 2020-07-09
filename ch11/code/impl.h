@@ -1,3 +1,4 @@
+#include <sodium.h>
 #include <stdalign.h>
 
 #include "db.h"
@@ -48,11 +49,22 @@ struct cleanup_act {
   char state[];
 };
 
+typedef struct pages_hash_table {
+  size_t allocated_size;
+  uint32_t modified_pages;
+  uint32_t _padding;
+  page_t entries[];
+} pages_hash_table_t;
+
+result_t hash_put_new(pages_hash_table_t **table_p, page_t *page);
+bool hash_lookup(pages_hash_table_t *table, page_t *page);
+bool hash_get_next(pages_hash_table_t *table, size_t *state, page_t **page);
+result_t hash_try_add(pages_hash_table_t **table_p, uint64_t page_num);
+result_t hash_new(size_t initial_number_of_elements,
+                  pages_hash_table_t **table);
+
 struct transaction_state {
   db_state_t *db;
-  uint32_t flags;
-  uint32_t modified_pages;
-
   struct cleanup_act *on_forget;
   struct cleanup_act *on_rollback;
   db_global_state_t global_state;
@@ -61,13 +73,10 @@ struct transaction_state {
   txn_state_t *next_tx;
   uint64_t can_free_after_tx_id;
   size_t usages;
-  size_t allocated_size;
-
-  page_t entries[];
+  uint32_t flags;
+  uint32_t _padding;
+  pages_hash_table_t *pages;
 };
-
-#define get_number_of_buckets(state)                                           \
-  ((state->allocated_size - sizeof(txn_state_t)) / sizeof(page_t))
 
 // end::transaction_state[]
 
@@ -76,10 +85,7 @@ struct database_state {
   database_options_t options;
   db_global_state_t global_state;
   file_handle_t *handle;
-
-  // <1>
   wal_state_t wal_state;
-
   txn_state_t *last_write_tx;
   uint64_t active_write_tx;
   txn_state_t *default_read_tx;
@@ -119,7 +125,6 @@ void init_search(bitmap_search_state_t *search, void *bitmap, uint64_t size,
 bool search_free_range_in_bitmap(bitmap_search_state_t *search);
 // end::search_free_range_in_bitmap[]
 
-// tag::page_metadata_t[]
 enum __attribute__((__packed__)) page_type {
   page_metadata = 1,
   page_single = 2,
@@ -130,6 +135,7 @@ enum __attribute__((__packed__)) page_type {
 
 _Static_assert(sizeof(enum page_type) == 1, "Must be a single byte");
 
+// tag::page_metadata_t[]
 struct page_metadata {
   uint32_t overflow_size;
   enum page_type type;
@@ -140,14 +146,15 @@ struct page_metadata {
       file_header_t file_header;
     };
   };
-
   // these are used for AES GCM metadata for the page
   union {
+    // <1>
     struct {
-      char reserved_nonce[12];
-      char reserved_mac[16];
-    } aes_gcm_header;
-    uint8_t page_hash[32];
+      char nonce[crypto_aead_aes256gcm_NPUBBYTES];
+      char mac[crypto_aead_aes256gcm_ABYTES];
+    } aes_gcm;
+    // <2>
+    uint8_t page_hash[crypto_generichash_BYTES];
   };
 };
 
@@ -167,6 +174,11 @@ result_t txn_register_on_rollback(txn_state_t *tx, void (*action)(void *),
                                   void *state_to_copy, size_t size_of_state);
 result_t db_try_increase_file_size(txn_t *tx,
                                    uint64_t required_additional_pages);
+
+result_t txn_hash_page(page_t *page, uint8_t hash[crypto_generichash_BYTES]);
+result_t
+txn_validate_page_hash(page_t *page,
+                       uint8_t expected_hash[crypto_generichash_BYTES]);
 
 __attribute__((const)) static inline uint64_t next_power_of_two(uint64_t x) {
   return 1 << (64 - __builtin_clzll(x - 1));

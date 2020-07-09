@@ -251,6 +251,7 @@ static result_t initialize_file_structure(db_t *db) {
   // <4>
   page_metadata_t *entry = metadata_page.address;
   entry->type = page_metadata;
+  entry->overflow_size = PAGE_SIZE;
 
   ensure(initialize_freespace_bitmap(&tx, &metadata_page));
 
@@ -351,6 +352,10 @@ static result_t validate_options(database_options_t *user_options,
     owned_options->wal_size = user_options->wal_size;
   if (user_options->maximum_size)
     owned_options->maximum_size = user_options->maximum_size;
+  memcpy(owned_options->encryption_key, user_options->encryption_key,
+         crypto_aead_aes256gcm_KEYBYTES);
+  owned_options->encrypted = !sodium_is_zero(owned_options->encryption_key,
+                                             crypto_aead_aes256gcm_KEYBYTES);
 
   if (owned_options->wal_size % PAGE_SIZE) {
     failed(EINVAL, msg("The wal size must be page aligned: "),
@@ -379,10 +384,25 @@ static result_t validate_options(database_options_t *user_options,
   return success();
 }
 
+// tag::db_setup_page_validation[]
+static result_t db_setup_page_validation(db_state_t *ptr) {
+  if (ptr->options.page_validation == page_validation_once) {
+    ptr->original_number_of_pages = ptr->global_state.header.number_of_pages;
+    ptr->first_read_bitmap =
+        calloc(ptr->global_state.header.number_of_pages * PAGE_SIZE / 64,
+               sizeof(uint64_t));
+    ensure(ptr->first_read_bitmap,
+           msg("Unable to allocate database's first read bitamp"));
+  }
+  return success();
+}
+// end::db_setup_page_validation[]
+
 result_t db_create(const char *path, database_options_t *options, db_t *db) {
   database_options_t owned_options = {.minimum_size = 128 * 1024,
                                       .wal_size = 16 * 1024,
-                                      .maximum_size = UINT64_MAX};
+                                      .maximum_size = UINT64_MAX,
+                                      .page_validation = page_validation_once};
 
   db_state_t *ptr = 0;
   size_t done = 0;
@@ -400,7 +420,8 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   ptr = calloc(1, db_state_size);
   ensure(ptr, msg("Unable to allocate database state struct"),
          with(path, "%s"));
-  try_defer(free, ptr, done);
+  db->state = ptr;
+  try_defer(db_close, db, done);
 
   ptr->handle =
       (file_handle_t *)((char *)ptr + sizeof(txn_state_t) + sizeof(db_state_t));
@@ -409,7 +430,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   // <3>
   ptr->default_read_tx = (txn_state_t *)(ptr + 1);
 
-  ptr->default_read_tx->allocated_size = sizeof(txn_state_t);
+  ptr->default_read_tx->pages = 0;
   ptr->default_read_tx->db = ptr;
   // only the default read tx has this setup
   ptr->default_read_tx->flags = TX_READ | TX_COMMITED;
@@ -427,17 +448,9 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
   ensure(palfs_mmap(ptr->handle, 0, &ptr->global_state.mmap));
   try_defer(palfs_unmap, &ptr->global_state.mmap, done);
 
-  db->state = ptr;
-
   ensure(handle_newly_opened_database(db));
 
-  ptr->original_number_of_pages = ptr->global_state.header.number_of_pages;
-  ptr->first_read_bitmap =
-      calloc(ptr->global_state.header.number_of_pages * PAGE_SIZE / 64,
-             sizeof(uint64_t));
-  ensure(ptr->first_read_bitmap,
-         msg("Unable to allocate database's first read bitamp"),
-         with(path, "%s"));
+  ensure(db_setup_page_validation(ptr));
 
   done = 1; // no need to do resource cleanup
   return success();
@@ -464,7 +477,7 @@ result_t db_close(db_t *db) {
       continue; // can't free the default one
     txn_free_single_tx(cur);
   }
-
+  free(db->state->first_read_bitmap);
   free(db->state);
   db->state = 0;
 
