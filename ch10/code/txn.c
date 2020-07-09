@@ -200,6 +200,10 @@ static result_t txn_gc_tx(txn_state_t *state) {
   ensure(txn_merge_unique_pages(&merged_tx_list));
   // <5>
   ensure(txn_write_state_to_disk(merged_tx_list, /* can_checkpoint*/ true));
+
+  txn_free_single_tx(merged_tx_list);
+  merged_tx_list = 0;
+
   // <6>
   txn_try_reset_tx_chain(db, latest_unused);
   // <7>

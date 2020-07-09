@@ -483,6 +483,7 @@ result_t wal_close(db_state_t *db) {
   for (size_t i = 0; i < 2; i++) {
     failure = !palfs_unmap(&db->wal_state.files[i].map);
     failure |= !palfs_close_file(db->wal_state.files[i].handle);
+    free(db->wal_state.files[i].handle);
   }
 
   if (failure) {
