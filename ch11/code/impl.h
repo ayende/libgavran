@@ -137,6 +137,17 @@ _Static_assert(sizeof(enum page_type) == 1, "Must be a single byte");
 
 // tag::page_metadata_t[]
 struct page_metadata {
+  // these are used for AES GCM metadata for the page
+  union {
+    // <1>
+    struct {
+      uint8_t nonce[crypto_aead_aes256gcm_NPUBBYTES];
+      uint8_t mac[crypto_aead_aes256gcm_ABYTES];
+    } aes_gcm;
+    // <2>
+    uint8_t page_hash[crypto_generichash_BYTES];
+  };
+
   uint32_t overflow_size;
   enum page_type type;
   char _padding;
@@ -145,16 +156,6 @@ struct page_metadata {
     struct {
       file_header_t file_header;
     };
-  };
-  // these are used for AES GCM metadata for the page
-  union {
-    // <1>
-    struct {
-      char nonce[crypto_aead_aes256gcm_NPUBBYTES];
-      char mac[crypto_aead_aes256gcm_ABYTES];
-    } aes_gcm;
-    // <2>
-    uint8_t page_hash[crypto_generichash_BYTES];
   };
 };
 
@@ -183,3 +184,6 @@ txn_validate_page_hash(page_t *page,
 __attribute__((const)) static inline uint64_t next_power_of_two(uint64_t x) {
   return 1 << (64 - __builtin_clzll(x - 1));
 }
+
+result_t txn_decrypt(database_options_t *options, void *start, size_t size,
+                     void *dest, page_metadata_t *metadata, uint64_t page_num);

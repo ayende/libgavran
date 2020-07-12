@@ -6,10 +6,10 @@
 #include "platform.mem.h"
 
 // tag::palmem_allocate_pages[]
-result_t palmem_allocate_pages(void **p, uint32_t pages) {
+result_t palmem_allocate_pages(void **p, uint64_t pages) {
   int rc = posix_memalign(p, PAGE_SIZE, PAGE_SIZE * pages);
   if (rc) {
-    failed(rc, msg("Unable to allocate memory for page"), with(pages, "%d"));
+    failed(rc, msg("Unable to allocate memory for page"), with(pages, "%lu"));
   }
   return success();
 }

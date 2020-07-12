@@ -113,7 +113,7 @@ static void *wal_diff_page(uint64_t *restrict origin,
     void *required_write =
         current + sizeof(wal_page_diff_t) + (diff.length > 0 ? diff.length : 0);
     if (required_write >= end) {
-      memcpy(output, modified, size);
+      memcpy(output, modified, size * sizeof(uint64_t));
       return end;
     }
     memcpy(current, &diff, sizeof(wal_page_diff_t));
@@ -188,9 +188,11 @@ static result_t wal_validate_transaction(db_t *db,
                                          void *start, void *end,
                                          wal_tx_t **tx_p) {
   if (db->state->options.encrypted) {
-    ensure(wal_decrypt_tx(db, file, start, end, tx_p));
+    ensure(wal_decrypt_tx(db, file, start, end, tx_p),
+           msg("Unable to decrypt transaction"));
   } else {
-    ensure(wal_validate_transaction_hash(start, end, tx_p));
+    ensure(wal_validate_transaction_hash(start, end, tx_p),
+           msg("Unable to validate transaction hash"));
   }
   if (*tx_p)
     ensure(wal_decompress_transaction(file, *tx_p, tx_p));
@@ -264,7 +266,9 @@ static result_t wal_decompress_transaction(struct file_recovery_info *file,
     void *r = realloc(file->buffer, buffer_offset + required_size);
     ensure(r, msg("Unable to allocate memory to decompress transaction"),
            with(required_size, "%lu"));
-
+    if (in == file->buffer) { // if the tx is already in the buffer...
+      in = r;
+    }
     file->buffer = r;
     file->size = required_size + buffer_offset;
   }
@@ -317,6 +321,7 @@ static void wal_init_recover_state(db_t *db, wal_state_t *wal,
       }
     }
   }
+  errors_clear(); // errors are expected here, txs might not pass validation
   if (!tx_ids[0]) {
     state->current_recovery_file_index = 1;
     wal->current_append_file_index = 0;
@@ -407,20 +412,37 @@ enable_defer(free_wal_recovery);
 
 // tag::wal_complete_recovery[]
 static result_t wal_complete_recovery(struct wal_recovery_operation *state) {
-  page_metadata_t *first_page_metadata =
-      state->db->state->global_state.mmap.address;
-  state->db->state->global_state.header = first_page_metadata->file_header;
+
+  page_metadata_t first_page_metadata;
+  if (state->db->state->options.encrypted) {
+    void *buffer = 0;
+    ensure(palmem_allocate_pages(&buffer, 1));
+    defer(free, buffer);
+
+    ensure(txn_decrypt(
+        &state->db->state->options,
+        state->db->state->global_state.mmap.address + crypto_generichash_BYTES,
+        PAGE_SIZE - crypto_generichash_BYTES, buffer + crypto_generichash_BYTES,
+        state->db->state->global_state.mmap.address, 0));
+    memcpy(&first_page_metadata, buffer, sizeof(page_metadata_t));
+    sodium_memzero(buffer, PAGE_SIZE);
+  } else {
+    memcpy(&first_page_metadata, state->db->state->global_state.mmap.address,
+           sizeof(page_metadata_t));
+  }
+
+  state->db->state->global_state.header = first_page_metadata.file_header;
   if (state->last_recovered_tx_id == 0) { // empty db, probably
     state->db->state->global_state.header.number_of_pages =
         state->db->state->global_state.mmap.size / PAGE_SIZE;
   } else {
-    ensure(first_page_metadata->type == page_metadata,
+    ensure(first_page_metadata.type == page_metadata,
            msg("First page was not a metadata page?"));
   }
-  ensure(first_page_metadata->file_header.last_tx_id ==
+  ensure(first_page_metadata.file_header.last_tx_id ==
              state->last_recovered_tx_id,
          msg("The last recovered tx id does not match the header tx id"),
-         with(first_page_metadata->file_header.last_tx_id, "%lu"),
+         with(first_page_metadata.file_header.last_tx_id, "%lu"),
          with(state->last_recovered_tx_id, "%lu"));
 
   state->db->state->default_read_tx->global_state =
@@ -474,6 +496,7 @@ static result_t wal_recover_tx(db_t *db, wal_tx_t *tx,
                               : tx->tx_size;
       input = wal_apply_diff(input, (void *)tx + end_offset, &modified_page);
     } else {
+
       memcpy(modified_page.address, input, modified_page.overflow_size);
       input += modified_page.overflow_size;
     }
@@ -596,6 +619,7 @@ static void *wal_setup_transaction_data(txn_state_t *tx, wal_tx_t *wt,
     wt->pages[index].flags = (size == (size_t)(end - output))
                                  ? wal_tx_page_flags_none
                                  : wal_tx_page_flags_diff;
+
     output = end;
     index++;
   }
@@ -666,7 +690,7 @@ static result_t wal_decrypt_tx(db_t *db, struct file_recovery_info *file,
   }
   file->used = maybe_tx->page_aligned_tx_size;
 
-  void *encrypted_start = &maybe_tx->number_of_modified_pages;
+  void *encrypted_start = &maybe_tx->tx_size;
   uint64_t diff = (uint64_t)(encrypted_start - start);
   if (crypto_aead_aes256gcm_decrypt_detached(
           file->buffer + diff, 0, encrypted_start,
@@ -689,7 +713,7 @@ static result_t wal_encrypt_tx(db_state_t *db, wal_tx_t *wt) {
     failed(EINVAL, msg("Unable to generate transaction key"));
   }
 
-  uint8_t *encryption_start = (uint8_t *)&wt->number_of_modified_pages;
+  uint8_t *encryption_start = (uint8_t *)&wt->tx_size;
   uint64_t diff = (uint64_t)(encryption_start - (uint8_t *)wt);
   if (crypto_aead_aes256gcm_encrypt_detached(encryption_start, wt->aes_gcm.mac,
                                              0, encryption_start,

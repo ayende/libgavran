@@ -47,6 +47,7 @@ typedef struct __attribute__((__packed__)) file_header {
 // <1>
 typedef struct database_state db_state_t;
 typedef struct transaction_state txn_state_t;
+typedef struct pages_hash_table pages_hash_table_t;
 
 // <2>
 typedef struct database {
@@ -55,6 +56,7 @@ typedef struct database {
 
 typedef struct transaction {
   txn_state_t *state;
+  pages_hash_table_t *working_set;
 } txn_t;
 
 // tag::database_page_validation_options[]

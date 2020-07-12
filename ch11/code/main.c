@@ -53,6 +53,7 @@ int main() {
   if (!data_loss(s)) {
     errors_print_all();
   }
+  //  randombytes_buf(s, 32);
   if (!data_loss(s)) {
     errors_print_all();
   }

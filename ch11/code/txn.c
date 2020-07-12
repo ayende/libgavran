@@ -31,10 +31,52 @@ result_t txn_hash_page(page_t *page, uint8_t hash[crypto_generichash_BYTES]) {
   }
   return success();
 }
+
+static const char TxnKeyCtx[8] = "TxnPages";
+
+static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num, void *start,
+                                 size_t size, page_metadata_t *metadata) {
+  uint8_t subkey[crypto_aead_aes256gcm_KEYBYTES];
+  if (crypto_kdf_derive_from_key(subkey, crypto_aead_aes256gcm_KEYBYTES,
+                                 page_num, TxnKeyCtx,
+                                 tx->state->db->options.encryption_key)) {
+    failed(EINVAL, msg("Unable to derive key for page decryption"),
+           with(page_num, "%ld"));
+  }
+  if (sodium_is_zero(metadata->aes_gcm.nonce,
+                     crypto_aead_aes256gcm_NPUBBYTES)) {
+    randombytes_buf(metadata->aes_gcm.nonce, crypto_aead_aes256gcm_NPUBBYTES);
+  } else {
+    sodium_increment(metadata->aes_gcm.nonce, crypto_aead_aes256gcm_NPUBBYTES);
+  }
+
+  if (crypto_aead_aes256gcm_encrypt_detached(start, metadata->aes_gcm.mac, 0,
+                                             start, size, 0, 0, 0,
+                                             metadata->aes_gcm.nonce, subkey)) {
+    failed(EINVAL, msg("Unable to encrypt page"), with(page_num, "%ld"));
+  }
+  return success();
+}
+
+static result_t txn_close_page_on_tx_end(txn_t *tx, page_t *page,
+                                         page_metadata_t *metadata) {
+  if (tx->state->db->options.encrypted) {
+    if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
+      return txn_encrypt_page(tx, page->page_num,
+                              page->address + crypto_generichash_BYTES,
+                              PAGE_SIZE - crypto_generichash_BYTES, metadata);
+    }
+    return txn_encrypt_page(tx, page->page_num, page->address,
+                            size_to_pages(metadata->overflow_size) * PAGE_SIZE,
+                            metadata);
+  } else {
+    return txn_hash_page(page, metadata->page_hash);
+  }
+}
 // end::txn_hash_page[]
 
 // tag::txn_hash_pages[]
-static result_t txn_hash_pages(txn_t *tx) {
+static result_t txn_finalize_modified_pages(txn_t *tx) {
   txn_state_t *state = tx->state;
   // <1>
   page_t *modified_pages = calloc(state->pages->modified_pages, sizeof(page_t));
@@ -58,7 +100,7 @@ static result_t txn_hash_pages(txn_t *tx) {
       // we handle metadata page separately, metadata pages *must* be modified
       continue;
 
-    ensure(txn_hash_page(&modified_pages[i], metadata->page_hash));
+    ensure(txn_close_page_on_tx_end(tx, &modified_pages[i], metadata));
   }
   // <4>
   iter_state = 0;
@@ -66,7 +108,8 @@ static result_t txn_hash_pages(txn_t *tx) {
     if ((current->page_num & PAGES_IN_METADATA_MASK) != current->page_num)
       continue; // not a metadata page
     page_metadata_t *entries = current->address;
-    ensure(txn_hash_page(current, entries->page_hash));
+
+    ensure(txn_close_page_on_tx_end(tx, current, entries));
   }
   return success();
 }
@@ -85,7 +128,7 @@ result_t txn_commit(txn_t *tx) {
   first_metadata->file_header.last_tx_id =
       tx->state->global_state.header.last_tx_id;
 
-  ensure(txn_hash_pages(tx));
+  ensure(txn_finalize_modified_pages(tx));
 
   ensure(wal_append(tx->state));
 
@@ -246,6 +289,18 @@ result_t txn_close(txn_t *tx) {
     state->db->active_write_tx = 0;
   }
 
+  if (tx->working_set) {
+    size_t iter_state = 0;
+    page_t *p;
+    while (hash_get_next(tx->working_set, &iter_state, &p)) {
+      if (state->db->options.encrypted) {
+        sodium_memzero(p->address, size_to_pages(p->overflow_size) * PAGE_SIZE);
+      }
+      free(p->address);
+    }
+    free(tx->working_set);
+  }
+
   // tag::txn_close_rollback[]
   // we have a rollback, no need to keep the memory
   if (!(state->flags & TX_COMMITED)) {
@@ -285,6 +340,12 @@ result_t txn_close(txn_t *tx) {
 // tag::txn_create[]
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   errors_assert_empty();
+  if (db->state->options.encrypted) {
+    ensure(hash_new(8, &tx->working_set));
+  } else {
+    tx->working_set = 0;
+  }
+
   // <3>
   if (flags == TX_READ) {
     tx->state = db->state->last_write_tx;
@@ -428,23 +489,86 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
 // end::txn_ensure_page_is_valid[]
 
 // tag::txn_get_page[]
+
+result_t txn_decrypt(database_options_t *options, void *start, size_t size,
+                     void *dest, page_metadata_t *metadata, uint64_t page_num) {
+  uint8_t subkey[crypto_aead_aes256gcm_KEYBYTES];
+
+  if (crypto_kdf_derive_from_key(subkey, crypto_aead_aes256gcm_KEYBYTES,
+                                 page_num, TxnKeyCtx,
+                                 options->encryption_key)) {
+    failed(EINVAL, msg("Unable to derive key for page decryption"),
+           with(page_num, "%ld"));
+  }
+
+  if (crypto_aead_aes256gcm_decrypt_detached(dest, 0, start, size,
+                                             metadata->aes_gcm.mac, 0, 0,
+                                             metadata->aes_gcm.nonce, subkey)) {
+    if (!sodium_is_zero(start, size)) {
+      failed(EINVAL, msg("Unable to decrypt page"), with(page_num, "%ld"));
+    }
+    memset(dest, 0, size);
+  }
+
+  return success();
+}
+
+static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
+  void *buffer;
+  size_t number_of_pages = MAX(1, size_to_pages(page->overflow_size));
+  ensure(palmem_allocate_pages(&buffer, number_of_pages));
+  size_t cancel_defer = 0;
+  try_defer(free, buffer, cancel_defer);
+
+  if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
+
+    ensure(txn_decrypt(
+        &tx->state->db->options, page->address + crypto_generichash_BYTES,
+        PAGE_SIZE - crypto_generichash_BYTES, buffer + crypto_generichash_BYTES,
+        page->address, page->page_num));
+    memcpy(buffer, page->address, crypto_generichash_BYTES);
+  } else {
+    page_metadata_t *metadata;
+    ensure(txn_get_metadata(tx, page->page_num, &metadata));
+    ensure(txn_decrypt(&tx->state->db->options, page->address,
+                       number_of_pages * PAGE_SIZE, buffer, metadata,
+                       page->page_num));
+  }
+
+  page->address = buffer;
+  ensure(hash_put_new(&tx->working_set, page));
+  cancel_defer = 1;
+  return success();
+}
+
 result_t txn_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
-  txn_state_t *cur = tx->state;
-  // <1>
-  while (cur) {
-    if (hash_lookup(cur->pages, page)) {
-      return success();
-    }
-    cur = cur->prev_tx;
+  if (hash_lookup(tx->state->pages, page))
+    return success();
+
+  if (hash_lookup(tx->working_set, page)) {
+    return success();
   }
 
-  ensure(pages_get(&tx->state->global_state, page));
+  txn_state_t *prev = tx->state->prev_tx;
+  while (prev) {
+    if (hash_lookup(prev->pages, page)) {
+      break;
+    }
+    prev = prev->prev_tx;
+  }
 
-  ensure(set_page_overflow_size(tx, page));
+  if (!page->address)
+    ensure(pages_get(&tx->state->global_state, page));
 
-  ensure(txn_ensure_page_is_valid(tx, page));
+  if (tx->state->db->options.encrypted) {
+    ensure(txn_decrypt_page(tx, page));
+  } else {
+    ensure(set_page_overflow_size(tx, page));
+
+    ensure(txn_ensure_page_is_valid(tx, page));
+  }
 
   return success();
 }
@@ -453,7 +577,6 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
 // tag::txn_modify_page[]
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
-  // <1>
   ensure(tx->state->flags & TX_WRITE,
          msg("Read transactions cannot modify the pages"),
          with(tx->state->flags, "%d"));
@@ -463,31 +586,18 @@ result_t txn_modify_page(txn_t *tx, page_t *page) {
          with(tx->state->global_state.header.number_of_pages, "%lu"),
          with(page->page_num, "%lu"));
 
-  // <2>
   if (hash_lookup(tx->state->pages, page)) {
     return success();
   }
 
-  // <3>
   page_t original = {.page_num = page->page_num};
-  txn_state_t *cur = tx->state->prev_tx;
-  while (cur) {
-    if (hash_lookup(cur->pages, &original)) {
-      break;
-    }
-    cur = cur->prev_tx;
+  ensure(txn_get_page(tx, &original));
+  if (!original.overflow_size) {
+    original.overflow_size = page->overflow_size;
   }
+  if (!original.overflow_size)
+    original.overflow_size = PAGE_SIZE;
 
-  // <4>
-  if (!original.address) {
-    ensure(pages_get(&tx->state->global_state, &original));
-    ensure(set_page_overflow_size(tx, &original));
-    ensure(txn_ensure_page_is_valid(tx, &original));
-    if (!original.overflow_size)
-      original.overflow_size = PAGE_SIZE;
-  }
-
-  // <5>
   uint32_t pages = original.overflow_size / PAGE_SIZE +
                    (original.overflow_size % PAGE_SIZE ? 1 : 0);
 
