@@ -188,7 +188,7 @@ The actual validation function is `txn_ensure_page_is_valid`, which is called fr
 [source]
 .Listing 11.7- txn.c - Validating that a page match its expected hash
 ----
-include::./code/txn.c[tags=db_setup_page_validation]
+include::./code/txn.c[tags=txn_ensure_page_is_valid]
 ----
 <1> Check if we even need to do validation
 <2> If the validation mode is `page_validation_once`, check if the database was initialized, the page we are checking wasn't created during this run (so wasn't on disk when we started)
@@ -469,11 +469,21 @@ the underlying primitives are okay and see how we can ensure that the behavior w
 [source]
 .Listing 11.14 - test.c - Unit tests for cryptographic hashing
 ----
-include::./code/test.c[tags=cyrpto_hash]
+include::./code/test.c[tags=crypto_hash]
 ----
 
 The first test tests that we can start the database. This serves to validate that the startup routine can handle the validation of hashing, more than anything
 else. And yes, it failed (a lot) while I was building it. 
+
+.Some notes on performance
+====
+I have chosen to implement decryption of pages on a per transaction basis. In other words, each transaction is going to have to decrypt the data independently. That gives us 
+the maximum safety guarantees, but also means that we have to pay the decryption cost all the time. Another way would be to have a cache of decrypted pages, which we can check
+before we have to decrypt.
+
+Most workloads have a shared set of pages that are routinely touched, so such a cache is likely to get really good hit ratios. Building such a cache, however, it pretty complex.
+Especially when we need to consider security implications of holding potentially a lot of data in decrypted form. 
+====
 
 The second test is more interesting, we are intentionally corrupting the data, by writing `1` into a location in the page directly. We are then trying to access the page and expect
 to fail, because it didn't pass validation. Note that I'm having to restart the db between inserting the corruption because we'll not check pages that were modified in the same run

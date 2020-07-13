@@ -1,0 +1,29 @@
+== Supporting 32 bits and > 256 TB databases
+
+Gavran is using memory mapped files for read I/O. In other words, it will map the entire data file by default and access the memory directly. 
+This strategy has a number of advantages, it is simple to implement, it has really good performance and it allows us to lean on the operating system page cache for a lot of really complex issues.
+I mentioned before the https://queue.acm.org/detail.cfm?id=1814327[You're Doing It Wrong] article in favor on leaning heavily on the operating system for such tasks, because the OS has much 
+greater visibility into what is going on and literally decades of research into optimizing access patterns, write behind, etc. 
+
+I want to also point out to the https://www.sublimetext.com/blog/articles/use-mmap-with-care[Use mmap with care] post from Sublime, which shows some of the downsides of using memory mapped I/O. There are two
+such limitations that I want to talk about here. How to support databases that are greater than 2 GB on 32 bits and how to support databases that are larger than 256 TB.
+Surprisingly, both issues actually boil down to the same problem. When we rely on the virtual memory for I/O, we have to live with its limitation. On 32 bits, the maximum virtual memory per process is
+2 GB (with special flags, you can get to 3GB). Given that the application probably needs some memory of its own, it is actually unlikely to be able to map a 1GB range in a 32 bits application.
+And while we _call_ it 64 bits address space, in practice, for both x86-64 and ARM64 use only 48 bits. That means that the maximum virtual memory for a process in a 64 bits machine is just 256TB.
+
+Granted, you can't _get_ a 256TB disk. You can't even get such a disk on the cloud, at the time of writing, they max out at 16TB. Amusingly enough, you can get a machine with 24TB of _RAM_, but not 
+24TB of disk. In other words, this is mostly a theoretical limit, but it turns out that solving the problem for 32 bits also handle the 256TB issue. 
+
+[CAUTION]
+.What about the issue of mmap over network drive?
+====
+In the Sublime post, they mention running into issue with mmap over files in a network drive. In particular, what happens when you `mmap`-ed a file, but the network goes away. Any load or save 
+from the file is then going to be turned into a page fault. You can _handle_ that, using signals on Posix or SEH on Windows, but that is awkward and hard. Given common usage option for Gavran,
+I'm going to handle this by noting that: You should not be doing that.
+
+That said, what I expect to happen from Gavran's perspective is to crash and restart, in which point we'll discover that we can't map the file because it inaccessible. It is _fine_ to crash,
+we are running a transactional system here and there can't be any data loss.
+====
+
+One of the side affects of the work we have done in the previous chapter is that we can no longer just access the memory from the map at will. It may be encrypted, after all, so all accesses
+to the data file must go through the transaction. It turns out that this is a really important feature for implementing 32 bits mode.
