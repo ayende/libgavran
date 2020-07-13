@@ -159,6 +159,8 @@ struct page_metadata {
   };
 };
 
+#define PAGE_METADATA_CRYPTO_HEADER_SIZE 32
+
 _Static_assert(sizeof(page_metadata_t) == 64,
                "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]

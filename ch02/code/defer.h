@@ -29,13 +29,13 @@ static inline void defer_free_p(struct cancel_defer* cd) {
 
 // <3>
 #define try_defer(func, var, cancel_marker)                  \
-  struct cancel_defer CONCAT(__DEFER__, __LINE__)            \
+  struct cancel_defer CONCAT(defer_, __COUNTER__)            \
       __attribute__((unused, __cleanup__(defer_##func))) = { \
           .target = var, .cancelled = &cancel_marker};
 
 // <4>
 #define defer(func, var)                                         \
-  struct cancel_defer CONCAT(__DEFER__, __LINE__) __attribute__( \
+  struct cancel_defer CONCAT(defer_, __COUNTER__) __attribute__( \
       (unused, __cleanup__(defer_##func))) = {.target = var};
 
 // <5>

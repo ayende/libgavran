@@ -442,7 +442,7 @@ result_t db_create(const char *path, database_options_t *options, db_t *db) {
          with(path, "%s"));
   try_defer(palfs_close_file, ptr->handle, done);
 
-  ensure(palfs_set_file_minsize(ptr->handle, options->minimum_size));
+  ensure(palfs_set_file_minsize(ptr->handle, owned_options.minimum_size));
 
   ensure(palfs_get_filesize(ptr->handle, &ptr->global_state.mmap.size));
   ensure(palfs_mmap(ptr->handle, 0, &ptr->global_state.mmap));

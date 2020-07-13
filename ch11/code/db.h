@@ -54,10 +54,12 @@ typedef struct database {
   db_state_t *state;
 } db_t;
 
+// tag::txn_t[]
 typedef struct transaction {
   txn_state_t *state;
   pages_hash_table_t *working_set;
 } txn_t;
+// end::txn_t[]
 
 // tag::database_page_validation_options[]
 enum database_page_validation_options {

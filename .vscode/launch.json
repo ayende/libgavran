@@ -27,10 +27,6 @@
       "type": "cppdbg",
       "request": "launch",
       "program": "${workspaceRoot}/ch11/code/build/gavran",
-      "args": [
-        "131072",
-        "35225"
-      ],
       "sourceFileMap": {
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },

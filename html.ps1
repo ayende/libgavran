@@ -1,9 +1,9 @@
-asciidoctor-pdf -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\output\book.pdf
+asciidoctor -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\output\book.html
 # SIG # Begin signature block
 # MIIEOQYJKoZIhvcNAQcCoIIEKjCCBCYCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU/n8QdAwAsP82xQJ62tOAbD+D
-# kcWgggJDMIICPzCCAaygAwIBAgIQrX6yGm7uxr9G2+CZjNNEiDAJBgUrDgMCHQUA
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU3IkrqdZIIHOBvz06kwDUil/B
+# kxKgggJDMIICPzCCAaygAwIBAgIQrX6yGm7uxr9G2+CZjNNEiDAJBgUrDgMCHQUA
 # MCwxKjAoBgNVBAMTIVBvd2VyU2hlbGwgTG9jYWwgQ2VydGlmaWNhdGUgUm9vdDAe
 # Fw0yMDA3MTIxMzA3MTBaFw0zOTEyMzEyMzU5NTlaMCAxHjAcBgNVBAMTFUF5ZW5k
 # ZSBQb3dlclNoZWxsIENTQzCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA+i1G
@@ -19,8 +19,8 @@ asciidoctor-pdf -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\ou
 # Y2FsIENlcnRpZmljYXRlIFJvb3QCEK1+shpu7sa/RtvgmYzTRIgwCQYFKw4DAhoF
 # AKB4MBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisG
 # AQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcN
-# AQkEMRYEFGQMHFJkQ++zNPT1G6qyE+wHtBRDMA0GCSqGSIb3DQEBAQUABIGAMJJQ
-# 25V626JDVYlcxTaX7Hs0f57yXkX3FvUX3xnPb7YwziGkDl1S+8NUEAFOA2/KD0/b
-# ABjQnmaX9nEXKNSDPOGaT1g/HSQIyb3iOQ1bVWIZc27EXiI1oRHX7mGj1aLUBJ/Z
-# 91Hd5UB1wNvW0CyQTWJzuaNCK41VJv4tV1N99Fk=
+# AQkEMRYEFNiTwHnmWO6kvVcDmOi6OMUm4kJXMA0GCSqGSIb3DQEBAQUABIGAiWGI
+# IcnUrVV08H+DPcmiKXJ7zrIiQA9bN6osxZypGrmyC1MMRdz/InICf6O53I2G9OIL
+# j1j2yNrG7obDiRrtCZo7cXWm2zAT6kgMoeW+0uE76i2oU3zwV8L1uxn/kDUJXE6+
+# 0tlcmNwgeNnWftkYK5a0alSOwC7y8OQoAbuD4yQ=
 # SIG # End signature block

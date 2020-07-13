@@ -20,9 +20,9 @@ INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments -Wno-pointer-arith -Wno-reserved-id-macro
 DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
-CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN)
+CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN) -fblocks
 
-LDFLAGS = -lm -lsodium -lzstd #-shared
+LDFLAGS = -lm -lsodium -lzstd -lncurses -lBlocksRuntime #-shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@.so $(LDFLAGS) -shared

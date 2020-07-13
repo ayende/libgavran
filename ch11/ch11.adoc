@@ -35,34 +35,42 @@ include::./code/impl.h[tags=page_metadata_t]
 <2> Used to hold the hash of a page, using Blake2B, the size of the `page_hash` is 32 bytes.
 
 The idea is that we'll hash each page when we commit the transaction and then we'll validate them on read. Let's look at what we need to do in order to hash the pages. There is one location
-that we can do this on, the `txn_commit` function. I added a call to `txn_hash_pages` just before we call `wal_append`. At this point, there are no more changes possible in the transaction
-and we can compute the hash for the pages. This is shown in Listing 11.2.
+that we can do this on, the `txn_commit` function. I added a call to `txn_finalize_modified_pages` just before we call `wal_append`. At this point, there are no more changes possible in the
+transaction and we can operate over the final state of the pages. Such as compute the hash for the modified pages. This is shown in Listing 11.2.
 
 [source]
-.Listing 11.2 - txn.c - Compute cryptographic hash for each of the pages in the transaction
+.Listing 11.2 - txn.c - Compute the final state of each of the pages in the transaction
 ----
-include::./code/txn.c[tags=txn_hash_pages]
+include::./code/txn.c[tags=txn_finalize_modified_pages]
 ----
 <1> Allocate a buffer to hold all the modified pages, we are going to be modifying (metadata) pages while we are computing the hashes, so we can't iterate over the hash directly.
 <2> Copy the modified page numbers to a stable location, which won't change as we call `txn_modify_metadata` on the values.
-<3> Call `txn_modify_metadata` on each of the modified pages, but compute the hash of only the pages that aren't metadata pages.
-<4> Compute the hash on all the metadata pages in the transaction.
+<3> Call `txn_modify_metadata` on each of the modified pages, but finalize only the pages that aren't metadata pages.
+<4> Finalize all the metadata pages in the transaction.
 
-There are a few interesting things going on in `txn_hash_pages`. We iterate over all the modified pages in the transaction, but we can't use the hash table directly for that. The problem 
-is that we need to modify the metadata of pages (because that is where we'll store the hash). Modifying the metadata page may change the hash table that holds the modified pages, so we
+There are a few interesting things going on in `txn_finalize_modified_pages`. We iterate over all the modified pages in the transaction, but we can't use the transaction hash table directly for that.
+The problem is that we need to modify the metadata of pages (because that is where we'll store the hash). Modifying the metadata page may change the hash table that holds the modified pages, so we
 can't simply iterate on it. Instead, we allocate a buffer to hold the modified pages and copy the values from the hash table to the `modified_pages` buffer.
+
+[TIP]
+.What is this page finalization?
+====
+We are going to use roughly the same structure both for hashing and encryption of pages. From my perspective page finalization is when we operate on the final state of the pages, readying
+them to be persisted. That can be computing a cryptographic hash or encrypting the data. 
+====
 
 The next step is to run through the `modified_pages` and call `txn_modify_metadata` on each one of them. We have a separate process for metadata pages than normal pages, but we must call
 `txn_modify_metadata` on all the pages that are in the transaction. A metadata page may or may not have been modified by the transaction, but by calling `txn_modify_metadata` on all the 
 pages, we ensure that all the metadata pages that are relevant to the transaction are going to be in the transaction's modified pages hash table.
 
-We call `txn_hash_page` on all the non metadata pages, but why do we need to treat the metadata pages differently? Normal pages have their hash stored in the metadata page, but for metadata
+We call `tx_finalize_page` on all the non metadata pages, but why do we need to treat the metadata pages differently? Normal pages have their hash stored in the metadata page, but for metadata
 pages, the hash is stored _inside_ the page itself. Another issue is that as we are running through the pages, we update their metadata pages, so we must process the metadata pages after
 we have finished processing all of the regular pages.
 
-The last loop in `txn_hash_pages` iterate over the hash table again, why not use the `modified_pages` in this case? Because we may have _new_ modified metadata pages that were added to the
+The last loop in `txn_finalize_modified_pages` iterate over the hash table again, why not use the `modified_pages` in this case? Because we may have _new_ modified metadata pages that were added to the
 hash table because of the call to `txn_modify_metadata`. We handle metadata hashing in a slightly differently than the way we handle normal pages, let's look at 
-Listing 11.3 to see the details of how this works.
+Listing 11.3 to see the details of how this works. I'm jumping directly to `txn_hash_page`, which is called from `tx_finalize_page`, for now. We'll look at `tx_finalize_page` when we discuss
+encryption, at the moment, it simply calls to `txn_hash_page(page, metadata\->page_hash);`.  
 
 [source]
 .Listing 11.3 - txn.c - Hashing of a single page or metadata page
@@ -77,12 +85,18 @@ The only interesting thing here is that we are playing with how to do hashing fo
 image::{img-src}/fig22.png[]
 
 We can't hash the whole metadata page, because the `page_hash` for the metadata page actually resides in the metadata page. Instead, we use a small trick. The metadata entry for the 
-metadata page itself is always the first item in the metadata page, and we know that its size is 64 bytes. The `page_hash` for the metadata page will then sit on byte positions 32 - 63
-in the metadata page. Running the hash on the byte range 64 - 8192 would means that we could detect any changes in the page, but not in the first 32 bytes. 
+metadata page itself is always the first item in the metadata page, and we make sure that the `page_hash` is the first thing in the `page_metadata_t`. That means that we can hash the
+metadata page from byte 32 to 8192, placing the hash in the first 32 bytes. That allows us to use a single call to hash the entire page, leaving just the hash prefix.
 
-We can use a more complex hashing scheme, as we have done in Listing 9.1, but we don't have to. Given that we need to include the first 32 bytes of the metadata page in the hash, we 
-can simply use these as a _keyed_ hash. In order to produce the same output, both the first 32 bytes and the other 8,128 bytes would have to be the same. That is the only thing that 
-we actually care about, and it reduce the amount of code we have to write significantly.
+We can use a more complex hashing scheme, as we have done in Listing 9.1, if we wanted to place the hash of the page in another location, but this makes things easier all around and we
+don't really care where the hash is in the metadata entry. The data we need for encryption share the same space as the `page_hash`, and having it as the prefix for the page is also much
+nicer in terms of the API usage.
+
+.What about freed pages?
+====
+A freed page is one that was modified and then freed. From the point of view of the WAL and the lowest levels of Gavran, there is no different between a freed page and a modified
+one. A freed page is simply one that has its free space bitmap cleared and its value was set to zeroes. As such, it will have a _valid_ hash for a zeroed buffer.
+====
 
 We are computing the hashes for all of the modified pages before we write them to the WAL, which means that the hash changes will get to the WAL as everything does. I love this approach
 because it is simply layering behaviors on top of existing behaviors, in orthogonal manner. 
@@ -101,22 +115,10 @@ all those modified pages and validate their hashes. You can see how that works i
 ----
 include::./code/wal.c[tags=wal_validate_recovered_pages]
 ----
-<1> Hash the page into a local buffer.
-<2> Compare the expected hash with the actual hash, if they are identical, we are done.
-<3> If they _aren't_ identical, we need to check if the expected has is all zeroes and that the page is also all zeroes.
-<4> We tried everything, but there is a discrepancy between the actual hash and the expected hash, report the error.
 
-.What about freed pages?
-====
-A freed page is one that was modified and then freed. From the point of view of the WAL and the lowest levels of Gavran, there is no different between a freed page and a modified
-one. A freed page is simply one that has its free space bitmap cleared and its value was set to zeroes. As such, it will have a _valid_ hash for a zeroed buffer.
-====
-
-The actual validation is done by `txn_validate_page_hash`, which gets the page to validate and the expected hash for the page. You can see that the actual hashing is done by 
-`txn_hash_page`, but there is a lot more work to be done in this function. Aside from actual data corruption, we may have a case of hash mismatch if the page is empty and the
-expected hash for the page is zeroed. That indicates that this is a page that was never touched. 
-
-With these changes, we now validate, using a cryptographic hash, that the data recovered from the WAL is the data that we meant to write to it. 
+There is nothing really there. We are creating a transaction and calling `txn_get_page` for each of the pages that were modified in the WAL recovery. How does this help us? 
+The actual validation is done by at the transaction level , which gets the page to validate and the expected hash for the page. We are not going to validate the data just after
+WAL recovery, we need to do that for pages that weren't modified by the WAL. We are simply going to reuse the same functionality to do the validation explicitly.
 
 [TIP]
 .Cryptographic hashing also helps catch bugs
@@ -132,7 +134,8 @@ your work as you change things in very useful.
 
 === Verifying the data on disk
 
-Is it enough to validate the page modifications on recover? You might want to take things further. Listing 11.5 shows the options we have on the table.
+Validating on recover is great, to ensure that the _recovery_ process worked. But as we saw in the beginning of this chapter, we are highly suspicious of the disk in general. That means
+that we want to do better than just check the recently modified pages. Listing 11.5 shows the options we have on the table.
 
 [source]
 .Listing 11.5 - db.h - Additional configuration options for the database
@@ -142,11 +145,11 @@ include::./code/db.h[tags=database_page_validation_options]
 
 I've added a new `enum database_page_validation_options` option that we can use to control how often we'll validate the hashes on the pages. Here are what the options mean:
 
-* `page_validation_none` - Only do validation of the pages that were modified during WAL recovery. Don't validate the pages beyond this.
-* `page_validation_once` - Validate each page the first time that we read it from disk, but not afterward. This one will be the new default.
+* `page_validation_none` - Don't validate the pages at all. 
+* `page_validation_once` - **Default**: Validate each page the first time that we read it from disk, but not afterward. 
 * `page_validation_always` - Validate each time the page is read.
 
-The first option, `page_validation_none`, is what we have right now. We wrote the code for validating the WAL changes, but nothing else. For `page_validation_once`, the situation
+The first option, `page_validation_none`, is what we have right now, where we don't have any code for doing the actual validation. For `page_validation_once`, the situation
 is more interesting. We need to track what pages we already validated. I decided to use the simplest possible approach and define a bitmap of checked pages. To handle that I
 added a couple of fields to the `db_state_t` structure:
 
@@ -163,7 +166,8 @@ include::./code/db.c[tags=db_setup_page_validation]
 
 The idea is simple, with `page_validation_once`, we want to validate a page on the first time we read it from disk. Once it is read, we assume that it is fine and won't validate it 
 again. We only need to validate the pages that are on disk when we start up, not ones that we added during the run of the database. That simplify things greatly because we don't need
-to modify the size of the bitmap. 
+to modify the size of the bitmap. During the WAL validation, we simply read the pages that we wrote to the data file using the normal `txn_get_page` and validate the pages as a side
+affect.
 
 [CAUTION]
 .What is the logic behind validating only once?
@@ -179,7 +183,7 @@ At some point, we have to admit that we got to trust the hardware, if only a lit
 ignorance. 
 ====
 
-The actual validation function is `txn_ensure_page_is_valid`, which is called from `txn_modify_page` and `txn_get_page`. Listing 11.7 shows how it is implemented.
+The actual validation function is `txn_ensure_page_is_valid`, which is called from `txn_get_page`. Listing 11.7 shows how it is implemented.
 
 [source]
 .Listing 11.7- txn.c - Validating that a page match its expected hash
@@ -198,17 +202,24 @@ detect and alert on the issue. In fact, we have quite a lot of hashing going on:
 * Hashing of the transaction buffers, which ensure that we can detect invalid transaction on disk. 
 * Hashing of the pages during transaction commit, which is then validated:
 ** After WAL recovery.
-** During normal operations, on first read from disk (or in each transaction, depending on your configuration).
+** During normal operations, on first read from disk (or on each transaction, depending on your configuration).
 
 Now that we have hashing worked out, I want to look at another cryptographic feature, encryption of the data.
 
 === Encrypting the data on disk
 
-You might have noticed in Listing 11.5 that we now have a `encryption_key` field on the `database_options_t` struct. If this is set to a not null value, we will encrypt the on disk.
+Hashing the data to ensure that it wasn't changed behind our back is one level of safety that we can offer. Another is to ensure that no one can _read_ our data unless they have the
+proper keys. We are going to implement encryption in Gavran, which will allow us to transparently encrypt and encrypt data, so no plain text is ever saved to disk. We are going to be
+using `Sodium`, a well known cryptographic library for this purpose.
+
+We have already made use of it using the `crypto_generichash()`, but I want to call it explicitly now that we are relying on its cryptographic properties. It is a well thought off 
+library and has gone through several reviews. I'm going to implement encryption on Gavran, but I want to emphasis that the implementation hasn't been through proper security audit 
+and that I'm taking some shortcuts to make my life easier. They shouldn't make any distinction in the security properties of the system, but I wanted to call it out explicitly. If
+you care about the encryption feature, you might want to get a proper cryptographer to review it. 
 
 .Transparent data encryption
 ====
-We are going to implement a feature called TDE (transparent data encryption). In this model, the data is _always_ encrypted. On disk an in memory, for the WAL and for the data file.
+We are going to implement a feature called TDE (transparent data encryption). In this model, the data is _always_ encrypted. On disk and in memory, for the WAL and for the data file.
 The only time that we hold the data in its decrypted form is when we have an active transaction that to hold it. From the point of view of the higher level APIs, there it no change
 in the behavior of the system, it can work with the data as usual.
 
@@ -218,4 +229,264 @@ data. This is an algorithm with 256 bits key and very high degree of security.
 That said, note that the security of the system is dependent on the _whole_ system. How you store the key, for example, is quite important, but it is out of scope for Gavran.
 ====
 
-The first step we'll take is to encrypt the data that goes into the WAL. This is easiest because we have a well defined point in which we can do so.
+Before I can get into the guts of the encryption implementation, I want to talk a bit about how encryption is used. This is _not_ a premiere on encryption. I _would_ recommend that you'll
+read some. The https://www.amazon.com/dp/1593278268/[Serious Cryptography: A Practical Introduction to Modern Encryption] is a great introduction to cryptography and contains a lot of
+background information. The https://libsodium.gitbook.io/[Libsodium documentation] is another excellent resource for more practical advice. Don't roll your own cryptography, please.
+Another good resource is https://paragonie.com/blog/2015/08/you-wouldnt-base64-a-password-cryptography-decoded[You Wouldn't Base64 a Password - Cryptography Decoded] blog post from
+Paragon Initiative, which have _great_ materials covering cryptography. I would recommend perusing their blog in general, highly interesting stuff.
+
+The `page_metadata_t` structure is setup in such a way that the `page_hash` and the `aes_gcm` overlap. In other words, you can use either one of them, not both. How will we verify 
+that our data wasn't changed behind our backs, if we don't have hashing in place? The answer to that is that we are going to use an AEAD algorithm (AES-GCM, more specifically). AEAD
+stands for Authenticated Encryption Additional Data. In other words, the encryption algorithm ensures that not only is the data safe from prying eyes, but that the decrypted data is
+the same data that was encrypted. 
+The https://paragonie.com/blog/2015/05/using-encryption-and-authentication-correctly[Using Encryption and Authentication Correctly] post does a good job discussing the issues of 
+encryption and authentication. 
+
+In short, it means that using AES-GCM, we can be assured that the decryption will work if and only if the data that was decrypted is identical to the data that was encrypted, any 
+attempt to mess about with the encrypted bits will cause the entire decryption process to fail. That means that it would be a waste to also authenticate the data using a hash, in 
+effect, we are already doing that. 
+
+Just like the `page_hash` that we kept, the verification of the encrypted data is done using a MAC (Message Authentication Code), we store that in `aes_gcm.mac` field and it is 16
+bytes in size (128 bits). There is also another field in this structure that is interesting: `aes_gcm.nonce`. This probably requires more explanation. Let's assume that I have
+the functions `encrypt(key, data): (secret, mac)` and `decrypt(key, secret, mac): data`. 
+
+Encryption is a purely mathematical function, given identical inputs, you'll get identical outputs. In modern cryptography, we assume that everything but the key is public. So you
+should be able to publish your encrypted text, the algorithm and the MAC and no worry about anyone being able to make any sense of this.
+
+However... what happens when we have the following encrypted values: `{secret: "🚀", mac: "🗹"}`. We don't know what the key is, and we can't trick you to decrypting it for us. 
+However, we _can_ get you to encrypt another message for us. We'll send you the string: "Attack at dawn" to encrypt. If you return  `{secret: "🚀", mac: "🗹"}`, we now know what
+was the original message. So there is a need to make sure that each time you encrypt a message, even identical ones, you'll get a different value. That is the point of the `nonce`.
+It means: "Number only used once". The idea is that it is used to inject randomness into the process. Two identical messages encrypted with the same key and different nonces will
+result in different messages.
+
+So far so good, but that leads to a different problem: Nonce reuse. What happens if you use the same nonce with the same key twice? The answer is, sadly, _catastrophic_. In this 
+case I think that the term is justified. It leaks the result of the XOR of the messages encrypted. You can see 
+https://github.com/miscreant/meta/wiki/Nonce-Reuse-Misuse-Resistance[a great example of the problem in this page]. 
+
+Now that you are aware of the background details, let's talk about how we are going to approach it.
+
+=== Designing encryption support in Gavran
+
+Gavran is going to take the following approach for encryption. A user provided encryption key that is 32 bytes (256 bits) is used as the master key for all encryptions. 
+See the `encryption_key` field on the `database_options_t` struct in Listing 11.5. That key isn't actually used for any sort of encryption, instead, we use that key to derive
+dedicated keys for each individual encryption / decryption operation. 
+
+The idea is that we want to ensure separate domains for each cryptographic operation. If somehow a key leaks, we aren't going to lose our entire security edifice. In practice,
+this means that whenever we need to encrypt a page, we'll derive a key for that particular page (based on its number) and the master key. Each key is going to be unique for that
+particular page, so even if we get nonce reuse, we'll not be able to apply that across different pages. As for the actual nonce, we've reserved space in the `page_metadata_t` for 
+it (and the MAC). Because it is only 12 bytes in size, we can't just use random bytes each time we want to encrypt a page. The issue is the birthday paradox, 12 bytes means 96 bits
+which means 2^96^ possible values. 
+
+But the birthday paradox means that after only 2^48^ attempts, we may end up with a repeated value. NIST (National Institute of Standards and Technology), who I trust in this matter,
+says that you should use up to 2^32^ messages under a single key if you are using random nonces. That is a high enough number, but not as high as 2^48^. At that point, the chance for
+a repeated value is 2^-33^. At 2^48^ the chance would be 50%, so you can guess why they made that determination.
+I will point you to https://www.imperialviolet.org/2015/05/16/aeads.html[a good discussion] on the topic and leave it there. Encryption and practical cryptography is a vast field and
+out of scope for this book.
+
+Because each page is using a distinct key (derived from the master key), we don't need to worry about nonce reuse between pages, only for the same page. We handle that by generating
+a random nonce once and then incrementing it on each transaction. That gives us a guarantee that we'll not have any reuse between updates to the same page. 
+
+.Encrypting the concents of the WAL
+====
+We don't need to do that, it turns out. Given that the pages are already encrypted, what information do we have in the transaction that is secret?
+
+The only thing that the WAL can tell an observer is _what_ pages have been changed (but not _what_ changed). How problematic is up for debate, but I'm going to assume that 
+this isn't a major issue. If this is a problem we can simply encrypt the whole transaction data as a single unit again. That is the simplest approach for adding encryption to the WAL.
+
+Doing so would result in double encryption, which may be a concern. Attempts to reduce that may cause us to leak the _size_ of transactions or at least the number of modified
+pages, which leads to a whole different pile of issues that we may have to consider. I chose to draw the line at this stage, the page numbers of modified pages and the transaction 
+number are going to be visible in the WAL, the actual _data_ is going to be encrypted. 
+
+As an aside, if we _were_ to encrypt the WAL, how would we handle the nonce? In this case, we could have used a random nonce, we'll derive a key per transaction, so there is no
+chance for a reuse of both key and nonce. 
+==== 
+
+Enough with the theoretical discussion, let's get digging into the actual code and see how this gets implemented. The journey starts on Listing 11.8, with the `tx_finalize_page` 
+function. You can see that most of the work is delegated to `txn_encrypt_page`, with `tx_finalize_page` being responsible to adapt to whatever we are encrypting a metadata page
+or a normal one. We looked at `txn_finalize_modified_pages` in Listing 11.2, which orchestrate the whole thing. Just like the page hashing, we first run through all the normal
+pages and then we go through the metadata pages.
+
+[source]
+.Listing 11.8 - txn.c - Finalizing a page during `txn_commit`
+----
+include::./code/txn.c[tags=tx_finalize_page]
+----
+
+For the metadata page, we store the `aes_gcm.mac` and `aes_gcm.nonce` in the page itself. For other pages, we store the data in the associated metadata page. Most of `tx_finalize_page` 
+does it simply reflect that behavior so `txn_encrypt_page` can be made simpler. Simplicity is a great feature in code, but especially in cryptographic code. You can see how `txn_encrypt_page`
+is implemented in Listing 11.9.
+
+[source]
+.Listing 11.9 - txn.c - Encrypting a page
+----
+include::./code/txn.c[tags=txn_encrypt_page]
+----
+<1> Derive a key from the master key and the page number, using `TxnKeyCtx` to generate a separate key domain.
+<2> If the `nonce` is zero, fill it with random bytes.
+<3> If it isn't zero, increment it.
+<4> Do the actual encryption.
+
+The most interesting thing about `txn_encrypt_page` is the fact that we derive a new key from the master key. That means that each new page is going to use a different key. We use the 
+`TxnKeyCtx` value (which is a static string) to ensure that we'll have a separate domain for key derivation. The idea is that if we want to also encrypt WAL transactions, for example,
+we will also use a numeric value to derive the key, most likely the transaction id. In that case, we may end up using the same number to derive the key from the same master key. That
+would result in the same key being generated. In order to avoid that, we pass a context and thus make sure that each domain (transactions in WAL, pages in data file) will have a separate
+key space to generate from.
+
+[TIP]
+.Other options for the nonce
+====
+Aside from generating the nonce randomly and then incrementing it, we also had some other options. We can use the transaction id as the nonce value. It is guaranteed to always increment
+and cannot repeat itself. 
+
+We could also imply just increment the value every time, but we _zero_ the page and its metadata when we call `txn_free`, so I thought it would be simpler to start from a random value
+and just increment. That is also the recommendation in the Sodium documentation and was the primary motivation why I select that approach.
+====
+
+It is important to note that `txn_encrypt_page` will encrypt the data _in place_. What it means is that immediately following this call, all the pages in the transactions are going to
+look like random noise. Given that the encryption steps happens as part of `txn_commit` (just before we call `wal_append`, actually), it doesn't matter to us. In fact, we are now 
+_relying_ on this for the security property of not having to encrypt the WAL directly. Its contents are already encrypted, after all.
+
+There are a few things to consider with this approach however, we can no longer use compression or diffing to reduce the I/O load on the WAL and there is a much bigger issue. How can we
+_read_ the data back?
+
+.Diffing and compressing encrypted data is a no go
+====
+By the time the transaction's data reach the WAL, it is already encrypted. One of the properties of encrypted data is that unless you have the key, it is indistinguishable from random
+noise. Compression _relies_ of finding repetitions in the data, which isn't going to happen when we are comparing encrypted values. 
+
+A less obvious, but much more serious issue is the problem with diffing data. We use AEAD algorithm, which means that the _whole_ data must remain as is. We can't modify the data in 
+little bits, we need to replace it as a single uint. Because of those reasons, the `wal_append` will disable diff and compression for the WAL when we are using an encrypted database.
+
+Technically speaking, if we had encrypted WAL, we could do the compression and diffing on the plain text data, as before. That would mean `wal_recover` would be composed of:
+
+* Decrypt the transaction.
+* For each of the pages in the transaction, decrypt the relevant page.
+* Apply the diff to the page.
+* Encrypt the page again.
+
+That works, in theory, but it is not practical. Consider the case of a partial write to the data file. One part of the page was written, the other was not. Using the WAL, that is not
+an issue, we can apply the diff and recover all the lost data. But if we have something like that with encryption, we can't decrypt the data on disk, so we can't apply the diff to it.
+Which means that we are stuck with a single bit flip causing us to be unable to recover the database. 
+
+There is a reason why the WAL only does validation of the pages it modified in the end. We _assume_ that up until then, we may have corrupted data, and the act of re-applying the diffs
+from the last `fsync` will make it all go away. With encryption, that is not possible, we have to overwrite the whole page. 
+====
+
+It turns out that reading the data is complex, because we have no place to _put_ it. If you'll recall, a read transaction is just an immutable copy of a write transaction, and we 
+already encrypted the data. We need to decrypt the data before we can look at it, but where will we _put_ this data?
+Let's look at Listing 11.10, to start unravel this mystery.
+
+[source]
+.Listing 11.10 - db.h - The `txn_t` structure, ready for encrypted databases
+----
+include::./code/db.h[tags=txn_t]
+----
+
+We now have a `working_set` field in the `txn_t` structure. This is held by the _caller_, not by Gavran, and it is distinct for each transaction. We'll be using the `working_set`
+hash table to hold the decrypted values. The idea is that we only hold the memory decrypted in memory for the duration of an active transaction and then immediately discard it.
+We initialize this table in `txn_create` and we clear it in `txn_close`. I'm showing just the relevant portion of `txn_close` in Listing 11.11, to show how we remove the decrypted
+data from memory.
+
+[source]
+.Listing 11.11 - txn.c - Clearing the `working_set` data on `txn_close` to wipe decrypted data from memory
+----
+include::./code/txn.c[tags=working_set_txn_close]
+----
+
+The key piece of the code in Listing 11.11 is the call to `sodium_memzero`, this will remove decrypted data from memory as soon as the transaction closes.
+
+.Where is your security boundary?
+====
+In general, I'm trying to follow best practices for secure code in Gavran, making sure that we use the cryptographic API appropriately, that hold on to sensitive data for as short a 
+time as possible, etc. That is a good start, but be aware that there is a _lot_ more that you probably need to consider, depending on your situation.
+
+For example, you might want to lock decrypted data in memory using `sodium_mlock`, or ensure that the master key is protected in a security enclave or any of a hundred other details.
+Those tend to be _very_ specific for a scenario and need, however. Locking pages in memory, for example, is something that operating systems _really_ don't like. 
+On Linux, `RLIMIT_MEMLOCK` controls how many pages an unprivileged process can lock, the default value is _eight_. 
+
+That means that if you want to keep the data in memory, you have to do quite a bit of work. It is easier to make sure that you are running with encrypted SWAP, to be honest. 
+====
+
+There wasn't actually much that needed to be changed to support reading encrypted data. Take a look at Listing 11.12, which shows the biggest change to the transaction's behavior.
+
+[source]
+.Listing 11.12 - txn.c - Reading encrypted data transparently
+----
+include::./code/txn.c[tags=txn_get_page]
+----
+<1> After checking the modified pages, look at the `wokring_set` if we have a copy of the page there.
+<2> If we need to read from an older transaction or from the file, we'll need to decrypt the data before we can actually use it.
+
+The purpose of the `working_set` is now clear. We have the modified pages hash table in the `txn_state_t`, and we have the _read_ pages that we accessed in the transaction in the 
+`working_set` field. Inside the `working_set`, the data is decrypted (which is why we wipe in on `txn_close`. If we need to go to older transactions or to the file, we'll need to 
+handle the encrypted data, this is what the `txn_decrypt_page` is for. Once that is called, we have the data decrypted and can continue with all of our other tasks as usual.
+
+Note that `txn_modify_page` or `txn_get_metadata` aren't touched, they are already implemented in terms of `txn_get_page`, so everything just works. 
+Let's take a look at how the decryption process works, Listing 11.13 has the `txn_decrypt_page` function.
+
+[source]
+.Listing 11.13 - txn.c - Decrypting a page
+----
+include::./code/txn.c[tags=txn_decrypt_page]
+----
+
+We decide if we need to deal with a metadata page or not and then just setup the call to `txn_decrypt`, which does the actual heavy lifting of decrypting the code accordingly. 
+Note that if we aren't dealing with a metadata page, we'll actually call to `txn_get_metadata` which will recurse back to `txn_get_page` to fetch the relevant data. The code for
+the actual decryption can be seen in Listing 11.14, essentially the reverse of how we encrypt the page.
+
+[source]
+.Listing 11.13 - txn.c - Decrypting a page
+----
+include::./code/txn.c[tags=txn_decrypt_page]
+----
+
+There is one interesting thing about the code in `txn_decrypt`, if the decryption failed, we check to see if the page is zeroed. In this case, we don't consider that a failure, but 
+return a "decrypted" page that is also zero. This can happen whenever we access a page we haven't touched before. Note that calling `txn_free` will also zero the page, but that
+will not be visible. The zeroed page will be encrypted as usual and to the outside observer it will be impossible to tell what its content is. 
+
+The cost of preemptively encrypting all the pages as we increase the file size can be prohibitive, and I don't think that knowing if a page was ever used is a high risk for data
+leakage, so I didn't bother with it. I mention it here for completion's sake. 
+
+.Why use AES-GCM algorithm?
+****
+AES is a very well known algorithm, covered by multiple standards. It also has hardware support (in fact, it is very hard to implement properly _without_ hardware support) on wide
+range of platforms. It also features reasonably sized MAC and nonce sizes, which made it easy to integrate into Gavran.
+
+Voron, on the other hand, is using XChaCha20-IETF mode, which is a similar algorithm provided by Sodium, but that uses a 16 bytes MAC and a 24 bytes nonce. Voron also encrypts the 
+data in its WAL in a more complete manner, but it uses much of the same techniques. Voron, unlike Gavran, was reviewed. If you want to read the 
+https://ayende.com/blog/182273-C/[RavenDB Security Review] it is publicly available. 
+****
+
+And this is _it_. We have a fully functional transparent data encryption system. When we read data, in either read or write transactions, we'll decrypt the data on the fly. When we
+modify data, we'll read it and then use the usual Copy on Write. When we commit a transaction, we'll encrypt the modified pages and write the encrypted data to the WAL for safe keeping.
+Everything continues to work, but we are safe from prying eyes.
+
+=== Unit tests
+
+We are again trying to test some fairly tough issues here. You can get _very_ deep into the rabbit hole when trying to test how hashing and encryption work. I'm going to assume that
+the underlying primitives are okay and see how we can ensure that the behavior we want is fine. That does mean that we are going to be testing with a bit of a blunt hammer.
+
+[source]
+.Listing 11.14 - test.c - Unit tests for cryptographic hashing
+----
+include::./code/test.c[tags=cyrpto_hash]
+----
+
+The first test tests that we can start the database. This serves to validate that the startup routine can handle the validation of hashing, more than anything
+else. And yes, it failed (a lot) while I was building it. 
+
+The second test is more interesting, we are intentionally corrupting the data, by writing `1` into a location in the page directly. We are then trying to access the page and expect
+to fail, because it didn't pass validation. Note that I'm having to restart the db between inserting the corruption because we'll not check pages that were modified in the same run
+as we are on. 
+
+[source]
+.Listing 11.15 - test.c - Unit tests for encrypted database
+----
+include::./code/test.c[tags=encrypted_db]
+----
+
+For encryption, we test that we can't find the raw string anywhere on the disk. The actual unit tests have the same test, but for an normal database, which does show the raw data
+on the file. To be safe, we also test the WAL files. Note that in the 2nd transaction, we ensure that we have a read transaction open (`leaked`) which will prevent us from resetting
+the WAL file. So if the data is on the WAL, we'll find it. 
+
+This concludes our endeavour into cryptography. There is one last item that I want to address at this layer, running large database on 32 bits, we'll handle that in the next chapter.

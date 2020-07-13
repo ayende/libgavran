@@ -23,6 +23,7 @@
         "type_traits": "c",
         "memory": "c",
         "optional": "c",
-        "system_error": "c"
+        "system_error": "c",
+        "typeinfo": "cpp"
     }
 }

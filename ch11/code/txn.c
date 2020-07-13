@@ -15,27 +15,27 @@ result_t txn_hash_page(page_t *page, uint8_t hash[crypto_generichash_BYTES]) {
   bool is_metadata_page =
       (page->page_num & PAGES_IN_METADATA_MASK) == page->page_num;
 
-  void *start = is_metadata_page ? page->address + sizeof(page_metadata_t)
+  void *start = is_metadata_page ? page->address + crypto_generichash_BYTES
                                  : page->address;
   size_t size = is_metadata_page
                     ? PAGE_SIZE - sizeof(page_metadata_t)
                     : size_to_pages(page->overflow_size) * PAGE_SIZE;
-  void *key = is_metadata_page ? page->address : 0;
-  size_t key_size = is_metadata_page ? crypto_generichash_KEYBYTES : 0;
 
-  if (crypto_generichash(hash, crypto_generichash_BYTES, start, size, key,
-                         key_size)) {
+  if (crypto_generichash(hash, crypto_generichash_BYTES, start, size, 0, 0)) {
     failed(ENODATA,
            msg("Unable to compute page hash for page, shouldn't happen"),
            with(page->page_num, "%lu"));
   }
   return success();
 }
+// end::txn_hash_page[]
 
+// tag::txn_encrypt_page[]
 static const char TxnKeyCtx[8] = "TxnPages";
 
 static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num, void *start,
                                  size_t size, page_metadata_t *metadata) {
+  // <1>
   uint8_t subkey[crypto_aead_aes256gcm_KEYBYTES];
   if (crypto_kdf_derive_from_key(subkey, crypto_aead_aes256gcm_KEYBYTES,
                                  page_num, TxnKeyCtx,
@@ -43,28 +43,36 @@ static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num, void *start,
     failed(EINVAL, msg("Unable to derive key for page decryption"),
            with(page_num, "%ld"));
   }
+
   if (sodium_is_zero(metadata->aes_gcm.nonce,
                      crypto_aead_aes256gcm_NPUBBYTES)) {
+    // <2>
     randombytes_buf(metadata->aes_gcm.nonce, crypto_aead_aes256gcm_NPUBBYTES);
   } else {
+    // <3>
     sodium_increment(metadata->aes_gcm.nonce, crypto_aead_aes256gcm_NPUBBYTES);
   }
 
-  if (crypto_aead_aes256gcm_encrypt_detached(start, metadata->aes_gcm.mac, 0,
-                                             start, size, 0, 0, 0,
-                                             metadata->aes_gcm.nonce, subkey)) {
+  // <4>
+  int result = crypto_aead_aes256gcm_encrypt_detached(
+      start, metadata->aes_gcm.mac, 0, start, size, 0, 0, 0,
+      metadata->aes_gcm.nonce, subkey);
+  sodium_memzero(subkey, crypto_aead_aes256gcm_KEYBYTES);
+  if (result) {
     failed(EINVAL, msg("Unable to encrypt page"), with(page_num, "%ld"));
   }
   return success();
 }
+// end::txn_encrypt_page[]
 
-static result_t txn_close_page_on_tx_end(txn_t *tx, page_t *page,
-                                         page_metadata_t *metadata) {
+// tag::tx_finalize_page[]
+static result_t tx_finalize_page(txn_t *tx, page_t *page,
+                                 page_metadata_t *metadata) {
   if (tx->state->db->options.encrypted) {
     if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
-      return txn_encrypt_page(tx, page->page_num,
-                              page->address + crypto_generichash_BYTES,
-                              PAGE_SIZE - crypto_generichash_BYTES, metadata);
+      return txn_encrypt_page(
+          tx, page->page_num, page->address + PAGE_METADATA_CRYPTO_HEADER_SIZE,
+          PAGE_SIZE - PAGE_METADATA_CRYPTO_HEADER_SIZE, metadata);
     }
     return txn_encrypt_page(tx, page->page_num, page->address,
                             size_to_pages(metadata->overflow_size) * PAGE_SIZE,
@@ -73,9 +81,9 @@ static result_t txn_close_page_on_tx_end(txn_t *tx, page_t *page,
     return txn_hash_page(page, metadata->page_hash);
   }
 }
-// end::txn_hash_page[]
+// end::tx_finalize_page[]
 
-// tag::txn_hash_pages[]
+// tag::txn_finalize_modified_pages[]
 static result_t txn_finalize_modified_pages(txn_t *tx) {
   txn_state_t *state = tx->state;
   // <1>
@@ -100,7 +108,7 @@ static result_t txn_finalize_modified_pages(txn_t *tx) {
       // we handle metadata page separately, metadata pages *must* be modified
       continue;
 
-    ensure(txn_close_page_on_tx_end(tx, &modified_pages[i], metadata));
+    ensure(tx_finalize_page(tx, &modified_pages[i], metadata));
   }
   // <4>
   iter_state = 0;
@@ -109,11 +117,11 @@ static result_t txn_finalize_modified_pages(txn_t *tx) {
       continue; // not a metadata page
     page_metadata_t *entries = current->address;
 
-    ensure(txn_close_page_on_tx_end(tx, current, entries));
+    ensure(tx_finalize_page(tx, current, entries));
   }
   return success();
 }
-// end::txn_hash_pages[]
+// end::txn_finalize_modified_pages[]
 
 // tag::txn_commit[]
 result_t txn_commit(txn_t *tx) {
@@ -288,7 +296,7 @@ result_t txn_close(txn_t *tx) {
   if (state->global_state.header.last_tx_id == state->db->active_write_tx) {
     state->db->active_write_tx = 0;
   }
-
+  // tag::working_set_txn_close[]
   if (tx->working_set) {
     size_t iter_state = 0;
     page_t *p;
@@ -300,6 +308,7 @@ result_t txn_close(txn_t *tx) {
     }
     free(tx->working_set);
   }
+  // end::working_set_txn_close[]
 
   // tag::txn_close_rollback[]
   // we have a rollback, no need to keep the memory
@@ -488,8 +497,7 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
 }
 // end::txn_ensure_page_is_valid[]
 
-// tag::txn_get_page[]
-
+// tag::txn_decrypt[]
 result_t txn_decrypt(database_options_t *options, void *start, size_t size,
                      void *dest, page_metadata_t *metadata, uint64_t page_num) {
   uint8_t subkey[crypto_aead_aes256gcm_KEYBYTES];
@@ -501,9 +509,11 @@ result_t txn_decrypt(database_options_t *options, void *start, size_t size,
            with(page_num, "%ld"));
   }
 
-  if (crypto_aead_aes256gcm_decrypt_detached(dest, 0, start, size,
-                                             metadata->aes_gcm.mac, 0, 0,
-                                             metadata->aes_gcm.nonce, subkey)) {
+  int result = crypto_aead_aes256gcm_decrypt_detached(
+      dest, 0, start, size, metadata->aes_gcm.mac, 0, 0,
+      metadata->aes_gcm.nonce, subkey);
+  sodium_memzero(subkey, crypto_aead_aes256gcm_KEYBYTES);
+  if (result) {
     if (!sodium_is_zero(start, size)) {
       failed(EINVAL, msg("Unable to decrypt page"), with(page_num, "%ld"));
     }
@@ -512,24 +522,27 @@ result_t txn_decrypt(database_options_t *options, void *start, size_t size,
 
   return success();
 }
+// end::txn_decrypt[]
 
+// tag::txn_decrypt_page[]
 static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
-  void *buffer;
-  size_t number_of_pages = MAX(1, size_to_pages(page->overflow_size));
-  ensure(palmem_allocate_pages(&buffer, number_of_pages));
+  void *buffer = 0;
   size_t cancel_defer = 0;
   try_defer(free, buffer, cancel_defer);
 
   if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
-
-    ensure(txn_decrypt(
-        &tx->state->db->options, page->address + crypto_generichash_BYTES,
-        PAGE_SIZE - crypto_generichash_BYTES, buffer + crypto_generichash_BYTES,
-        page->address, page->page_num));
-    memcpy(buffer, page->address, crypto_generichash_BYTES);
+    ensure(palmem_allocate_pages(&buffer, 1));
+    ensure(txn_decrypt(&tx->state->db->options,
+                       page->address + PAGE_METADATA_CRYPTO_HEADER_SIZE,
+                       PAGE_SIZE - PAGE_METADATA_CRYPTO_HEADER_SIZE,
+                       buffer + PAGE_METADATA_CRYPTO_HEADER_SIZE, page->address,
+                       page->page_num));
+    memcpy(buffer, page->address, PAGE_METADATA_CRYPTO_HEADER_SIZE);
   } else {
     page_metadata_t *metadata;
     ensure(txn_get_metadata(tx, page->page_num, &metadata));
+    uint32_t number_of_pages = size_to_pages(metadata->overflow_size);
+    ensure(palmem_allocate_pages(&buffer, number_of_pages));
     ensure(txn_decrypt(&tx->state->db->options, page->address,
                        number_of_pages * PAGE_SIZE, buffer, metadata,
                        page->page_num));
@@ -540,16 +553,16 @@ static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
   cancel_defer = 1;
   return success();
 }
+// end::txn_decrypt_page[]
 
+// tag::txn_get_page[]
 result_t txn_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
-
-  if (hash_lookup(tx->state->pages, page))
+  page->address = 0;
+  if (hash_lookup(tx->state->pages, page) ||
+      // <1>
+      hash_lookup(tx->working_set, page))
     return success();
-
-  if (hash_lookup(tx->working_set, page)) {
-    return success();
-  }
 
   txn_state_t *prev = tx->state->prev_tx;
   while (prev) {
@@ -563,10 +576,10 @@ result_t txn_get_page(txn_t *tx, page_t *page) {
     ensure(pages_get(&tx->state->global_state, page));
 
   if (tx->state->db->options.encrypted) {
+    // <2>
     ensure(txn_decrypt_page(tx, page));
   } else {
     ensure(set_page_overflow_size(tx, page));
-
     ensure(txn_ensure_page_is_valid(tx, page));
   }
 
