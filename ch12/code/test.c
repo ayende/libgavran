@@ -53,6 +53,7 @@ describe(hash_data_page) {
     errors_clear();
   }
 
+  // tag::mode_32_bits[]
   it("can start in 32 bits mode") {
     db_t db;
     database_options_t options = {.minimum_size = 4 * 1024 * 1024};
@@ -90,6 +91,35 @@ describe(hash_data_page) {
 
     assert(db_create(DB_NAME, &options, &db), "failed to create db");
   }
+
+  it("can use 32 bits and encryption both") {
+    db_t db;
+    database_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    options.avoid_mmap_io = 1;
+    randombytes_buf(options.encryption_key, 32);
+    assert(db_create(DB_NAME, &options, &db), "failed to create db");
+    defer(db_close, &db);
+
+    txn_t read_tx;
+    assert(txn_create(&db, TX_READ, &read_tx));
+
+    txn_t w;
+    assert(txn_create(&db, TX_WRITE, &w));
+    defer(txn_close, &w);
+    page_t p = {.overflow_size = PAGE_SIZE};
+    assert(txn_allocate_page(&w, &p, 0));
+    const char str[] = "Hello From Gavran";
+    strcpy(p.address, str);
+    assert(txn_commit(&w));
+    assert(txn_close(&w));
+
+    assert(txn_close(&read_tx));
+
+    assert(db_close(&db));
+
+    assert(db_create(DB_NAME, &options, &db), "failed to create db");
+  }
+  // end::mode_32_bits[]
 
   // tag::crypto_hash[]
   it("can start with clean db") {

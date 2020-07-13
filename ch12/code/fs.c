@@ -321,6 +321,7 @@ result_t palfs_write_file(file_handle_t *handle, uint64_t offset,
 }
 // end::palfs_write_file[]
 
+// tag::palfs_read_file[]
 result_t palfs_read_file(file_handle_t *handle, uint64_t offset, void *buffer,
                          size_t len_to_read) {
   errors_assert_empty();
@@ -343,3 +344,4 @@ result_t palfs_read_file(file_handle_t *handle, uint64_t offset, void *buffer,
   }
   return success();
 }
+// end::palfs_read_file[]

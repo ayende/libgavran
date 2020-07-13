@@ -1152,11 +1152,12 @@ cleanup:
 void snow_print_all_errors(void) {
   size_t count;
   char **msgs = errors_get_messages(&count);
-
+  _snow_print("\r");
   for (size_t i = 0; i < count; i++) {
-    snow_fail(msgs[i]);
+    _snow_print(msgs[i]);
+    _snow_print("\n");
   }
-
+  _snow_print("\n");
   errors_clear();
 }
 

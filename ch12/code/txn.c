@@ -529,6 +529,7 @@ static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
   void *buffer = 0;
   size_t cancel_defer = 0;
   try_defer(free_p, &buffer, cancel_defer);
+  size_t number_of_pages = 1;
 
   if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
     ensure(palmem_allocate_pages(&buffer, 1));
@@ -541,15 +542,27 @@ static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
   } else {
     page_metadata_t *metadata;
     ensure(txn_get_metadata(tx, page->page_num, &metadata));
-    uint32_t number_of_pages = size_to_pages(metadata->overflow_size);
+    number_of_pages = size_to_pages(metadata->overflow_size);
     ensure(palmem_allocate_pages(&buffer, number_of_pages));
     ensure(txn_decrypt(&tx->state->db->options, page->address,
                        number_of_pages * PAGE_SIZE, buffer, metadata,
                        page->page_num));
   }
 
-  page->address = buffer;
-  ensure(hash_put_new(&tx->working_set, page));
+  page_t existing = {.page_num = page->page_num};
+  if (hash_lookup(tx->working_set, &existing)) {
+    // this can happen if we are using encryption AND 32 bits mode
+    // let's replace the encrypted content with the plain text one
+    memcpy(existing.address, buffer, number_of_pages * PAGE_SIZE);
+    sodium_memzero(buffer, number_of_pages * PAGE_SIZE);
+    free(buffer);
+    buffer = 0;
+    memcpy(page, &existing, sizeof(page_t));
+
+  } else {
+    page->address = buffer;
+    ensure(hash_put_new(&tx->working_set, page));
+  }
   cancel_defer = 1;
   return success();
 }

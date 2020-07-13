@@ -445,7 +445,6 @@ wal_validate_recovered_pages(db_t *db, pages_hash_table_t *modified_pages) {
 // end::wal_validate_recovered_pages[]
 
 // tag::wal_recover[]
-
 static result_t wal_recover_tx(db_t *db, wal_tx_t *tx,
                                pages_hash_table_t **modified_pages) {
   void *input = (void *)tx + sizeof(wal_tx_t) +
@@ -485,6 +484,7 @@ static result_t wal_recover_tx(db_t *db, wal_tx_t *tx,
 
   return success();
 }
+// end::wal_recover[]
 
 static result_t wal_recover(db_t *db, wal_state_t *wal) {
   if (!db->state->options.avoid_mmap_io) {
@@ -510,7 +510,6 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   ensure(wal_validate_recovered_pages(db, modified_pages));
   return success();
 }
-// end::wal_recover[]
 
 // tag::wal_open_and_recover[]
 static result_t wal_open_single_file(struct wal_file_state *file_state,
