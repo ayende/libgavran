@@ -7,55 +7,44 @@
 #include "defer.h"
 #include "errors.h"
 
-typedef struct pal_file_handle file_handle_t;
+typedef struct span {
+  void *address;
+  size_t size;
+} span_t;
 
-result_t palfs_compute_handle_size(const char *path, size_t *required_size);
-// tag::palfs_create_file[]
+typedef struct file_handle {
+  void *handle;
+  char *filename;
+} file_handle_t;
+
 enum palfs_file_creation_flags {
   palfs_file_creation_flags_none = 0,
   palfs_file_creation_flags_durable = 1
 };
 
-result_t palfs_create_file(const char *path, file_handle_t *handle,
-                           enum palfs_file_creation_flags flags);
-// end::palfs_create_file[]
+result_t pal_create_file(const char *path, file_handle_t **handle,
+                         enum palfs_file_creation_flags flags);
 
-const char *palfs_get_filename(file_handle_t *handle);
+result_t pal_set_file_minsize(file_handle_t *handle, uint64_t minimum_size);
+result_t pal_truncate_file(file_handle_t *handle, uint64_t new_size);
+result_t pal_fsync_file(file_handle_t *handle);
+result_t pal_close_file(file_handle_t *handle);
+result_t pal_get_filesize(file_handle_t *handle, uint64_t *size);
 
-result_t palfs_set_file_minsize(file_handle_t *handle, uint64_t minimum_size);
+result_t pal_mmap(file_handle_t *handle, uint64_t offset, span_t *span);
+result_t pal_enable_writes(span_t *range);
+result_t pal_disable_writes(span_t *range);
+result_t pal_unmap(span_t *range);
 
-result_t palfs_truncate_file(file_handle_t *handle, uint64_t new_size);
+result_t pal_write_file(file_handle_t *handle, uint64_t offset,
+                        const char *buffer, size_t len_to_write);
+result_t pal_read_file(file_handle_t *handle, uint64_t offset, void *buffer,
+                       size_t len_to_read);
 
-result_t palfs_fsync_file(file_handle_t *handle);
+result_t pal_allocate_pages(void **p, uint64_t pages);
+result_t pal_free_page(void **p);
 
-result_t palfs_close_file(file_handle_t *handle);
+void defer_pal_close_file(struct cancel_defer *cd);
+void defer_pal_unmap(struct cancel_defer *cd);
 
-result_t palfs_get_filesize(file_handle_t *handle, uint64_t *size);
-
-// <1>
-struct mmap_args {
-  void *address;
-  size_t size;
-};
-
-result_t palfs_mmap(file_handle_t *handle, uint64_t offset,
-                    struct mmap_args *m);
-
-result_t palfs_enable_writes(void *address, size_t size);
-
-result_t palfs_disable_writes(void *address, size_t size);
-
-result_t palfs_unmap(struct mmap_args *m);
-
-result_t palfs_write_file(file_handle_t *handle, uint64_t offset,
-                          const char *buffer, size_t len_to_write);
-
-result_t palfs_read_file(file_handle_t *handle, uint64_t offset, void *buffer,
-                         size_t len_to_read);
-
-// <2>
-void defer_palfs_close_file(struct cancel_defer *cd);
-
-void defer_palfs_unmap(struct cancel_defer *cd);
-
-result_t TEST_db_get_map_at(db_t *db, uint64_t page_num, void **address);
+enable_defer(pal_free_page);

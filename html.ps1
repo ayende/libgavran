@@ -1,9 +1,11 @@
-asciidoctor -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\output\book.html
+asciidoctor --destination-dir ./output  .\book.adoc ; .\output\book.html
+dir -Recurse *.png -Exclude .\output\ |cp -Destination .\output -ErrorAction SilentlyContinue
+
 # SIG # Begin signature block
 # MIIEOQYJKoZIhvcNAQcCoIIEKjCCBCYCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU3IkrqdZIIHOBvz06kwDUil/B
-# kxKgggJDMIICPzCCAaygAwIBAgIQrX6yGm7uxr9G2+CZjNNEiDAJBgUrDgMCHQUA
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUAPmEbakdsDKF9BqBkwpOwE6j
+# lQ6gggJDMIICPzCCAaygAwIBAgIQrX6yGm7uxr9G2+CZjNNEiDAJBgUrDgMCHQUA
 # MCwxKjAoBgNVBAMTIVBvd2VyU2hlbGwgTG9jYWwgQ2VydGlmaWNhdGUgUm9vdDAe
 # Fw0yMDA3MTIxMzA3MTBaFw0zOTEyMzEyMzU5NTlaMCAxHjAcBgNVBAMTFUF5ZW5k
 # ZSBQb3dlclNoZWxsIENTQzCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA+i1G
@@ -19,8 +21,8 @@ asciidoctor -a img-src=./imgs --destination-dir ./output  .\book.adoc ; .\output
 # Y2FsIENlcnRpZmljYXRlIFJvb3QCEK1+shpu7sa/RtvgmYzTRIgwCQYFKw4DAhoF
 # AKB4MBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisG
 # AQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwIwYJKoZIhvcN
-# AQkEMRYEFNiTwHnmWO6kvVcDmOi6OMUm4kJXMA0GCSqGSIb3DQEBAQUABIGAiWGI
-# IcnUrVV08H+DPcmiKXJ7zrIiQA9bN6osxZypGrmyC1MMRdz/InICf6O53I2G9OIL
-# j1j2yNrG7obDiRrtCZo7cXWm2zAT6kgMoeW+0uE76i2oU3zwV8L1uxn/kDUJXE6+
-# 0tlcmNwgeNnWftkYK5a0alSOwC7y8OQoAbuD4yQ=
+# AQkEMRYEFJLm0oGMRJ0G89qnumwvcx/jZxcqMA0GCSqGSIb3DQEBAQUABIGASC/H
+# 1axVtkaqSmh0uX6xgWkFKHb27tLeB4OVydgn17Xn2IimY/A3QqVrUaSBxh8K9QQW
+# c71ydNSpAw4GE9nqjKODAZSZCIxUdZ4yRDZ/OBlmcrKayxI5wM6w4TyVqR83ehe2
+# 2GZIE9bYUkBR/6/J43tcLH+GO7vPbOsoyvGf1gk=
 # SIG # End signature block

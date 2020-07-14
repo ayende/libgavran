@@ -1,10 +1,4 @@
-
-= Part I
-
-My hope is that this book will take you on the journey of writing a production grade storage engine from scratch. 
-
-
-== Introduction
+= Introduction
 
 My name is Oren Eini, and I have been working with (and on) databases for over 15 years. For the past decade or so, I have been
 involved in the creation of https://ravendb.net[RavenDB], a distributed document database. I have also been 
@@ -15,29 +9,37 @@ to handle this, from simply writing XML or JSON file to a folder to utilizing ex
 SQLite, LMDB, Esent, LevelDB and RocksDB. For quite some time, it has been my hobby to read through any storage engine
 codebase that I came across. And there have been many of those.
 
-This is a book that is going to cover how to build a database, from the ground up. We aren't going to be talking about
+This is a book that is going to cover how to build a database from the ground up. We aren't going to be talking about
 the appropriate schema or what constraints to use. We are going to build the low level infrastructure that you need in
-order bo _build_ a database engine, from scratch. 
+order bo _build_ a database engine, from scratch. At the level of putting bits on the disk.
 
 In particular, I want to walk through all the details of building a production quality 
-storage engine with full ACID footnote:[Atomic, consistent, isolated and durable] properties, _real_ transactions and the ability
+storage engine with full ACID (atomic, consistent, isolated and durable) properties, _real_ transactions and the ability
 to store and operate on data in interesting manner.
 
-.Assumptions about the reader
-****
-I'm writing this book for fun, because it kept bouncing in my head and I really need to get it out so I can sleep.
-The target audience are developers who have at least a passing familiarity with system level programming and the C language.
-I'm not going to find the most esoteric pieces of C to use, but you are expected to understand the C, native memeory,
- data structures and the like. 
+This book isn't describing an existing storage engine and how it works. Instead, I wrote a new storage engine specifically
+for the book. And I wrote it _while_ writing the book. In other words, I would the chapter on implementing isolation between
+transactions and then write the code to make that happen. 
 
-I'll reference other resources at times for additional materials, but I'm going to focus on the storage engine rather than
-reiterating existing knowledge. If additional knowledge isn't critical to understanding what is going on, I'll refer you
-elsewhere.
-****
+The fact that I have to _explain_ what the code does has had a profound impact on the codebase. In many cases, I had to continuously
+strip the code to its bare elements to be able to explain what it is doing, without unnecessary details. That has mande the code 
+better, I think. 
+
+There have been cases where I have opted to a simpler implementation strategy, at least initially, to be able to explain how something
+works incrementally. I've called out these details and if needed, we add onto them to get to a more appropriate solution.
+
+The last part of the book is all about benchmarks. But instead of showing numbers, I have done something quite different. I'm going 
+over the benchmark and _improving_ them, so we have non trivial amount of optimization work discussed there. 
+
+All in all, this has been a fascinating project, I hope you'll like it. 
+
+  - Oren 
+
+== Setting up expectations
 
 If you are interested in how storage engines work, I have written detailed reviews of my finding on many such projects. 
 The following list contains some of those review, note that they are usually spread over to multiple posts in a series. 
-I went through the code base and wrote my notes as they occurced to me. 
+I went through the code base and wrote my notes as they occurred to me. 
 
 * https://ayende.com/blog/posts/series/3607/reading-erlang[CouchDB] - Document database written in Erlang.
 * https://ayende.com/blog/posts/series/162754/reviewing-lightning-memory-mapped-database-library[LMDB]- Low level 
@@ -54,6 +56,21 @@ I've also written my own storage engine library, based on the things that I have
 in the field and the needs of RavenDB itself. This storage engine is called Voron, we started working on that in 2013
 and has switched all of RavenDB to it completely by late 2015. Voron has been powering all RavenDB production systems 
 for years, with very little trouble.
+
+
+.Assumptions about the reader
+****
+I'm writing this book for fun, because it kept bouncing in my head and I really need to get it out so I can sleep. Discussing
+this book with my seven months old son would also put him to sleep more or less immediately, which was a major bonus.
+
+The target audience are developers over the age of seven months who have at least a passing familiarity with system 
+level programming and the C language. I'm not going to find the most esoteric pieces of C to use, but you are expected 
+to understand the C, native memory, data structures and the like. 
+
+I'll reference other resources at times for additional materials, but I'm going to focus on the storage engine rather than
+reiterating existing knowledge. If additional knowledge isn't critical to understanding what is going on, I'll refer you
+elsewhere.
+****
 
 Voron is written in C# was built to be _high_ performance and has been able to achieve impressive benchmark numbers. 
 We have also built Voron to serve RavenDB and adapted RavenDB to best utilize Voron. That has been a very benefitical 
@@ -106,8 +123,9 @@ options.
 I usually write code in C# and .NET, but I decided that I wanted to have the broadest possible appeal for the engine, so I'm going to 
 be writing the engine in C. I _like_ writing C code, because it is generally very straight forward and there is nothing that isn't 
 visible. 
+
 That said, error handling and resource management in C _sucks_. I spent some time creating just enough infrastructure to be able to
-write much nicer code without going crazy. 
+write much nicer code without going crazy.
 
 I'm going to target Linux as the first operating system to run the storage engine on, but eventually we'll run it on Linux, Windows
 and Mac a minimum.
@@ -151,7 +169,7 @@ are:
 * `iterator iterate();`
 
 Different storage engines implement these in different fashions, providing guarantees about the data and how it is persisted. You _could_
-write a storage engine that would simply store the each value as a file in a directory. That _works_ and will mean that you have turned 
+write a storage engine that would simply store each value as a file in a directory. That _works_ and will mean that you have turned 
 the file system into your storage engine. That has issues, however. File systems tend to do poorly with a lot of small values and there 
 are non trivial complexities regarding concurrency and atomicity of the data.
 
@@ -164,21 +182,23 @@ model that lends itself to merging, transactional guarantees, etc.
 I have written quite a few storage engines at this point. Voron is obviously one of them, but I have also written storage engines modeled 
 around LevelDB and Lucene as well as various tailored solutions for specific cases. Depending on the scope of the problem, there is no end 
 to the amount of work you can put into a storage engine. There are always more to add and things to improve. A whole team has been working 
-on and with Voron for over half a decade and we still have quite a list of featuers that we want to add, for example.
+on and with Voron for over half a decade and we still have quite a list of features that we want to add, for example.
 
 To avoid such slippage in the book, I'm going to define the goals for the storage engine we'll be building up front. I have chosen the name
 Gavran (Raven, Voron and Gavran are all the same word, in different languages), because typing "storage engine" all the time is quite tiring.
 
 
-* Built in C, as it is meant to be embedded in other processes. Should compile with `-Weverything -Werror` (enable _all_ warnings and treat
+* Built in C, as it is meant to be embedded in other processes. Should compile with `-Wall -Wextra -Werror` (enable warnings and treat
   them as errors), pass Valgrind properly, etc.
 * Transactional and concurrent, you can have real ACID transactions with concurrent transactions that allow readers to continue where there
   are writes without blocking and vice versa.
 * Readable and usable, this is hard to define exactly, I admit. I *care* about the API and the readability of the code, to the point where 
-  I'll jump through hoops to get more readable and understandable code.
-* Give error handling. I'm spoiled, I like my errors to tell me exactly what is going on and what to do about fixing it. That can be hard
+  I'll jump through hoops to get more readable and understandable code. I'm also going to try to put as much code directly in the book as 
+  I can get away with. That means that the code should _fit_. Using the current settings, I can fit about 45 lines of code on a printed 
+  page, and I _really_ want to avoid multi page code listing. 
+* Good error handling. I'm spoiled, I like my errors to tell me exactly what is going on and what to do about fixing it. That can be hard
   to do properly in C, so we'll have to tackle this as well. And yes, this is important enough to be in the baseline acceptance criteria.
-* Performant, it should have high enough perfromance that it will not be an issue. My intent is to get it to be placed around the top of 
+* Performant, it should have high enough performance that it will not be an issue. My intent is to get it to be placed around the top of 
   storage engine benchmarks.
 * Zero copy, should make it possible to get the data without copying from the database buffers to the application buffers.
 * Cross platform, should be able to run on Linux, Windows, ARM devices, Android, iOS, etc. Should run on 32 bits and 64 bits.
@@ -186,8 +206,20 @@ Gavran (Raven, Voron and Gavran are all the same word, in different languages), 
 * Small, I can't commit to a number of lines of code, but I want it *small*. To compare, LevelDB is about 20,000 lines of code and LMDB
   is just over 10,000 lines of code. I aim to be somewhere in the middle. 
 
+[TIP]
+.A note about concurrency
+====
+Anyone who has written concurrent code can tell you that it is _hard_. Building a storage engine is hard enough, and doing that while being
+usable from multi threaded code is harder. I'm going to divide this work up, therefor.
+
+In the first two parts of the book, we are going to work completely single threaded, and then we'll focus on adding multi threading to Gavran.
+The _design_, of course, is going to be multi threaded safe from the get go, but it is important to reduce the amount of complexity that we
+deal with at any given time.
+====
+
 That is quite a list of features, but these are the _minimum_ requirements, as far as I'm concerned. My hope is that I can make the journey
 there interesting along the way.
+
 
 === The structure of this book
 
@@ -206,17 +238,16 @@ easier on yourself by using the code from the https://github.com/ayende/libgavra
 
 .Requirements from the code
 ****
-I am creating a new project here froms scratch, which means that I'm not constrained by past decisions. As such, I have decided to make sure that I'm
+I am creating a new project here from scratch, which means that I'm not constrained by past decisions. As such, I have decided to make sure that I'm
 doing the best I can. Here are the rules that the codebase will follow:
 
-* The core API is written in C11 (_not_ C++) and must compile with `-Weverything -Werror` enabled. Note that while we want _operating system_ portability
+* The core API is written in C11 (_not_ C++) and must compile with `-Wall -Wextra -Werror` enabled. Note that while we want _operating system_ portability
   there is no hard requirement for _compiler_ portability. I'm going to use some features that are available for GCC and Clang, but not MSVC and likely 
   not in other C compilers. These features are going to significantly impact the code quality and there are workarounds for other compilers, I'm just not
-  going to bother with these. Building the storage engine is large enough task as it is..
-* Functions and argument names will use `snake_case` formatting. And the naming convention for the function is `<component>_<action>_<object>`. So we'll have `platform_sync_file` or `pager_allocate_page`.
+  going to bother with these. Building the storage engine is large enough task as it is...
+* Functions and argument names will use `snake_case` formatting. And the naming convention for the function is `<component>_<action>_<object>`. 
+  So we'll have `platform_sync_file` or `pager_allocate_page`.
 * All integers should have their width specified, use `uint32_t` or `int64_t` instead of `unsigned long long`. The use of `size_t` is permitted, however.
-* To the greatest extent possible, Gavran should avoid allocating memory. This isn't truly possible, but it is surprising how far we can push it.
-* Pointers should be using `restrict` whenever possible.
 * Functions using more than a few arguments should take a `struct`, instead.
 * The code is automatically formatted using `clang-formatter` with the Mozilla's style code and column limit set so it will fit properly in the book.
 * The storage engine is going to be defined in layers, which each layer leaning on the previous one and isolating it. We'll avoid chatter that cross layer
@@ -224,11 +255,44 @@ doing the best I can. Here are the rules that the codebase will follow:
 * The code will be unit tested and pass automated tooling such as Valgirnd / ASAN, etc.
 ****
 
-One of the greatest weakness of C is in its error handling and the capabilities you have for managing resources. 
+One of the greatest weaknesses of C is in its error handling and the capabilities you have for managing resources. 
 That is left entirely to the developer to manage. And while _technically_ you can write bug free code, it is a _hard_ task.
 
 I started working in Pascal, C and C++ but I spent most of my professional career working in managed languages, mostly C# and .NET. That means that I 
 look at the sheer amount of ceremony to write proper code in C and I cringe. In order to enable both good coding practices and maintain my sanity, 
-I have defined a set of baseline infrastucture that is going to help me write better and safer code. 
+I have defined a set of baseline infrastructure that is going to help me write better and safer code. 
 
-Therefor, the very first thing that we'll do in this book is setup the appropriate infrastructure to enable good resource management and error handling.
+This infrastructure is inspired by the way OpenSSL built their error reporting systems as well as the manner in which Rust manage errors. I also added
+some Go flavor resource management to get a much more readable codebase. The very first thing that we'll do in this book is setup the appropriate infrastructure 
+to enable good resource management and error handling.
+
+In *Part I* we'll build the foundation of Gavran, the manners in which it persist information to disk and manages transactions.
+
+In *Part II* we'll look into building data structures on top of the persistence. We'll use those to store actual user's data.
+
+In *Part III* we'll add multi threading support to Gavran.
+
+In *Part IV* we'll run benchmarks and compare Gavran to other databases. Then we'll fix any performance issues that we'll run into.
+
+=== The structure of the codebase
+
+Before we get to the actual code, I wanted to have a rough overview of what the structure of Gavran is going to look like. <<foundation_structure>> is showing
+the architecture of Gavran's foundation, which we'll spent the first part of this book implementing.
+
+.The structure of the foundation of Gavran. Reading and writing from disk, on disk data format and how transactions are implemented.
+[[foundation_structure]]
+image::foundation-structure.png[]
+
+The foundation of Gavran is responsible for reading and write data from disk, allocating disk space and managing pages as well as implementing the transactional
+guarantees. The foundation is _very_ important, of course, but it is also not much use on its on. We can only start doing interesting things with Gavran once
+we implement data structures. These are layered on top of the foundation and can mostly ignore all the persistence concerns. That is handled by the foundation's layer.
+
+Gavran supports the following data structures:
+
+* RAW data - used to store opaque binary data in Gavran and usually managed via an opaque id.
+* Hash table - allows to do lookup by exact key match, but no range searches. 
+* B+Tree - allows to search by key, or key prefix, or range searches.
+
+While this may seem like a small list, it is actually more than enough to implement sophisticated behaviors. 
+
+Let's get started building the foundation of Gavran...

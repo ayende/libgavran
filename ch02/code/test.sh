@@ -1,1 +1,0 @@
-pytest ../../pyapi/tests00.py ../../pyapi/tests02.py

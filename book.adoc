@@ -4,39 +4,67 @@
 = Building a storage engine from scratch
 Oren Eini <oren@ravendb.net>
 June 2020
+
 :sectnums:
+:partnums:
 :toc:
 :icons: font
 :source-highlighter: pygments
 :pygments-style: trac
 :pygments-linenums-mode: inline
 :source-language: c
-:img-src: ../imgs
+:xrefstyle: short
 
 [dedication]
-To Rachel, with my love.
-And to Tamar and Shahar, in the hope that you'll grow up and read this book.
 
+= Dedication
+
+To Rachel, with my love.
+
+To Tamar, who think such topics are "soooo boring", I hope you change your mind.
+
+To Shahar, who would always fall asleep when I talked about the book, hopefully you'll like it better when you grow up.
+
+
+
+:figure-caption: Figure 1,
+:listing-caption: Listing 1,
 include::./intro/intro.adoc[]
 
+:figure-caption: Figure 2,
+:listing-caption: Listing 2,
+:!figure-number:
 include::./ch02/ch02.adoc[]
 
+////
+:listing-caption: Listing 3, 
 include::./ch03/ch03.adoc[]
 
+:listing-caption: Listing 4, 
 include::./ch04/ch04.adoc[]
 
+:listing-caption: Listing 5, 
 include::./ch05/ch05.adoc[]
 
+:listing-caption: Listing 6, 
 include::./ch06/ch06.adoc[]
 
+:listing-caption: Listing 7, 
 include::./ch07/ch07.adoc[]
 
+:listing-caption: Listing 8, 
 include::./ch08/ch08.adoc[]
 
+:listing-caption: Listing 9, 
 include::./ch09/ch09.adoc[]
 
+:listing-caption: Listing 10, 
 include::./ch10/ch10.adoc[]
 
+:listing-caption: Listing 11, 
 include::./ch11/ch11.adoc[]
 
+:listing-caption: Listing 12, 
 include::./ch12/ch12.adoc[]
+
+////
