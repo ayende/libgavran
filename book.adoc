@@ -1,19 +1,17 @@
 :doctype: book
 :media: prepress
-
-= Building a storage engine from scratch
-Oren Eini <oren@ravendb.net>
-June 2020
-
 :sectnums:
 :partnums:
 :toc:
 :icons: font
-:source-highlighter: pygments
-:pygments-style: trac
-:pygments-linenums-mode: inline
+:source-highlighter: coderay
 :source-language: c
 :xrefstyle: short
+
+= Practical Storage Engine Design & Implementation
+Oren Eini <oren@ravendb.net>
+June 2020
+
 
 [dedication]
 
@@ -25,7 +23,7 @@ To Tamar, who think such topics are "soooo boring", I hope you change your mind.
 
 To Shahar, who would always fall asleep when I talked about the book, hopefully you'll like it better when you grow up.
 
-
+////
 
 :figure-caption: Figure 1,
 :listing-caption: Listing 1,
@@ -34,14 +32,25 @@ include::./intro/intro.adoc[]
 :figure-caption: Figure 2,
 :listing-caption: Listing 2,
 :!figure-number:
+:!listing-number:
 include::./ch02/ch02.adoc[]
 
-////
-:listing-caption: Listing 3, 
+
+:figure-caption: Figure 3,
+:listing-caption: Listing 3,
+:!figure-number:
+:!listing-number:
 include::./ch03/ch03.adoc[]
 
-:listing-caption: Listing 4, 
+////
+
+:figure-caption: Figure 4,
+:listing-caption: Listing 4,
+:!figure-number:
+:!listing-number:
 include::./ch04/ch04.adoc[]
+
+////
 
 :listing-caption: Listing 5, 
 include::./ch05/ch05.adoc[]

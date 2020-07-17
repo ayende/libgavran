@@ -15,11 +15,12 @@ If I want to add `Two` to the file in the right location, what do I have to do? 
 what I want and then continue writing to the end of the file (extending it along the way). There actually _are_ ways to extend a file in such a manner, in turns
 out. It isn't very useful for most scenarios, but I want to discuss that a bit so you'll understand how that works.
 
-You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of blocks in the middle of a file. That works because while the file system present
-you with the illusion of a sequence of bytes, the reality is very different. Take a look at Figure 3, which shows the physical outline of the text file above.
+You can call `fallocate` with `FALLOC_FL_INSERT_RANGE` to insert a range of blocks in the middle of a file. That works because while the file system presents
+you with the illusion of a sequence of bytes, the reality is very different. Take a look at <<file-layout>>, which shows the physical outline of the text file above.
 
+[[file-layout]]
 .Physical layout of a file on disk
-image::{img-src}/fig3.png[]
+image::file-layout.png[]
 
 Any file that is smaller than 512 bytes will fit on a single block one block (sometimes called sector). A block is 512B - 4KB in size, in most cases and you can
 assume that it will be 4KB on pretty much any modern disk. And by modern, I'm talking anything anything made in the past _decade_. 
@@ -30,14 +31,14 @@ It is the job of the file system to map those blocks into a file and present us 
 
 With `FALLOC_FL_INSERT_RANGE`, we can tell the file system that we want to add new blocks to the file, somewhere in the middle. That is a cheap operation, because
 we aren't actually moving anything. We simply change the list of blocks that are assigned to the file and write new data to the block. You can see how that looks
-on Figure 4.
+on <<file-layout-modified>>.
 
+[[file-layout-modified]]
 .A file's physical layout after adding a block in the middle
-image::{img-src}/fig4.png[]
+image::file-layout-modified.png[]
 
 So we can add data cheaply in the middle of a file, although it requires somewhat unusual API calls. The problem is that we can do that only on block boundary. On 
 most modern systems, that is 4KB in size. We can also only insert data in increments of 4KB, so this approach isn't generally usable.
-
 At the same time, we are going to think about how we are going to manage the data we put into storage. We need to consider how we read and write data. As it 
 turns out, there are quite a few common methods to handle this scenario:
 
@@ -47,16 +48,27 @@ turns out, there are quite a few common methods to handle this scenario:
   a _lot_ of load on the I/O system.
 * Fixed size records - in this model, we define the size of a record upfront (64 bytes, for example) and then we can treat the file as an array of those records.
   This is how many applications stored their data and it is a very simple method that is surprisingly powerful. It has the downside, of course, that you are 
-  forced to pick a set size and use it for the life time of the data.
-* Page model - the file is divided into pages (4KB - 4MB) in size that are treated as independent buffers. We are always working on a the page level, which is
-  a buffer that is read and written to in an atomic fashion. In other words, we replicate exactly how the file system think of the world. This is similar to the 
-  fixed size records option, but instead of storing fixed size records, we have fixed size pages and we are free to manage their internal structure as we see
-  fit. The page size is also large enough that we don't usually need to 
+  forced to pick a set size and use it for the life time of the data. Free space allocation is also something that you need to manage here, as you need some
+  way to handle deleted records.
+* Page model - the file is divided into pages (typically in the range of 4KB to 4MB) in size that are treated as independent buffers. We are always working on a 
+  the page level, which is a buffer that is read and written to in an atomic fashion. In other words, we replicate exactly how the file system think of the world. 
+  This is similar to the fixed size records option, but instead of storing fixed size records, we have fixed size pages and we are free to manage their internal 
+  structure as we see fit. The page size is also large enough that we can pack multiple records into a single page.
+
+
+[TIP]
+.Always work _with_ the hardware
+====
+One additional factor for using pages as the manner in which we manage the data in the file is that this means that all our I/O is now going to be page based.
+This in turn means that drives such as SSD or NVMe are going to have easier time, because we are never going to issue a read or a write the crosses a page
+boundary. This also tend to allow you to get better lifetime from your hardware, since you are reduce the amount of work it needs to do.
+Writing on page boundary has been shown to increase the longevity of the hard drives and can also allow the disk to optimize the data access better.
+====
 
 === Getting to grips with paging
 
 For our storage engine, we are going to use the paging model. That allows the most flexibility and is the most common choice for storage engines. I'm not going to
-go too deeply into the design choices, you might want to refer the https://www.databass.dev/[Database Internals] book for details. In particular, the terms you
+go too deeply into the other design choices, you might want to refer the https://www.databass.dev/[Database Internals] book for details. In particular, the terms you
 are looking for are Log Structure Merge vs Page Structure. 
 
 [TIP]
@@ -64,10 +76,10 @@ are looking for are Log Structure Merge vs Page Structure.
 ====
 Our storage engine is going to divide the file into pages that are 8KB in side. Instead of thinking about the whole of a file as a stream of bytes, we are going
 to cut it into pages and work on each one of them independently. This is a very common decision for databases since there are many benefits for this approach.
-Modifying a single page solve the need to insert data in the middle of a file, we can overwrite the page as a whole. 
+Modifying a single page solve the need to insert data in the middle of a file, since we can overwrite the page as a whole. 
 
 Pages are to a database as bytes are to a file. The basic building blocks, but they aren't sufficient. In order to actually make _sense_ of the system, we have
-to layer additional features and data structures. I'm building Govran from the ground up and explaining each section independently. It all come together and
+to layer additional features and data structures. I'm building Gavran from the ground up and explaining each section independently. It all come together and
 then we'll have a beautiful picture and gorgeous architecture.
 ====
 
@@ -79,45 +91,41 @@ to use that value again and maybe we'll play with the size when we get to writin
 The API that we wrote so far isn't really suitable for working with pages. That is intentional, we are now building another layer in the storage engine. On top
 of our PAL code (which deals with files) we now have a paging layer. I'm going to need to jump ahead a little bit and declare a few things that will not make 
 _any_ sense now. Instead of building pages and then the database infrastructure, I'm going to define the code as it should be in the end. You can see the 
-relevant definitions in Listing 4.1. 
+relevant definitions in <<paging-api>>. 
 
 [source]
-.Listing 4.1 - db.h & impl.h - The declarations of db_t and txn_t
+<<paging-api>>
+.db.h - The low level paging API
 ----
-// from db.h - public API
 include::./code/db.h[tags=paging_api]
-
-// from impl.h - private API
-include::./code/impl.h[tags=paging_api]
 ----
 
-In Listing 4.1, we also define the `PAGE_SIZE` constant and the `page_t` struct. There isn't much there at this point, we simply have the page number and
-the mapped address for the page as well as the total size. 
+In <<paging-api>>, we define the `PAGE_SIZE` constant and the `page_t` struct as well as functions that we'll use to read and write those pages.
+The fields that we care about at this point in `page_t` are `address`, `size` and `page_num`, we'll leave the rest for later. The `address` is used to return the 
+address of the page in memory, the `size` is the size of the data that is stored on the page. This may actually be more than single page's worth of data, in some
+cases. And the `page_num` is the page number, naturally. It is important to note that this is an _in memory_ structure, this is never persisted to disk.
 
-We can use that to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the same read & write operation as we did in 
-Listing 2.11. 
+The `pages_get` and `pages_write` functions uses types that we haven't seen yet, `txn_t` and `db_state_t`. For now, we'll ignore these, I'll introduce how they work
+shortly.
+
+We can use the API in <<paging-api>> to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the same read & write operation as we did in 
+<<read_write_io>>. 
 One caveat we have to take into account is that we _can't_ modify the result of the `pages_get` directly. This is because the memory is mapped as readonly. Attempts
 to write to it will result in a segmentation fault. In order to deal with that, we'll copy the page to our own buffer and use the `pages_write` to update its content.
 
-[TIP]
-.Always work _with_ the hardware
+[CAUTION]
+.System page size vs. `PAGE_SIZE`
 ====
-One additional factor for using pages as the manner in which we manage the data in the file is that this means that all our I/O is now going to be page based.
-This in turn means that drives such as SSD or NVMe are going to have easier time, because we are never going to issue a read or a write the crosses a page
-boundary. This also tend to allow you to get better lifetime from your hardware, since you are reduce the amount of work it needs to do.
-Writing on page boundary has been shown to increase the longevity of the hard drives and can also allow the disk to optimize the data access better.
+Gavran is going to use `PAGE_SIZE` (8KB) for its pages, but there is also the _system_ page size, which is something related, but different. The system page size is
+going to be 4KB on pretty much all platforms. You can see this https://stackoverflow.com/questions/11543748[StackOverflow answer] for the details why this is the winning 
+choice. 
+
+When we talk about page aligned memory, we are actually talking about memory that is aligned on 4KB boundary (system page size), because that is what the API and hardware
+will demand from us. When we are talking about pages in our data file, then we refer to the 8KB pages that Gavran will use. 
 ====
 
-We are working with pages, so we want to use page aligned memory, which usually means that we want to make use of `posix_memalign`. That function, however, has awkward
-usage within our API, so we'll wrap it in `txn_allocate_page`, shown on Listing 4.2.
-
-[source]
-.Listing 4.2 - mem.c - Allocating memory in chunks of pages
-----
-include::./code/mem.c[tags=palmem_allocate_pages]
-----
-
-The `palmem_allocate_pages` is pretty bare boned, but that is sufficient for now. With that at hand, let's see how we can make use of the API to read and write from the file.
+We are working with pages, so we want to use system page aligned memory, which usually means that we want to make use of `posix_memalign`. We already saw how we wrapped this 
+function in `mem_alloc_page_aligned` for our needs. With that in place, we can now write the code to modify the data.
 
 [source]
 .Listing 4.2 - main.c - Reading and writing using the paging API

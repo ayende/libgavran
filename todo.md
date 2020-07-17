@@ -25,3 +25,5 @@ Exercise:
 * On move, do the same there
 * Use mremap to try avoiding mapping from scratch
  
+
+ *** RUN ALICE***

@@ -5,18 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "defer.h"
-#include "errors.h"
-
-#define SNOW_ENABLED
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-prototypes"
-#pragma clang diagnostic ignored "-Wpadded"
-#pragma clang diagnostic ignored "-Wused-but-marked-unused"
-#pragma clang diagnostic ignored "-Wmissing-variable-declarations"
-#pragma clang diagnostic ignored "-Wformat-nonliteral"
-#pragma clang diagnostic ignored "-Wstrict-prototypes"
-#include "snow.h"
+#include <gavran/infrastructure.h>
+#include <gavran/test.h>
 
 static result_t read_all(int fd, size_t size, void* buffer) {
   size_t read_bytes = 0;
@@ -48,7 +38,7 @@ result_t read_int_to_str_buffer(const char* path, char** buffer) {
   defer(close, fd);
   // <4>
   void* tmp;
-  ensure(allocate(&tmp, 128));
+  ensure(mem_alloc(&tmp, 128));
 
   size_t cancel_defer = 0;
   // <5>

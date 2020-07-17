@@ -1,8 +1,8 @@
-== At the file system level
+== Working with (and against) the file system
 
 Files are a wonderful abstraction, a stream of bytes that reside under name, sorted in a hierarchy. Simple enough that a child can use it, powerful enough to be
 the motto of an the entire set of operating systems. "Everything is a file" is one of the defining features of Unix, but it is also an abstraction, and as such,
-it is https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/[leaky].
+it is subject to https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/[the Law of Leaky Abstractions].
 
 When building a storage engine, we need to have a pretty good idea about how to manage files. As it turns out, there is a lot of things that are
 https://yakking.branchable.com/posts/falsehoods-programmers-believe-about-file-paths/[just wrong] about how we think about files.
@@ -41,212 +41,188 @@ the https://lwn.net/Articles/351422/[complexities involved]. The situation is ma
 * Specify explicitly the support configuration, raise hell if user is attempting to use on non supported configuration.
 * Make it work across the board. Plan for failure and when it happens, have the facilities in place to recover from it.
 
+[source]
+[[pal-interface]]
+.pal.h - The file system interface that we'll consume for our storage engine
+----
+include::./code/pal.h[tags=pal_api]
+----
+
 Because working with files is such a huge complex mess, and because it is _different_ across operating systems, we'll hide this complexity behind a
-platform abstraction layer (PAL). Listing 3.1 shows the core functions that the PAL expose.
+platform abstraction layer (PAL). <<pal-interface>> shows the core functions that the PAL expose. 
+The interface shown in <<pal-interface>> is very small and quite big at the same time. It it small to be the entire interface between a storage engine and a 
+file system. At the same time, there is quite a bit that is going on here. 
+
+There are two important structures that we define here: `span_t` and `file_handle_t`. The `span_t` represent a range of memory, and it is named in honor of
+`Span<T>` from .NET. This is going to be used for memory mapping and in general to represent arbitrarily sized chunks of memory. The `file_handle_t` is going
+going to be used to represent a file handle. 
+
+[NOTE]
+.Cross platform considerations
+====
+On Posix, a file description is an `int`, on Windows, it is a `HANDLE`. Right now I'm focusing only on Linux support, so I won't bother much with cross platform
+compatibility at this point. But the structure is already ready to handle either option, so it should be smooth sailing. 
+
+And yes, I'm aware of "Famous last words". 
+====
+
+The goal of this API is to allow us to do the right thing, regardless of what platform we are running on. Later on, we'll build on top of these functions the 
+storage engine implementation. Let's look at <<create_and_set_file>> to see how we can make use of this API to work with files. 
 
 [source]
-.Listing 3.1 - platform.fs.h - The file system interface that we'll consume for our storage engine
+[[create_and_set_file]]
+.test.c - Using the file API to create a file with a minimum size
 ----
-include::./code/platform.fs.h[]
-----
-<1> The `mmap_args` allows us to pass capture the required args for `mmap`, `munmap` and allow us to call `defer` easily on mmap ranges.
-<2> To enable `defer` and `try_defer` on `palfs_close_file` and `palfs_unmap`.
-
-We define an opaque type `file_handle_t`, which is how we'll communicate about files with the PAL. If you are used to C APIs, you might notice something
-interesting, the API shown in Listing 3.1 is not doing any memory allocations. The API can fail (invalid file name, wrong permissions, etc), but it won't
-have to deal with memory issues. Instead, we ask that the _caller_ will provide us with the memory for the `file_handle_t`. Typical usage of the API
-is shown in Listing 3.3.
-
-[source]
-.Listing 3.2 - Using the file API to create a file of minimum size
-----
-result_t create_and_set_file() {
-  size_t size;
-  ensure(palfs_compute_handle_size("/db/phones", &size));
-
-  file_handle_t* handle = malloc(size);
-  ensure(handle);
-  defer(free, handle);
-
-  ensure(palfs_create_file("/db/phones", handle));
-  defer(palfs_close_file, handle);
-
-  ensure(palfs_set_file_minsize(handle, 128*1024));
-
-  return success();
-}
+include::./code/test.c[tags=create_and_set_file]
 ----
 
-The code in Listing 3.2 should ensure that at the end of the way, we have a file that has a minimum size of 128KB which will retain its size even in the case of an error or
+The code in <<create_and_set_file>> should ensure that at the end of the day, we have a file that has a minimum size of 8KB which will retain its size even in the case of an error or
 a system crash. That sounds easy enough to do in theory, but require some dancing around to get to it. Right now I'm going to focus on Linux as the implementation
 system, but we'll get to other systems down the line.
 
-.Reflections on low level API and system design
-****
-The API in Listing 3.1 is interesting is several ways. You can see that we are exposing some operations (create, set size, mmap) but totally ignoring others.
-For example, we don't have any way of _reading_ data through the API.
+=== Creating a file handle
 
-I mentioned that I'm going to showcase the road that was taken. Gavran as a storage engine is going to be based on memory mapped memory in lieu of manual
-`read` calls. We'll discuss exactly how that plays into the design of the storage engine in a bit.
-
-Are there any other pieces that are missing from the API that you can see?
-****
-
-=== The file handle
-
-We defined the `file_handle_t` as an opaque type in the header, now let's see how we actually work with this on Linux. Listing 3.3 shows the implementation details.
+Now that we know how to _use_ the API, let's see how this is implemented. <<pal_create_file>> shows how we open or create a file in Gavran.
+It isn't a long function, but you can see how all the different parts we built are coming together to make it (much) easier to write correct code. 
 
 [source]
-.Listing 3.3 - fs.c - The file handle definition and usage
+[[pal_create_file]]
+.pal.linux.c - Opening (or creating) a file
 ----
-include::./code/fs.c[tags=handle_impl]
+include::./code/pal.linux.c[tags=pal_create_file]
+----
+<1> Allocate the memory for the handle and ensure that it will be freed if the function fails.
+<2> Create a mutable copy of the file name and then ensuring that the file exists (which requires mutable string).
+<3> Resolve potentially relative path to an absolute one.
+<4> Open the actual file, for now, you can ignore the meaning of the `flags`, we'll discuss them later.
+<5> Call `fsync()` on the parent directory if this is a new file, we'll see why this is needed shortly.
+
+<<pal_create_file>> starts by allocating a temporary string and then calling `pal_ensure_path`, which will ensure that the path to the file is valid and create it as an empty file.
+It then proceeds to allocate the memory for the handle and setting up `try_defer()` to ensure that in the case of failure, we'll free the allocated memory automatically.
+We then store a copy of the `path` in the handle's `filename` field. Note that we are doing that through `realpath()`, which will resolve relative paths, symbolic links, etc. We need
+to `free()` the memory there. Because `realpath` requires a file to exists before it can resolve it, we create an empty file in `pal_ensure_path()` and use the size of the file to know
+if we are dealing with an existing database or a new one.
+
+Beyond what was already mentioned, you need to take into account users who pass invalid values (file name containing `/`, for example), _all_ the intricacies of soft and
+hard links, size quotas, etc. https://lwn.net/Articles/686789/[The LWN post] about this will probably turn your hair gray.
+To keep the code size small and not overburden ourself with validation code, I'm going to state that I'm trusting the
+callers of the API to have already done the validation of the data. As you can see in <<pal_create_file>>, we are only trying to prevent
+accidents, not trying to protect against malicious input. Gavran assumes that it is called with non-malicious values (note that this is different from _valid_ values)
+as it is an embedded library and is meant to be used as part of your system. 
+
+There is one very important validation / setup that we run before we open the file. We call `pal_ensure_path()`, which ensure that we _can_ create the file. It will create the full
+directory path if needed, make sure that there isn't a directory with the name in place and in general tidy up the place before we get started. You can see how it is implemented
+in <<pal_ensure_path>>.
+
+[source]
+[[pal_ensure_path]]
+.pal.linux.c - Ensuring that the provided path is valid to create a file on
+----
+include::./code/pal.linux.c[tags=pal_ensure_path]
 ----
 
-It turns out that `pal_file_handle`, which is `typedef`-ed to `file_handle_t` is a simple struct to hold a file descriptor (`int`). We use an opaque type like that
-because on Windows, for example, the file handle is a `HANDLE` and isn't equal in size to `int`.
-
-We are also doing some strange work to compute the size of the handle, how come it isn't always `4`? This is because the `filename` field is defined as zero length
-value and thus points _past the end of the handle_.  Take a look at Figure 2, which shows the structure of `file_handle_t` implementation on Linux.
-
-.The layout of `file_handle_t` in memory on Linux
-image::{img-src}/fig2.png[]
-
+Another responsibility that <<pal_create_file>> has, aside from creating the full director path, is to let us know if we are creating a new file or opening an existing one. Why do we care?
+We are opening the file using `O_CREAT`, so the operating system will take care of that detail for us. 
 
 [WARNING]
 .Beware the paths
 ====
-In Listing 3.3, I'm requiring that the provided path will be an absolute path. Why make this requirement?
-I'm trying to avoid doing things that we don't need to inside the storage engine. The caller can easily provide the full path, and it turns out that this
-matters.
+In <<pal_create_file>>, I'm keeping track of the absolute path of the file. Even if we were provided with a relative path, I'm converting that to the full one. 
+Why make extra work for ourselves? I could have simply called `strdup()` and call it a day, no?
 
-Let's assume that we accept the path "db/phones", which is a relative path. It gets resolved based on the current directory, as expected. However, our
+Let's assume that we accept the path `"db/phones"`, which is a relative path. It gets resolved based on the current directory, as expected. However, our
 storage engine is meant to be _embedded_. What will happen if the parent application decide to change its output directory? That will mean that our
 relative file name will point to a _different_ location, which is going to cause unforeseen issues. Better to stop this early.
 
-That is leaving aside all the sheer complexity that are paths in the first place. There are _many_ vulnerabilities and issue that arose because of
-improper path handling. By requiring the the path will be rooted, I'm avoiding about 60% of them.
-====
-
-
-Hopefully Figure 2 gives you a more intuitive manner of how we put the name of the file immediately past the `file_handle_t`
-value. I'm doing it this way to avoid another pointer field or a separate allocation. All I need here is just one buffer and we can put everything inside
-properly.
-
-=== Creating a file
-
-One of my primary goals is to build the right primitives that we need and get as far away from the file system as I can get. These primitives will abstract
-the different nature of file and operating systems. We'll get to the point where we have a small set of actions that we can perform and then build the rest
-of the system on top of that.
-
-[IMPORTANT]
-.Using a block device instead of bothering with the file system
-====
-Technically speaking, the model that I intend to use will work just as well for raw block devices as it would do for files. Indeed, there are some
-real benefits of bypassing the file system for a storage engine. What I most want from a file system as a storage engine is that it will
-_get out of my way_. There are also some performance benefits, avoiding the need for data fragmentation, overhead of the file system, etc.
-
-That said, working with files is _ever so much_ easier. Yes, you can use commands such as `dd` to move data between blocks and files, but that
-tend to be much more awkward than if the data reside in a file. In fact, we are going to try hard to get to the point where we have as few files
-as we can get away with and do all our work internally inside our file.
-
-That would allow us to switch to a block device at a later point in time, but having direct access to the file is just too convenient to give up,
-leaving aside the other issue. A database server can expect to have the right kind of permissions to allow opening a raw block device. But an
-embedded storage engine needs to deal with limited rights on behalf of its processes.
-====
-
-The act of creating a file is a non trivial operation, since we need to make sure that the file creation is atomic and durable. Beyond what was already
-mentioned, you need to take into account users who pass invalid values (file name containing `/`, for example), _all_ the intricacies of soft and
-hard links, size quotas, etc. https://lwn.net/Articles/686789/[The LWN post] about this will probably turn your hair gray.
-To keep the code size small and not overburden ourself with validation code, I'm going to state that I'm trusting the
-callers of the API to have already done the validation of the data. As you can see in Listing 3.3, we are only doing minimal validations to prevent
-accidents, not trying to protect against malicious input.
-
 On Linux, once you opened a file, you no longer have access to its name. It may have multiple names (hard links) or non (anonymous or have been deleted).
-As such, the `palfs_compute_handle_size` requests enough space to store the name that the called passed us as part of the same allocation of `file_handle_t`.
+That is why I'm keeping track of the provided name (after resolving to the real path) as part of the handle. It is too good a source of information to just 
+discard.
+====
+
+The act of creating a file is a non trivial operation, since we need to make sure that the file creation is atomic and durable.
+<<fsync_parent_directory>> deals with a fairly nasty problem with Linux, management of file metadata. In particular, adding a file or changing the size of a file will
+cause changes not to the file itself, but to its parent directory. This isn't _actually_ true, but it is a fairly good lie in the sense that it gives you
+enough information to have a mostly correct gut feeling about how things work. 
+
+If you want to understand how it works in more depth, I would recommend reading an excellent
+book on the topic: http://www.nobius.org/practical-file-system-design.pdf[Practical File System Design with the Be File System]. It is an old one (I read it the first
+time close to two decades ago) but it does an excellent job of covering a _lot_ of the details. At under 250 pages, it makes for an _excellent_ read for a very complex
+topic.
 
 [NOTE]
-.The file system abstraction and the shoe on the other foot
+.What about fork support?
 ====
-On Linux, `file_handle_t` is defined as a struct containing a single `int` and followed by a `char*` buffer holding the null terminated string of
-the file. On Windows, on the other handle, the definition will use a `HANDLE` instead (which is `void*`, and we'll get the file name using
-`GetFinalPathNameByHandle` or `GetMappedFileName` instead. The reason that this is defined as an opaque type is that I'm trying to keep to an API
-that I can use on all platforms.
+When opening the file, we use `O_CLOEXEC`. Meaning that we don't want to share this file descriptor across forks. The design of Gavran isn't going to be friendly to multi process access
+and multiple processes sharing the same file descriptors can be problematic. For that reason, we ask the operating system to close any such files explicitly. 
 ====
 
-After calling `palfs_compute_handle_size` the caller is expected to allocate enough memory to store the data and then call `palfs_create_file` to actually
-create the handle. I'm going to talk about the functions in the same way the C compiler process them, so we'll start from the leafs first and build up our
-understanding for the big finish when we actually create the file.
-
-Listing 3.4 deals with a fairly nasty problem with Linux, management of file metadata. In particular, adding a file or changing the size of a file will
-cause changes not to the file itself, but to its parent directory. This isn't _actually_ true, but it is a fairly good lie in the sense that it gives you
-enough information to have a mostly correct gut feeling about how things work.
-
-Metadata updates not being part of `fsync` make it possible for you to make changes to a file (incidentally increasing its size), calling `fsync()` on the
-file and then losing data because the _size_ of the file wasn't properly persist to stable medium. I'll refer you to
+Metadata updates not being part of `fsync()` make it possible for you to make changes to a file (creating the file or increasing its size), call `fsync()` on the
+file and then losing data because the _existence_ or the _size_ of the file wasn't properly persist to stable medium. I'll refer you to
 https://lwn.net/Articles/457667/[LWN again for the gory details].
 
-[source]
-.Listing 3.4 - fs.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
-----
-include::./code/fs.c[tags=fsync_parent_directory]
-----
-<1> We need to find the name of the _parent_ directory, we add a null in the right location to find it.
-<2> Checking that fhe file was opened successfully or `failed` otherwise.
-<3> Setting up `defer` to close the file descriptor.
-
-
-Listing 3.4 has quite a lot of error handling, but most of it isn't visible, hidden in the `defer` call which simplify the overall system logic.
-Why am I being so paranoid about error handling? To the point I defined a whole infrastructure for managing that before writing my first file?
-
+<<pal_create_file>> and <<fsync_parent_directory>> has quite a lot of error handling, but most of it isn't visible, hidden in the `defer()` call which simplify the overall system logic.
+Why am I being so paranoid about error handling? To the point I defined a whole infrastructure for managing that before writing a single byte to a file?
 The answer is simple, we aim to create an ACID storage engine, one which will take data and _keep_ it. As such, we have to be aware that the
-underlying system can fail in interesting ways. The ALICE paper has found numerous issue is projects that
-have been heavily battle tested. And a few years ago that have been a case of data loss in Postgres that has been track down to not checking the
-return value of an `fsync()` call. This LWN article summarize https://lwn.net/Articles/752063/[the incident] quite well.
-If we aim to build a robust system, we _must_ assume that anything can fail, and react accordingly.
+underlying system can fail in interesting ways. 
+
+[source]
+[[fsync_parent_directory]]
+.pal.linux.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
+----
+include::./code/pal.linux.c[tags=fsync_parent_directory]
+----
+<1> If there is no `/` in the path, assume that this is from the current directory
+<2> We need to find the name of the _parent_ directory, we add a null in the right location to find it.
+
+The ALICE paper has found numerous issue is projects that have been heavily battle tested. And a few years ago that have been a case of data loss in PostgreSQL that has been 
+track down to not checking the return value of an `fsync()` call. This LWN article summarize https://lwn.net/Articles/752063/[the incident] quite well.
+If we aim to build a robust system, we _must_ assume that anything can fail, and react accordingly. 
 
 [WARNING]
-.What happens if `close` fail from the `defer`?
+.What happens if `close()` fail from the `defer()`?
 ====
-In Listing 3.4, we setup `close` to be invoked automatically by the compiler when the function ends. However, what happens if there is an error
+In <<fsync_parent_directory>>, we setup `close()` to be invoked automatically by the compiler when the scope ends. However, what happens if there is an error
 in the `close` ? That happens after the `return` statement, so the return value was already selected. We handle this by pushing an error from a
 deferred operation and checking `errors_get_count()` to validate that there are no surprises.
 
-And while it may seem funny, `close` _can_ fail. Here is the https://lwn.net/Articles/576478/[LWN discussion on the topic ]. We are going to handle
+And while it may seem funny, `close` _can_ fail. Here is the https://lwn.net/Articles/576478/[LWN discussion on the topic ]. And 
+https://stackoverflow.com/questions/24477740/[StackOveflow] has an interesting story of the result of missing a call to `close()`. We are going to handle
 this differently, though. Errors during cleanup routines are already very hard to deal with. If we have to deal with them routinely that would be
-a pain. Instead, we are going to try to set things up so this doesn't happen.
+a pain. Instead, we are going to try to set things up so this doesn't matter.
 
-Our strategy is to ensure that there is no harm in managing failures. If a `close` failed, then the data was already flushed to disk or it doesn't
-matter. Use of temporary files (which we intend to discard) and calling `fsync` appropriately will mean that an unexpected failure is not going
-to have an impact on our system.
+With `verify()` also validating the `errors_count()`, we know that even if the error happened in the `defer()` call, we'll detect and treat it just the same.
 ====
 
-What Listing 3.4 does, essentially, is to `open` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This
+What <<fsync_parent_directory>> does, essentially, is to `open()` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This
 instructs the file system to properly persist the directory information and protect us from losing a new file.  Note that we rely on the fact that
 strings are mutable in C to truncate the `file` value by adding a null terminator for the parent directory (we restore it immediately afterward).
 This trick allows us to avoid allocating memory during these operations.
+It is safe to make this change in memory because the string we mutate is the one belonging to the `handle`. So that is our own memory and we are fine to modify it.
 
-It is safe to make this change in memory because the buffer that this string is located on is the one belonging to the `handle`. So that is our own
-memory and we are fine to modify it.
-
-[TIP]
-.The cost of `fsync`
-====
-Using `fsync()`, we can ensure that writes to the disk has actually reached a stable medium. In other words, after `fsync()` was called, we can
-rest assured that a power failure won't wipe our data. For a storage engine that, as you can imagine, this is a highly desirable property.
-
-The issue is that `fsync()` usage, however, has a *very* high cost. To the point where we'll spend considerable time and effort down the line
-to _reduce_ the number of times we have to call `fsync()`. The primary issue with `fsync()` is that it needs to clear not just the data in our
-file but to effectively flush the entire disk cache. If you have a lot of pending I/O, you will _wait_ until this is completed, and that can
-take a while.
-====
-
-The reason we need to call `fsync_parent_directory` is that to make the life of the user easier, we are going to create the file if it does not
-exists, including the parent directory. And if we are creating these directories, we need to ensure that they won't go away because of file
+The reason we need to call `fsync_parent_directory()` is that to make the life of the user easier, we are going to create the file if it does not
+exists, including any parent directories. And if we are creating these directories, we need to ensure that they won't go away because of file
 system metadata issues.
+
+Sadly, safely creating the full path is a somewhat tedious task. You can see how we approach it in <<pal_ensure_full_path>>, where quite a lot is going on.
+If the file already exists, we can return successfully immediately. If the file is a directory, we return an error. We then scan the path
+one directory at a time and check if the directory exists. I'm using a trick here by putting a `0` in the place of the current directory
+separator. 
+
+[source]
+[[pal_ensure_full_path]]
+.<<pal_ensure_full_path>> - pal.linux.c - Ensuring that the full path provide exists and the caller has access to it
+----
+include::./code/pal.linux.c[tags=pal_ensure_full_path]
+----
+
+In other words, given a `/db/phones\0`, we'll start the search for `/` from the second character and then place a null terminator on that 
+position. The filename would then be: `/db\0phones\0`. If needed, we will create the directory and then move to the next one. As part of
+that, we'll set the `/` again and continue from the next `/`. This code requires a _mutable_ string to work, but it does the work with no 
+allocations, which is nice.
 
 .Reducing user frustration
 ****
-Automatically creating a directory when given a path is a _small_ feature. Call `mkdir` before `open`, pretty much. Doing that reliably_ is more
+Automatically creating a directory when given a path is a _small_ feature. Call `mkdir()` before `open`, pretty much. Doing that _reliably_ is more
 complex, but not too hard. There are things you need to consider when doing this, what permissions should you give, how to handle any soft or
 hard links that you find along the way, etc.
 
@@ -254,38 +230,7 @@ On the other hand, _not_ creating the directory automatically adds a tiny bump o
 unnecessary step to take along the way. 
 ****
 
-Sadly, safely creating the full path is a somewhat tedious task. You can see how we approach it in Listing 3.5, where quite a lot is going on.
-
-[source]
-.Listing 3.5 - fs.c - Ensuring that the full path provide exists and the caller has access to it
-----
-include::./code/fs.c[tags=ensure_file_path]
-----
-
-If the file already exists, we can return successfully immediately. If the file is a directory, we return an error. We then scan the path
-one directory at a time and check if the directory exists. I'm using a trick here by putting a `0` in the place of the current directory
-separator. 
-
-In other words, given a `/db/phones\0`, we'll start the search for `/` from the second character and then place a null terminator on that 
-position. The filename would then be: `/db\0phones\0`. If needed, we will create the directory and then move to the next one. As part of
-that, we'll set the `/` again and continue from the next `/`. This code requires a _mutable_ string to work, but it does the work with no 
-allocations, which is nice.
-
-If we need to create a new directory, we make sure to call `fsync_parent_directory` to ensure that a power failure will not cause the directory to go poof.
-After all this setup, we can look at Listing 3.6, where the actual creation of the file takes place. 
-
-[source]
-.Listing 3.6 - fs.c - Creating a file in a safe manner" .c
-----
-include::./code/fs.c[tags=palfs_create_file]
-----
-
-By the time we got to Listing 3.6, all the interesting tidbits of code are already done. We copy the file name to our own buffer, which we control. That
-means that the rest of the code can treat this file name as a mutable string.
-
-If the file does not exist, we create the path to the file, as we saw in Listing 3.5. If the file exists, we make sure that it is not a directory. I'm 
-trying to go a little bit beyond rudimentary checks here and produce production level code.
-
+If we need to create a new directory, we make sure to call `fsync_parent_directory()` to ensure that a power failure will not cause the directory to go poof.
 As careful as I am being here, note that there are many scenarios that I'm not trying to cover. Using soft and hard links or junction points is the first example that
 pops to mind. And double the work if you need to deal with files or paths that come from un-trusted source. OWASP has quite a bit to talk about in terms of the kind of
 vulnerabilities that this might expose.
@@ -299,64 +244,66 @@ When creating a file, it is created with zero bytes. That makes perfect sense, a
 allocate the additional space needed on the fly. This is simple, require no thinking on our part and exactly the wrong thing to want in a storage engine.
 
 We just saw how hard we have to work to properly ensure that changes to the metadata (such as, for example, changing its size) are properly protected against possible
-power failures. If we would need to call `fsync_parent_directory` after every write, we can kiss our hopes for good performance goodbye. Instead of letting the file
+power failures. If we would need to call `fsync_parent_directory()` after every write, we can kiss our hopes for good performance goodbye. Instead of letting the file
 system allocate the disk space for our file on the fly, we'll ask it for the space in advance, in well known locations. That will ensure that we only rarely need to
-call `fsync_parent_directory`. 
+call `fsync_parent_directory()`. 
 
 Requesting the disk space in advance has another major benefit, it gives the file system the most information about how much disk space we want. It means that we give
 the file system the chance to give us long sequences of consecutive disk space. In the age of SSD and NVMe it isn't as critical as it used to be, but it still matters.
 Depending on your age, you may recall running `defrag` to gain _substantial_ performance increase on your system or have never heard about it at all. 
 
-Listing 3.7 shows how we request that the file system allocate enough disk space for us. At its core, we simply call to `posix_fallocate` which will extend the file
-for us (or do nothing if the file is already large enough). 
+<<pal_set_file_size>> shows how we request that the file system allocate enough disk space for us. At its core, we simply call to `ftruncate()` which will extend the file
+for us, if needed. The function allows you to specify minimum and maximum file size because we'll need to support truncation of files in the future, and if 
+the amount of code is small enough, I would rather show you the whole thing at once, rather than tease it out. 
 
 [source]
-.Listing 3.7 - fs.c - Pre-allocate disk space by letting the file system know ahead of time what we need
+[[pal_set_file_size]]
+.pal.linux.c - Pre-allocate disk space by letting the file system know ahead of time what we need
 ----
-include::./code/fs.c[tags=palfs_set_file_minsize]
+include::./code/pal.linux.c[tags=pal_set_file_size]
 ----
 
-Much of the work in Listing 3.7 is dedicated to calling `fsync_parent_directory`, but not because we call it. The issue is that `fsync_parent_directory` mutate the
-filename that is passed to it. It make sure to return things to normal by the time it returns, but it means that we cannot pass it a constant value and expect things
-to work and `palfs_get_filename` returns a `const char*`, so we have to use a temporary copy.  I'm defining an `char` array of `PATH_MAX` to store the value in a 
-mutable fashion and copying the value there. 
-
-_Technically_, I could pass the `filename` value to the `fsync_parent_directory`, I know where the value came from and it _is_ mutable. But the problem is that this
-code needs to be able to run in a multi threaded environment. Imagine what will happen if one thread executes `fsync_parent_directory` while another reads the name
-using `palfs_get_filename`. We'll get really hard to figure out bugs. 
+Note that in <<pal_set_file_size>> we call to `fsync_parent_directory()`. That isn't interesting on its on, it is interesting because we need to pass it a _mutable_ string.
+Of course, `fsync_parent_directory()` makes sure to return things to normal by the time it returns, but it means that we cannot pass it a constant value and expect things
+to work and `handle->filename` is going to be part of our database's shared state, so we can't mutate it casually. There might be other threads peeking at the value while it 
+is being mutated. Therefor, we have to use a temporary copy. Convenience function such as `mem_duplicate_string()` and using `defer()` make this a breeze.
 
 [WARNING]
 .The perils of paths
 ====
-In Listing 3.7, I'm using `PATH_MAX` as the size of `filename_mutable`. This is usually defined to be 4Kb in size, which should be sufficient for pretty much all
-needs. Only a very small amount of it is likely to be used and this isn't meant to be used in a deep stack. Note that I'm checking that the length of the name is
-sufficient to fit in there, to avoid smashing the stack. 
+I'm doing dynamic memory allocation in <<pal_set_file_size>>, but I could do a static buffer of size `PATH_MAX`, wouldn't that be better? 
+There are actually scenarios where `PATH_MAX` is _not_ sufficient. See https://eklitzke.org/path-max-is-tricky[this post] a full discussion of the perils of 
+using `PATH_MAX`.
 
-There are actually scenarios where `PATH_MAX` is _not_ sufficient. See this post^[https://eklitzke.org/path-max-is-tricky] a full discussion of the perils of 
- using `PATH_MAX`. 
+One of tha advantages of stack allocation is that it will be automatically cleaned up. We get the same behavior via `defer()`, so that is great. There _is_ a 
+non trivial cost for allocating memory, though. We'll discuss memory allocation strategies when we get to benchmarking, in the last part of this book.
 ====
 
 === Closing a file
 
-After quite a journey, we are almost at the end. The only function we are left to implement to be able to compile the code in Listing 3.2 is `palfs_close_file`.
-You can see the code in Listing 3.8.
+After quite a journey, we are almost at the end. The only function we are left to implement to be able to compile the code in <<create_and_set_file>> is `pal_close_file()`.
+You can see the code in <<pal_close_file>>.
 
 [source]
-.Listing 3.7 - fs.c - Closing a file
+[[pal_close_file]]
+.pal.linux.c - Closing a file
 ----
-include::./code/fs.c[tags=palfs_close_file]
+include::./code/pal.linux.c[tags=pal_close_file]
 ----
 
-The `palfs_close_file` function simple call the `close` method and add some additional error handling, nothing more. We aren't trying to call `fsync` or do any
-fancy things at this layer. That will be the responsibility of higher tiers in the code. 
+The `pal_close_file()` function simple call the `close()` method and add some additional error handling, nothing more. We aren't trying to call `fsync()` or do any
+fancy things at this layer. That will be the responsibility of higher tiers in the code. Note that we _setup_ the `handle->filename` and the `handle` itself to 
+be freed, but we aren't calling that explicitly. I find that it is cleaner to do things this way. I don't need to think about the error conditions that I may
+need to cover.
 
-One thing that deserve calling out here, an error from `close` isn't theoretical. In almost all cases, whenever you do I/O, you are not interacting with
-the actual hardware, but the page cache. That means that almost all the I/O is done in an asynchronous fashion and `close` is one way for you to get 
+One thing that deserve calling out here, an error from `close()` isn't theoretical. In almost all cases, whenever you do I/O, you are not interacting with
+the actual hardware, but the page cache. That means that almost all the I/O is done in an asynchronous fashion and `close()` is one way for you to get 
 notified if there have been any errors.
 
-Even with checking the return value of `close`, you still need to take into account that errors _will_ happen. Unless `fsync` was called, the file system
-is free to take you writes to a `close`-ed file and just throw them away. This is not a theoretical issue, by the way, it happens quite often in many 
-failure scenarios. 
+Even with checking the return value of `close()`, you still need to take into account that errors _will_ happen. Unless `fsync()` was called, the file system
+is free to take you writes to a `close()` file and just throw them away. This is not a theoretical issue, by the way, it happens quite often in many 
+failure scenarios. The recommendation from the https://marc.info/?l=linux-fsdevel&m=152535409207496&w=2[file system mailing list] is to call `fsync()` and 
+then `close()`, to get the highest durability mode.
 
 === Reading and write from the file
 
@@ -364,10 +311,10 @@ Now that we are able to create a file and allocate disk space for it, we need to
 from this file. I'll defer talking about the internal organization of the file to the next chapter, for now, let's talk about the low level interface
 that the PAL will offer to the rest of the system. 
 
-We already saw them in Listing 3.1, `palfs_mmap` and `palfs_unmap` as well as `palfs_write_file` are the functions that are provided for this purpose. 
-There isn't much there, which is quite surprising. There is a _vast_ difference between the performance of reading from disk (even fast ones) and 
-reading from memory. For this reason, database and storage engines typically spend quite a bit of time managing buffer pools and reducing the 
-number of times they _have_ to go to disk.
+We already saw them in <<pal-interface>>, `pal_mmap()` and `pal_unmap()` as well as `pal_write_file()` and `pal_read_file()` are the functions that are 
+provided for this purpose.  There isn't much there, which is quite surprising. There is a _vast_ difference between the performance of reading from 
+disk (even fast ones) and reading from memory. For this reason, database and storage engines typically spend quite a bit of time managing buffer pools 
+and reducing the number of times they _have_ to go to disk.
 
 I'm going to use a really cool technique to avoid the issue entirely. By mapping the file into memory, I don't have to write a buffer pool, I can
 use the page cache that already exists in the operating system. Using the system's page cache has a lot of advantages. I have run into this idea
@@ -375,71 +322,166 @@ for the first time when reading LMDB's codebase and it is a fundamental property
 I also recommend reading the https://queue.acm.org/detail.cfm?id=1814327["You're Doing It Wrong" paper by Poul-Henning Kamp] that goes into 
 great details why this is a great idea.
 
-The idea is that we'll ask the operating system to `mmap` the file into memory and we'll be able to access the data through directly memory access.
+The idea is that we'll ask the operating system to `mmap()` the file into memory and we'll be able to access the data through directly memory access.
 The operating system is in charge of the page cache, getting the right data to memory, etc. That is a lot of code that we don't have to write, which
 has gone through literal decades of optimizations. In particular, the page cache implements strategies such as read ahead, automatic eviction as needed
 and many more behaviors that you'll usually need to write in a buffer pool implementation. By leaning on the OS' virtual memory manager to do all that
 we gain enormous leverage. 
 
 We could map the memory for both reads and writes, but I believe that it would make more sense to only map the file data for reads. This is to avoid
-cases where we accidentally write over the file data in an unintended manner. Instead, we create an explicit call to write the data to the file: `palfs_write_file`.
-The `palfs_unmap` is just the other side of the `palfs_mmap` operation, allowing us to clean up after ourselves. 
-You can see the mapping and un-mapping code in Listing 3.8.
+cases where we accidentally write over the file data in an unintended manner. Instead, we create an explicit call to write the data to the file: `pal_write_file()`.
+The `pal_unmap()` is just the other side of the `pal_mmap()` operation, allowing us to clean up after ourselves. I'm adding `pal_read_file()` for completion's sake
+and because if we are running in 32 bits, we can't really `mmap()` a 10 GB file, so we also need another fallback. You can see the mapping and un-mapping code in <<pal_map>>.
 
-[source]
-.Listing 3.8 - fs.c - Implementing mapping and un-mapping of memory from out data file
-----
-include::./code/fs.c[tags=palfs_mmap]
-----
+What is the best option for reading and writing, then? Go memory mapped I/O all the way or rely on `read()` and `write()`?  And can we mix them? Why have two way to go about
+this? I'm mostly going to be using memory mapped I/O for reads, but writes will use `pwrite()` to write to it. That gives me the benefit of using the OS' buffer cache and
+make the best use of the system resources. Using `pwrite`, on the other hand, ensures that we aren't accidentally writing beyond the end of the buffer and will help us catch
+any errors. 
 
-There really isn't much there in Listing 3.8. We just need to call `mmap` or `munmap` and do some basic error reporting in the case of an error.
-In Listing 3.9, however, we allow to close the file and unmap the memory using a `defer` call.
-
-[source]
-.Listing 3.9 - fs.c - Allowing to close the file and unmap via defer
-----
-include::./code/fs.c[tags=defer_palfs_close_file]
-----
-
-And in Listing 3.10 we have the implementation of writing to a file: `palfs_write_file`
-
-[source]
-.Listing 3.10 - fs.c - Writing data to the file
-----
-include::./code/fs.c[tags=palfs_write_file]
-----
-
-The `palfs_write_file` call is a simple wrapper around the `pwrite` call, with the only difference being that we'll repeat the write until the entire buffer
-has been written. In practice, this usually means that we'll only do a single call to `pwrite` which will perform all the work.
-
-You'll note that I'm using two separate methods to interact with the file data. On the one hand, I'm using `mmap` to read the data, but I'm using the
-I/O call `pwrite` to write to it. On Linux, that is safe to do, because both `mmap` and the `write` call are using the same page cache and are 
-coherent with respect to one another. 
-
+On Linux, that is safe to do, because both `mmap()` and the `write()` call are using the same page cache and are coherent with respect to one another. 
 On _Windows_, on the other hand, that is not the case. Mixing file I/O calls and memory mapped files lead to situation where you write data using the
 I/O API which will take some time to be visible using the memory view. For further reading, you can read how I found out about 
 https://ayende.com/blog/164577/is-select-broken-memory-mapped-files-with-unbufferred-writes-race-condition[this delightful state off affairs]. When we get to the 
 Windows side of things, we'll show how to deal with this limitation properly.
 
-=== Using our API for storing and retrieving data
+[source]
+[[pal_map]]
+.pal.linux.c - Implementing mapping and un-mapping of memory from out data file
+----
+include::./code/pal.linux.c[tags=pal_mmap]
+----
 
-We are still very early on in the process, but I think that peeking at Listing 3.12 will show you how far we have come. We are making for use of all
-of our functions to store and read data from the file.
+There really isn't much there in <<pal_map>>. We just need to call `mmap()` or `munmap()` and do some basic error reporting in the case of an error.
+In <<pal_map_defer>>, however, we allow to `close()` the file and `unmap()` the memory using a `defer()` call.
 
 [source]
-.Listing 3.11 - Using the file API to read & write
+[[pal_map_defer]]
+.pal.linux.c - Allowing to `close()` the file and `unmap()` via `defer()`
 ----
-include::./code/main.c[]
+include::./code/pal.linux.c[tags=pal_map_defer]
 ----
-<1> Allocating memory, ensuring that the memory was allocated and setting up its release on function exit.
-<2> Creating a file, ensuring that it was successful and setting up the closing of the file descriptor on function exit.
-<3> Mapping a file range, ensuring that it was successful and setting up the cleanup on function exit.
 
-Listing 3.11 shows case the the full  use of `defer` again, which is rapidly becoming my favorite approach to dealing with error handling in this codebase.
+In <<pal_write_file>> we have the implementation of writing and reading to files using normal file I/O.
+The `pal_write_file()` call is a simple wrapper around the `pwrite()` call, with the only difference being that we'll repeat the write until the entire buffer
+has been written. In practice, this usually means that we'll only do a single call to `pwrite()` which will perform all the work. And `pal_read_file()` does 
+the same on top of `pread()`. The only difference there is that `pal_read_file` will consider partial writes as errors, so you either get the whole buffer you
+asked for, or an error. 
+
+[source]
+[[pal_write_file]]
+.pal.linux.c - Writing and reading data to the file
+----
+include::./code/pal.linux.c[tags=pal_write_file]
+----
+
+As much as I want to tunnel my writes I/O purely through the `pwrite` system call, there are going to be cases where we'll want to enable writable memory map
+for the ease in which they allow us to make changes in memory. Supporting that is quite easy, using the `mprotect()` system call, you can see the code in
+<<pal_enable_writes>>.
+
+[source]
+[[pal_enable_writes]]
+.pal.linux.c - Enable writable memory maps and allow to disable them
+----
+include::./code/pal.linux.c[tags=pal_enable_writes]
+----
+
+<<pal_enable_writes>> doesn't define a `pal_disable_writes()` method, instead it jump directly to the `defer` call. You are expected to call `defer(pal_disable_writes, span);`
+immediately after calling `ensure(pal_enable_writes(span)`. This API reflects the notion that writable memory mapped is meant to be _rare_.
+
+=== Durable writes and `fsync()`
+
+There is only one area of the API that we haven't looked at yet. The `pal_fsync()` function is implemented just as simply as you would expect it to be. You can see it in 
+<<pal_fsync>>.
+
+[source]
+[[pal_fsync]]
+.pal.linux.c - Flushing a file
+----
+include::./code/pal.linux.c[tags=pal_fsync]
+----
+
+Actually, there is a surprise in <<pal_fsync>>, we aren't calling `fsync()`, we are only calling `fdatasync()`. Note that elsewhere in the PAL, we used `fsync()`, in 
+<<fsync_parent_directory>>, for example. Why this discrepancy? And why we call the method `pal_fsync()` and not `pal_fdatasync()`?
+
+When we call `fsync()`, we are asking to flush the data of the file to disk and the file's metadata (last modified, access time, etc). When we call `fdatasync()`, we 
+only ask to flush the file's data, the metadata isn't required to be included. That makes `fdatasync()` cheaper for scenarios where metadata updates aren't important.
+Remember, `fsync()` and `fdatasync()` are _expensive_, so any reduction in cost is welcome.
+
+I'm calling it `pal_fsync()` because the choice of `fdatasync()` is an implementation detail. On Mac, we'll need to use `fcntl(fd, F_FULLFSYNC);` because `fsync()` 
+doesn't actually do what it is supposed to do. On Windows, we'll call to `FlushFileBuffers()`, which is the `fsync()` equivalent. 
+We''ll learn all about why `fsync()` is important to a storage engine in Chapter 8. 
+
+There is another aspect of durable writes that we have to look at. In <<pal_create_file>> I mentioned the `flags` argument and said that I'll talk about it later. 
+That later is now, and you can see the flags' options in <<pal_file_creation_flags>>.
+
+[source]
+[[pal_file_creation_flags]]
+.pal.h - Flags for opening a file
+----
+include::./code/pal.h[tags=pal_file_creation_flags]
+----
+
+There aren't really many options here, we have durable mode and non durable mode, that is all. When looking at <<pal_create_file>> we can see that if we set the 
+`flags` to `pal_create_file()` to `pal_file_creation_flags_durable`, it will simply add the following flags to the `open()` call: `O_DIRECT | O_DSYNC`. What does
+this mean?
+
+
+[TIP]
+.The cost of `fsync()`
+====
+Using `fsync()`, we can ensure that writes to the disk has actually reached a stable medium. In other words, after `fsync()` was called, we can
+rest assured that a power failure won't wipe our data. For a storage engine that, as you can imagine, this is a highly desirable property.
+
+The issue is that `fsync()` is a *very* costly call. It is usually _the_ most expensive call you'll make, period. To the point where we'll spend 
+considerable time and effort down the line to _reduce_ the number of times we have to call `fsync()`. The primary issue with `fsync()` is that it 
+needs to clear not just the data in our file but to effectively flush the entire disk cache. If you have a lot of pending I/O, you will _wait_ until 
+this is completed, and that can take a while.
+====
+
+I'm going to cover this in more detail in Chapter 8, but the general idea is that `O_DSYNC` is saying to the operating system that on every write to the file, it needs
+to behave as if we called `fdatasync()` and `O_DIRECT` instructs the file system to ignore all buffers and use direct I/O. _Together_, however, they allow us to do 
+something far more interesting. They tell the operating system that we want to make a durable write to disk, bypassing all buffering in the middle. This is a _dramatically_
+more expensive option, and using it in this manner requires that we'll accept some harsh limitations on how we can actually write. All data must be page aligned, all
+writes must be page aligned, etc. 
+
+We'll be using this mode sparingly, but it is a crucial one to ensuring that we can get proper durable writes in the system. You can see how they are used in Chapter 8.
+For now, we'll just use the non durable mode everywhere.
+
+
+[NOTE]
+.Using a block device instead of bothering with the file system
+====
+Technically speaking, the model that I intend to use will work just as well for raw block devices as it would do for files. Indeed, there are some
+real benefits of bypassing the file system for a storage engine. What I most want from a file system as a storage engine author is that it will
+_get out of my way_. There are also some performance benefits, avoiding the need for data fragmentation, overhead of the file system, etc.
+
+That said, working with files is _ever so much_ easier. Yes, you can use commands such as `dd` to move data between blocks and files, but that
+tend to be much more awkward than if the data reside in a file. In fact, we are going to try hard to get to the point where we have as few files
+as we can get away with and do all our work internally inside our file.
+
+That would allow us to switch to a block device at a later point in time, but having direct access to the file is just too convenient to give up.
+However, there is another consideration to take into account. A database server can expect to have the right kind of permissions to allow opening a 
+raw block device. But an embedded storage engine needs to deal with limited rights on behalf of its processes.
+====
+
+
+=== Using our API for storing and retrieving data
+
+We are still very early on in the process, but I think that peeking at <<read_write_io>> will show you how far we have come. We are making for use of all
+of our functions to store and read data from the file.
+
+[source,c]
+[[read_write_io]]
+.Using the file API to read & write
+----
+include::./code/test.c[tags=read_write_io]
+----
+
+<<read_write_io>> shows case the the benefits of `defer` again, which is rapidly becoming my favorite approach to dealing with error handling in this codebase.
 We have to deal with multiple resources, but there isn't any jump in complexity in the function. Everything _works_. 
 
-As for the actual code, we create a new database, ensure that it has the right size, map it into memory and then write a value to it using the `write_file` 
-and read from it using the memory mapped address. The code reads nearly as well as the description of the code, with little in the way of unnecessary details.
+As for the actual code, we create a new database, ensure that it has the right size, map it into memory and then write a value to it using the `pal_write_file()` 
+function. We then read from it using the memory mapped address. The code reads nearly as well as the description of the code, with little in the way of unnecessary details.
 
 This may seem like a humble beginning, but we are currently building the foundation of our storage engine. In the next chapter, we are going to 
 start talking about how we are going to make _use_ of this functionality.
@@ -448,21 +490,14 @@ start talking about how we are going to make _use_ of this functionality.
 
 In order to make sure that we are producing good software, and that means tests. Now that the chapter is over, it is time to see its tests. I'm not going
 to deeply into the testing side of the pool, but I have found them to be invaluable to ensure that the software does what you _think_ it does.
-
-[source,python]
-.Listing 3.12 - Testing the file API
-----
-include::../pyapi/tests03.py[]
-----
+In this case, you already saw the test cases, <<read_write_io>> and <<create_and_set_file>>, so I won't bother repeating them. 
 
 .A note on testing
 ****
 On each chapter, I'm going to create a set of unit tests that will verify the functionality on the system. Each chapter conclude with a system that pass
 all its (and previous) tests. That is important to ensure that any change that I'm making isn't going to break the system.
 
-That said, be aware that you can spend a lot of time tying yourself to a particular implementation choices using tests. I'm testing my code in Python
-and there is a very small Python layer to isolate the tests from the C code. That means that any changes that I make are going to be easier to adapt to.
-
+That said, be aware that you can spend a lot of time tying yourself to a particular implementation choices using tests. 
 Right now I'm writing fairly silly tests, mostly because I'm not going to try to test that we are writing durably to disk. That requires a lab with a
 UPS that I can trigger via an API and a machine that I don't mind frying.
 ****

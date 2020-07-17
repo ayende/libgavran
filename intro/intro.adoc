@@ -266,13 +266,13 @@ This infrastructure is inspired by the way OpenSSL built their error reporting s
 some Go flavor resource management to get a much more readable codebase. The very first thing that we'll do in this book is setup the appropriate infrastructure 
 to enable good resource management and error handling.
 
-In *Part I* we'll build the foundation of Gavran, the manners in which it persist information to disk and manages transactions.
+In *Part II* we'll build the foundation of Gavran, the manners in which it persist information to disk and manages transactions.
 
-In *Part II* we'll look into building data structures on top of the persistence. We'll use those to store actual user's data.
+In *Part III* we'll look into building data structures on top of the persistence. We'll use those to store actual user's data.
 
-In *Part III* we'll add multi threading support to Gavran.
+In *Part IV* we'll add multi threading support to Gavran.
 
-In *Part IV* we'll run benchmarks and compare Gavran to other databases. Then we'll fix any performance issues that we'll run into.
+In *Part V* we'll run benchmarks and compare Gavran to other databases. Then we'll fix any performance issues that we'll run into.
 
 === The structure of the codebase
 
