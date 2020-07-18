@@ -4,17 +4,17 @@ In the previous chapter, we built up the transaction API and were able to modify
 assumptions about the data we have on disk. We operate on the data in page units and blindly. This cannot go on, because we can't expect the users to know how to 
 manage the pages and their content by themselves.
 We need to be able to allocate and free pages. Once we have that, we can build more sophisticated data structures. 
-
-The new API we want to have are shown in Listing 5.1.
+The new API we want to have are shown in <<tx_allocation>>.
 
 [source]
-.Listing 5.1 - db.h - The new transaction API that we need to implement
+[[tx_allocation]]
+.`gavran/db.h` - The new transaction API that we will to implement
 ----
-include::./code/db.h[tags=new_tx_api]
+include::../include/gavran/db.h[tags=tx_allocation]
 ----
 
-Let consider what we actually need to do in order to implement this functionality. We need to persist somewhere that pages are taken or free. We need to be able
-to search for a free page and we need to be able to mark a page as free. That means that we are going to store that information in the file itself. And that lead
+Let consider what we actually need to do in order to implement the ability to dynamically allocate and free pages. We need to persist somewhere that pages are taken or free. 
+We need to be able to search for a free page and we need to be able to mark a page as free. That means that we are going to store that information in the file itself. And that lead
 to a bunch of questions. How are we going to do this? What would be the format of the data? How well will it play with future features?
 
 We want to create a system that will serve for the foreseeable future, we want to ensure that it plays nicely with the API we created so far and that is doesn't
@@ -30,31 +30,44 @@ Looking at the API above and how we can implement them, I think we'll the follow
 * A way to tell if a page is free or in used.
 
 Right now we need to keep track of only one piece of data about the file, its size in pages, but I'm sure that we'll have more in the future. To handle that
-we'll create the following structure to serve as the header for the file and be the metadata location. You can see how the first version looks like in 
-Listing 5.2.
+we'll create the following structure to serve as the header for the file and be the metadata location. You can see what this will look like in <<file_header>>.
+
+The header in <<file_header>> has a `magic` field, which must be set to the `FILE_HEADER_MAGIC` value. This is how we'll test if a file is a valid Gavran file or
+something else. We already spoke about the `number_of_pages` and why we need it and the `version` field is future proofing. If we'll need to modify the 
+layout of the data on disk, we can detect it from the header and react to it. 
+We are going to ignore the `last_tx_id` in this chapter, and we'll get to `free_space_bitmap_start` later in this chapter.
+
+The `page_size_power_of_two` is used to verify that we aren't attempting to open a file whose page size is different from the `PAGE_SIZE` we are expecting.
+We use the power of two mode because we want to reduce the number of bytes that we are using as much as possible. This is a _persistent_ structure, which will be
+stored on the disk. As such, we are going to start caring quite deeply about how big certain things are.
 
 [source]
-.Listing 5.2 - db.h - The file header contains metadata about the file
+[[file_header]]
+.`gavran/db.h` - The file header contains metadata about the whole file
 ----
-include::./code/db.h[tags=file_header]
+include::../include/gavran/db.h[tags=file_header]
 ----
-
-The header in Listing 5.2 has a magic field, which must be set to the `FILE_HEADER_MAGIC` value. This is how we'll test if a file is a valid Gavran file or
-something else. We already spoke about the `number_of_pages` and why we need it and the `version` field is future proofing. If we'll need to modify the 
-layout of the data on disk, we can detect it from the header and react to it. The `page_size` is used to verify that we aren't attempting to open a file
-whose page size is different from the `PAGE_SIZE` we are expecting.
 
 The next question to ask is where are we going to place this information. The obvious answer is in the header, no? It is right there in the name. Let's see
 what needs to be done to add this to our code. We need a higher level abstraction than the file, we need to now operate at the _database_ level, instead.
 
-This is why we have the `database_options_t` and the `db_create` function, which we saw in the previous chapter. Listing 4.5 showed how we open a database,
-validate its options, set the size, create the memory mapping, etc. I mentioned there that we'll do more work in `handle_newly_opened_database` in the future.
-Well, the future has arrived, and now is the time to put some structure in our file. Take a look at Figure 6, which shows the structure.
-The idea is that in the first page, we are going to store the header _twice_, 
-once at the start of the file (position 0) and once at the midway of the page (position 4096). 
+This is why we have the `db_options_t` and the `db_create` function, which we saw in the previous chapter. In the last chapter, `db_create` would open a database
+by validating its options, setting the size and creating the memory mapping. I mentioned there that we'll do more work in `db_init()` in the future.
+Well, the future has arrived, and now is the time to put some structure in our file. Take a look at <<file-header>>, which shows how where we'll put the data in 
+the file. 
 
+[[file-header]]
 .The physical layout of the header records in the first few page in the file
-image::{img-src}/fig6.png[]
+image::file-header.png[]
+
+In the last chapter, we saw that `db_create()` will ask the file system to allocate disk space for the file ahead of time, which will always be zero filled. In order
+to check if the file is new or not, we can check the `page_flags` value on the first page. If the value is set to zero, we can assume that this is a new file and 
+set it up accordingly. 
+
+Note that this isn't really a good idea in general. A single flipped byte may cause us to mistake a valid file as new and initialize it as an empty file. We'll do
+much better later on. In fact, you'll start to see some hints on how we are about to approach this task from this chapter. For now, we'll assume that checking the 
+`page_flags` value on the first page is sufficient. 
+The actual work is managed by the `db_init()`, which is called after `db_create()` setup the file, wired the memory map, etc. 
 
 [TIP]
 .Duplicating data for safety reasons
@@ -70,54 +83,127 @@ it is very common for SSD systems to coalesce writes that happened at the same t
 That renders attempts to keep a piece of data in sync in multiple locations for safety reasons mostly useless.
 * It adds complexity and time. Even if the actual work isn't too hard, to make use of it, there is the need to write recovery code that would make use of 
 a potentially corrupted file. I have done this for the Voron files, and it isn't much fun. 
+* In many cases, this is already handled by lower layers, either at the file system or the drive layer.
 ====
 
-Listing 5.3 shows the implementation of `handle_newly_opened_database` and how we handle opening a database. We also need to add a new field to the 
-`db_state_t`, to include an in memory copy of the file header. 
+In <<db_init>> you can see that we first check if the file represent a new database or an existing one. The `db_is_new_file()` is a really interesting function
+because it uses the _transaction_ API to do its work. Why is that remarkable in any way, though?
+
+Remember, at this point, we have to assume that we may be operating on:
+
+* A valid Gavran data file, created by a previous run on Gavran.
+* A zero filled file that was allocated by `db_create()` and which we'll need to setup properly.
+* A file with data that isn't a valid Gavran file. That can be:
+** A corrupted Gavran file (bug, disk error, etc).
+** A file that isn't even a Gavran file, may be a zip file, a PNG, etc.
+** A malicious file that came from a non-trusted source. 
+
+That is why the `txn_raw_get_page()` and `txn_raw_modify_page()` are considered _raw_ API, they can make no assumption on the data that they operate on. The check
+in `db_is_new_file()` isn't actually a check on a single byte, instead we check that the whole `page_metadata_t` is set to zero. We'll discuss what exactly that is 
+in just a little bit. If the first `page_metadata_t` is zeroed, we consider the file to be new and will call to `db_init_file_structure()` to perform the actual
+initialization.
+
+Regardless of whatever the file is new or not, we'll validate its structure and initialize our in memory state from the file in `db_init_from_existing_file()`. 
+That adds another layer of validation to protect us from bugs or disk issues.
 
 [source]
-.Listing 5.3 - impl.h & db.c - Opening a database
+[[db_init]]
+.`db.simplified.c` - Checking if the database already exists or is new and then setting it up
 ----
-// adding new fields to the database state
-include::./code/impl.h[tags=database_state]
-
-include::./code/db.c[tags=handle_newly_opened_database]
+include::./code/db.simplified.c[tags=db_init]
 ----
 
-A new file should be filled with zeroes, and if the file header in the file is all zeroes, we will consider the file to be new. If it is new, we'll 
-need to set it up, we do _that_ in `initialize_file_structure` which calls to `set_file_header` in order to write the right value to the header. You
-can see how this is done in Listing 5.4.
-
-Regardless if the file is new or not, we check that the file has the right version and page size that we expect as well as
-well as the right first 8 bytes signature. If all validation tests pass, we are good to go.
-
-[source]
-.Listing 5.4 - db.c - Setting the file header
-----
-include::./code/db.c[tags=set_file_header]
-----
-
-The code in Listing 5.4 has an interesting property. It is using a _transaction_ to modify the data. This is strange, because transactions right now
-aren't really that fancy. Why wouldn't we write to the data directly using `pages_write` or `palfs_write_file` ? The reason is that we want Gavran to
-be a transactional storage engine. 
+Now that we understand how Gavran knows whatever the file is new or not, let's look at how we are going to go about initializing the file startup.
+You can see the behavior in <<db_init_file_structure>>, the code there is interesting for a very important reason. It is using a _transaction_ to modify the data. 
+This is strange, because transactions right now aren't really that fancy. Why wouldn't we write to the data directly using `pages_write()` or `pal_write_file()`?
+The reason is that we want Gavran to be a transactional storage engine. 
 
 That means that _all_ the writes to the system must be durable and that means that we can't sneak _any_ writes to
 the file under the radar. Our transactions will make sure that the data changes are valid, and they are the only way to write to the file. 
 
-Listing 5.4 is the also first time that _Gavran_ is actually starting to use its own API to implement real functionality. As part of starting up the database
+<<db_init_file_structure>> is the also first time that _Gavran_ is actually starting to use its own API to implement real functionality. As part of starting up the database
 we'll create a transaction, modify the first page so we can write the headers and commit to the file. That is cool!
 
-Another interesting thing about the `set_file_header` function is that it neither _creates_ a transaction not _commits_ it, that is actually handled by `initialize_file_structure`
-because we need to coordinate a bit more than just setting of the header. Let's us see what else needs to be done.
+Another interesting thing about the `db_init_file_header()` function is that it neither _creates_ a transaction not _commits_ it, that is actually handled by `db_init_file_structure()`
+because we need to coordinate a bit more than just setting of the header. Before we can get to that, though, we need to talk about another interesting aspect of `db_init_file_header()`.
+We aren't manipulating directly, instead, we go through data structures to modify the data in memory and then persist that data to disk. 
+
+[source]
+[[db_init_file_structure]]
+.`db.simplified.c` - Initializing the file on startup
+----
+include::./code/db.simplified.c[tags=db_init_file_structure]
+----
+
+We already saw how `file_header_t` looks like in <<file_header>>, we should also look at the `page_metadata_t` structure, shown in <<page_metadata_t>>, to complete the full picture. 
+This is a _persistent_ data structure, in the sense that we are going to write it to disk and use it quite often. As such, there are a number of of things that we should discuss about 
+this critical structure.
+
+The `page_metadata_t` is exactly 64 bytes in size. The first 32 bytes of the structure are taken by a `crypto` header. I'm going to spend the whole of Chapter 11 to discuss that, so 
+we'll skip this for now. The rest of `page_metadata_t` is a union of the structures that may be part of the page metadata. We use the `page_metadata_common_t`, which define the 
+`page_flags` field to check what is the actual type of the page and then we can switch to the right union member and work with it directly. All the structures in the union _must_
+have `page_flags` as their first field and be up to 32 bytes in size.
+
+[NOTE]
+.What about alignment?
+====
+One of the dangers of casting between pointers between different structures is that we'll hit undefined behavior. In this case, we got it covered because we are using a union
+and making sure that the initial field match across all of the types that will be stored in the `page_metadata_t`. 
+====
+
+[source]
+[[page_metadata_t]]
+.`gavran/db.h` - The page metadata structure 
+----
+include::../include/gavran/db.h[tags=page_metadata_t]
+----
+
+[TIP]
+.Why all the small functions?
+====
+You might have noticed that I'm using very small functions in the code. There are three reasons for this decision:
+
+* Shorter functions tend to be more readable and the using `defer` and `ensure` means that I don't have so much visible plumbing.
+* I need to fit these functions into a book format, which means that I have a hard limit on how much code I can show on a single page. Aside from the unit tests, I want to avoid multi page
+  code listing. They are rather daunting and make it hard to explain exactly what is going on in the engine.
+* Small functions means that I can update a single function's behavior and then show what changed there, without having to provide too much additional context. Here is the new version of
+  `do_something_small()` is so much better than trying to push a diff of a longer function, in terms of readability.
+====
+
+
+[source]
+[[db_init_from_existing_file]]
+.`db.simplified.c` - Validating the file on startup
+----
+include::./code/db.simplified.c[tags=db_init_from_existing_file]
+----
+
+Now that we understand how we structure (pun intended) the data on disk, let's see how we are actually making use of it. The database initialization is done on <<db_init_from_existing_file>>.
+Although it might be a stretch to call it initialization at this point. Right now the only thing that we are going to do is to validate the on disk data. 
+
+[source]
+[[db_validate_file_header]]
+.`db.simplified.c` - Validating the file header
+----
+include::./code/db.simplified.c[tags=db_validate_file_header]
+----
+
+We start by creating a transaction, remember that we can't read or modify any data from the file without a transaction. That is _important_. I know that I have talked about this previously
+but it is well worth repeating. By making sure that there are no cheats, we are going to create a robust system. Using the read transaction we create, we access the first page and verify
+that it is setup to be a file header page. We then validate that the header is valid in <<db_validate_file_header>>.
+
+In `db_validate_file_header()` we validate that the header match our expectation. The `page_size` and `version` are as expected and that we have the magic value in the right place. Note that
+because the `page_metadata_t` has a `crypto` for its first 32 bytes, the actual `magic` field is located on bytes 36 - 41. That is not typically where you'll put the string identifying your
+file. Usually that is the very first bytes of the file. I'm doing it this way to make it (much) easier for me when we get to Chapter 11 and talk about the `crypto` part of the page metadata.
 
 === Allocating and freeing pages
 
-Now that we have all of this setup properly, the question _why_ raises itself. We want to implement `txn_free_page` and `txn_allocate_page`, how does this 
+Now that we have all of this setup properly, the question _why_ raises itself. We want to implement `txn_free_page()` and `txn_allocate_page()`, how does this 
 help us? The answer is that in order to write those functions, we need to have a place to store metadata about the file. We now have a place to do this
-setup: `handle_newly_opened_database` and a method to do that, using our transaction API.
+setup: `db_init_file_structure()`.
 
-The next step is deciding exactly how we'll implement the free list. I want to build up in complexity, so any complex data structure is going to be hard
-to build. The easiest way to manage the free space is to use a bitmap or a bit array for the free/in used marker.
+The next step is deciding exactly how we'll implement the free list. I want to reduce complexity as much as possible, so any complex data structure is going to be hard
+to build at this point, without much infrastructure in place. The easiest way to manage the free space is to use a bitmap or a bit array for the free/in used marker.
 
 Let's run some numbers and see how feasible this is? Let's assume we have a file that is 512GB in size, using 8KB pages, that gives us 
 `67,108,864` pages to keep track of. In order to manage that using a bitmap, you'll `8,388,608` bytes which is exactly 8MB. In other words using a bitmap
@@ -131,16 +217,18 @@ The bitmap approach has several advantages:
 * There are many ways to efficiently search a bitmap.
 * There is a fixed size for the free list, we don't need to handle allocate / free of space except when we grow the actual file.
 
-This hits all the sweat spots, so let consider how we can go about implementing this? If you'll recall Figure 6, we are using the first page of the file 
+This hits all the sweat spots, so let consider how we can go about implementing this? If you'll recall <<file-header>>, we are using the first page of the file 
 as the location of the headers. Where would we put the free space bitmap?
 
 As easy solution would be to place it as the second page, but that has an issue, how are we going to handle growing the file? A single page will give us
 enough bits to manage a free list of a file up to 512MB. But what would you do next? You would need more space and it is best if we kept the free list
 bitmap as a single consecutive buffer. 
 
-The answer is that we are going to manage this process _using_ the free list itself. One of the responsibilities of the `handle_newly_opened_database`
+The answer is that we are going to manage this process _using_ the free list itself. One of the responsibilities of the `db_init_file_structure()`
 will be to setup the initial free list bitmap. Following this, when we need to increase the free list size, we'll ask the free list itself where we
 can place the increased list size and then free the old location.
+
+////
 
 Simple, at least as a concept. Let's see what will happen when we sit down to actually implement this... the full details are in Listing 5.5.
 
@@ -469,3 +557,4 @@ As usual, chapter close means that we need to unit test our code.
 ----
 include::../pyapi/tests05.py[]
 ----
+////

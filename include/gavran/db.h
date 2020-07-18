@@ -17,6 +17,7 @@
 
 typedef struct txn txn_t;
 typedef struct db_state db_state_t;
+typedef struct file_header file_header_t;
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
@@ -40,17 +41,60 @@ result_t pages_get(txn_t *tx, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
 // end::paging_api[]
 
-typedef struct page_metadata page_metadata_t;
+typedef struct page_crypto_metadata {
+  union {
+    // <1>
+    struct {
+      uint8_t nonce[crypto_aead_aes256gcm_NPUBBYTES];
+      uint8_t mac[crypto_aead_aes256gcm_ABYTES];
+    } aes_gcm;
+    // <2>
+    uint8_t page_hash[crypto_generichash_BYTES];
+  };
+} page_crypto_metadata_t;
+
+// tag::page_metadata_t[]
+typedef enum __attribute__((__packed__)) page_flags {
+  page_flags_free = 0,
+  page_flags_file_header = 1,
+  page_flags_metadata = 2,
+  page_flags_single = 3,
+  page_flags_overflow_first = 4,
+  page_flags_overflow_rest = 5,
+  page_flags_free_space_bitmap = 6,
+} page_flags_t;
+
+typedef struct page_metadata_common {
+  page_flags_t page_flags;
+  char padding[31];
+} page_metadata_common_t;
+
+typedef struct page_metadata {
+  page_crypto_metadata_t cyrpto;
+
+  union {
+    page_metadata_common_t common;
+    file_header_t file_header;
+  };
+} page_metadata_t;
+
+_Static_assert(sizeof(page_crypto_metadata_t) == 32,
+               "The size of page crypto must be 32 bytes");
+_Static_assert(sizeof(page_metadata_t) == 64,
+               "The size of page metadata must be 64 bytes");
+// end::page_metadata_t[]
 
 // tag::file_header[]
-// <1>
-typedef struct __attribute__((__packed__)) file_header {
+#define FILE_HEADER_MAGIC "GVRN!"
+
+typedef struct file_header {
+  page_flags_t page_flags;
+  uint8_t version;
+  uint8_t page_size_power_of_two;
+  uint8_t magic[5];  // should be FILE_HEADER_MAGIC
   uint64_t number_of_pages;
   uint64_t last_tx_id;
   uint64_t free_space_bitmap_start;
-  uint8_t version;
-  uint8_t page_size_power_of_two;
-  uint8_t _padding[6];
 } file_header_t;
 // end::file_header[]
 
@@ -161,11 +205,11 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page);
 result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 // end::txn_api[]
 
-// tag::new_tx_api[]
-result_t txn_free_page(txn_t *tx, page_t *page);
+// tag::tx_allocation[]
 result_t txn_allocate_page(txn_t *tx, page_t *page,
                            uint64_t nearby_hint);
-// end::new_tx_api[]
+result_t txn_free_page(txn_t *tx, page_t *page);
+// end::tx_allocation[]
 
 // tag::free_space[]
 result_t txn_page_busy(txn_t *tx, uint64_t page_num, bool *busy);

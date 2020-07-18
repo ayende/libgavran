@@ -12,7 +12,7 @@
 Oren Eini <oren@ravendb.net>
 June 2020
 
-
+////
 [dedication]
 
 = Dedication
@@ -47,9 +47,13 @@ include::./ch03/ch03.adoc[]
 include::./ch04/ch04.adoc[]
 ////
 
-:listing-caption: Listing 5, 
+:figure-caption: Figure 5,
+:listing-caption: Listing 5,
+:!figure-number:
+:!listing-number:
 include::./ch05/ch05.adoc[]
 
+////
 :listing-caption: Listing 6, 
 include::./ch06/ch06.adoc[]
 

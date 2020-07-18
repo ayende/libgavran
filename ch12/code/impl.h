@@ -58,8 +58,10 @@ typedef struct pages_hash_table {
 
 result_t hash_put_new(pages_hash_table_t **table_p, page_t *page);
 bool hash_lookup(pages_hash_table_t *table, page_t *page);
-bool hash_get_next(pages_hash_table_t *table, size_t *state, page_t **page);
-result_t hash_try_add(pages_hash_table_t **table_p, uint64_t page_num);
+bool hash_get_next(pages_hash_table_t *table, size_t *state,
+                   page_t **page);
+result_t hash_try_add(pages_hash_table_t **table_p,
+                      uint64_t page_num);
 result_t hash_new(size_t initial_number_of_elements,
                   pages_hash_table_t **table);
 
@@ -119,8 +121,8 @@ typedef struct bitmap_search_state {
   uint64_t previous_set_bit;
 } bitmap_search_state_t;
 
-void init_search(bitmap_search_state_t *search, void *bitmap, uint64_t size,
-                 uint64_t required);
+void init_search(bitmap_search_state_t *search, void *bitmap,
+                 uint64_t size, uint64_t required);
 
 bool search_free_range_in_bitmap(bitmap_search_state_t *search);
 // end::search_free_range_in_bitmap[]
@@ -128,9 +130,10 @@ bool search_free_range_in_bitmap(bitmap_search_state_t *search);
 enum __attribute__((__packed__)) page_type {
   page_metadata = 1,
   page_single = 2,
-  page_overflow_first = 3,
-  page_overflow_rest = 2,
-  page_free_space_bitmap = 4,
+  page_overflow_first = 4,
+  page_overflow_rest = 8,
+  page_free_space_bitmap = 16,
+  page_file_header = 32,
 };
 
 _Static_assert(sizeof(enum page_type) == 1, "Must be a single byte");
@@ -165,27 +168,35 @@ _Static_assert(sizeof(page_metadata_t) == 64,
                "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]
 
-result_t txn_write_state_to_disk(txn_state_t *state, bool can_checkpoint);
+result_t txn_write_state_to_disk(txn_state_t *state,
+                                 bool can_checkpoint);
 
-uint64_t db_find_next_db_size(uint64_t current, uint64_t requested_size);
+uint64_t db_find_next_db_size(uint64_t current,
+                              uint64_t requested_size);
 
 uint64_t TEST_wal_get_last_write_position(db_t *db);
 
-result_t txn_register_on_forget(txn_state_t *tx, void (*action)(void *),
-                                void *state_to_copy, size_t size_of_state);
-result_t txn_register_on_rollback(txn_state_t *tx, void (*action)(void *),
-                                  void *state_to_copy, size_t size_of_state);
-result_t db_try_increase_file_size(txn_t *tx,
-                                   uint64_t required_additional_pages);
+result_t txn_register_on_forget(txn_state_t *tx,
+                                void (*action)(void *),
+                                void *state_to_copy,
+                                size_t size_of_state);
+result_t txn_register_on_rollback(txn_state_t *tx,
+                                  void (*action)(void *),
+                                  void *state_to_copy,
+                                  size_t size_of_state);
+result_t db_try_increase_file_size(
+    txn_t *tx, uint64_t required_additional_pages);
 
-result_t txn_hash_page(page_t *page, uint8_t hash[crypto_generichash_BYTES]);
-result_t
-txn_validate_page_hash(page_t *page,
-                       uint8_t expected_hash[crypto_generichash_BYTES]);
+result_t txn_hash_page(page_t *page,
+                       uint8_t hash[crypto_generichash_BYTES]);
+result_t txn_validate_page_hash(
+    page_t *page, uint8_t expected_hash[crypto_generichash_BYTES]);
 
-__attribute__((const)) static inline uint64_t next_power_of_two(uint64_t x) {
+__attribute__((const)) static inline uint64_t next_power_of_two(
+    uint64_t x) {
   return 1 << (64 - __builtin_clzll(x - 1));
 }
 
-result_t txn_decrypt(database_options_t *options, void *start, size_t size,
-                     void *dest, page_metadata_t *metadata, uint64_t page_num);
+result_t txn_decrypt(database_options_t *options, void *start,
+                     size_t size, void *dest,
+                     page_metadata_t *metadata, uint64_t page_num);
