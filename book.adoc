@@ -23,8 +23,6 @@ To Tamar, who think such topics are "soooo boring", I hope you change your mind.
 
 To Shahar, who would always fall asleep when I talked about the book, hopefully you'll like it better when you grow up.
 
-////
-
 :figure-caption: Figure 1,
 :listing-caption: Listing 1,
 include::./intro/intro.adoc[]
@@ -42,14 +40,11 @@ include::./ch02/ch02.adoc[]
 :!listing-number:
 include::./ch03/ch03.adoc[]
 
-////
-
 :figure-caption: Figure 4,
 :listing-caption: Listing 4,
 :!figure-number:
 :!listing-number:
 include::./ch04/ch04.adoc[]
-
 ////
 
 :listing-caption: Listing 5, 

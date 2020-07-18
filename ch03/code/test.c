@@ -40,18 +40,44 @@ static result_t read_write_io(const char* file) {
 }
 // end::read_write_io[]
 
+// tag::tests[]
 describe(pal_tests) {
+  const char file[] = "/tmp/files/try";
+
   before_each() {
     errors_clear();
     system("mkdir -p /tmp/files");
     system("rm -f /tmp/files/*");
   }
 
-  it("can work with files") {
-    assert(create_and_set_file("/tmp/files/try"));
+  it("can work with files") { assert(create_and_set_file(file)); }
+
+  it("can read and write") { assert(read_write_io(file)); }
+
+  it("can get file name") {
+    file_handle_t* h;
+    assert(pal_create_file(file, &h, pal_file_creation_flags_none));
+    defer(pal_close_file, h);
+    assert(strcmp(file, h->filename) == 0);
   }
 
-  it("can read and write") {
-    assert(read_write_io("/tmp/files/try"));
+  it("can open and close file") {
+    file_handle_t* h;
+    assert(pal_create_file(file, &h, pal_file_creation_flags_none));
+    assert(pal_close_file(h));
+  }
+
+  it("will create empty file") {
+    file_handle_t* h;
+    assert(pal_create_file(file, &h, pal_file_creation_flags_none));
+    defer(pal_close_file, h);
+    assert(h->size == 0);
+  }
+
+  it("will error on opening directory") {
+    file_handle_t* h;
+    assert(!pal_create_file("/tmp/files", &h,
+                            pal_file_creation_flags_none));
   }
 }
+// end::tests[]

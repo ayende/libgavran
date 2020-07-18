@@ -43,9 +43,9 @@ the https://lwn.net/Articles/351422/[complexities involved]. The situation is ma
 
 [source]
 [[pal-interface]]
-.pal.h - The file system interface that we'll consume for our storage engine
+.`gavran/pal.h` - The file system interface that we'll consume for our storage engine
 ----
-include::./code/pal.h[tags=pal_api]
+include::../include/gavran/pal.h[tags=pal_api]
 ----
 
 Because working with files is such a huge complex mess, and because it is _different_ across operating systems, we'll hide this complexity behind a
@@ -71,7 +71,7 @@ storage engine implementation. Let's look at <<create_and_set_file>> to see how 
 
 [source]
 [[create_and_set_file]]
-.test.c - Using the file API to create a file with a minimum size
+.`test.c` - Using the file API to create a file with a minimum size
 ----
 include::./code/test.c[tags=create_and_set_file]
 ----
@@ -87,7 +87,7 @@ It isn't a long function, but you can see how all the different parts we built a
 
 [source]
 [[pal_create_file]]
-.pal.linux.c - Opening (or creating) a file
+.`pal.linux.c` - Opening (or creating) a file
 ----
 include::./code/pal.linux.c[tags=pal_create_file]
 ----
@@ -116,7 +116,7 @@ in <<pal_ensure_path>>.
 
 [source]
 [[pal_ensure_path]]
-.pal.linux.c - Ensuring that the provided path is valid to create a file on
+.`pal.linux.c` - Ensuring that the provided path is valid to create a file on
 ----
 include::./code/pal.linux.c[tags=pal_ensure_path]
 ----
@@ -167,7 +167,7 @@ underlying system can fail in interesting ways.
 
 [source]
 [[fsync_parent_directory]]
-.pal.linux.c - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
+.`pal.linux.c` - Calling fsync() on a parent directory to ensure that the file metadata has been preserved
 ----
 include::./code/pal.linux.c[tags=fsync_parent_directory]
 ----
@@ -210,7 +210,7 @@ separator.
 
 [source]
 [[pal_ensure_full_path]]
-.<<pal_ensure_full_path>> - pal.linux.c - Ensuring that the full path provide exists and the caller has access to it
+.`pal.linux.c` - Ensuring that the full path provide exists and the caller has access to it
 ----
 include::./code/pal.linux.c[tags=pal_ensure_full_path]
 ----
@@ -258,7 +258,7 @@ the amount of code is small enough, I would rather show you the whole thing at o
 
 [source]
 [[pal_set_file_size]]
-.pal.linux.c - Pre-allocate disk space by letting the file system know ahead of time what we need
+.`pal.linux.c` - Pre-allocate disk space by letting the file system know ahead of time what we need
 ----
 include::./code/pal.linux.c[tags=pal_set_file_size]
 ----
@@ -286,7 +286,7 @@ You can see the code in <<pal_close_file>>.
 
 [source]
 [[pal_close_file]]
-.pal.linux.c - Closing a file
+.`pal.linux.c` - Closing a file
 ----
 include::./code/pal.linux.c[tags=pal_close_file]
 ----
@@ -346,7 +346,7 @@ Windows side of things, we'll show how to deal with this limitation properly.
 
 [source]
 [[pal_map]]
-.pal.linux.c - Implementing mapping and un-mapping of memory from out data file
+.`pal.linux.c` - Implementing mapping and un-mapping of memory from out data file
 ----
 include::./code/pal.linux.c[tags=pal_mmap]
 ----
@@ -356,7 +356,7 @@ In <<pal_map_defer>>, however, we allow to `close()` the file and `unmap()` the 
 
 [source]
 [[pal_map_defer]]
-.pal.linux.c - Allowing to `close()` the file and `unmap()` via `defer()`
+.`pal.linux.c` - Allowing to `close()` the file and `unmap()` via `defer()`
 ----
 include::./code/pal.linux.c[tags=pal_map_defer]
 ----
@@ -369,7 +369,7 @@ asked for, or an error.
 
 [source]
 [[pal_write_file]]
-.pal.linux.c - Writing and reading data to the file
+.`pal.linux.c` - Writing and reading data to the file
 ----
 include::./code/pal.linux.c[tags=pal_write_file]
 ----
@@ -380,7 +380,7 @@ for the ease in which they allow us to make changes in memory. Supporting that i
 
 [source]
 [[pal_enable_writes]]
-.pal.linux.c - Enable writable memory maps and allow to disable them
+.`pal.linux.c` - Enable writable memory maps and allow to disable them
 ----
 include::./code/pal.linux.c[tags=pal_enable_writes]
 ----
@@ -395,7 +395,7 @@ There is only one area of the API that we haven't looked at yet. The `pal_fsync(
 
 [source]
 [[pal_fsync]]
-.pal.linux.c - Flushing a file
+.`pal.linux.c` - Flushing a file
 ----
 include::./code/pal.linux.c[tags=pal_fsync]
 ----
@@ -416,9 +416,9 @@ That later is now, and you can see the flags' options in <<pal_file_creation_fla
 
 [source]
 [[pal_file_creation_flags]]
-.pal.h - Flags for opening a file
+.`gavran/pal.h` - Flags for opening a file
 ----
-include::./code/pal.h[tags=pal_file_creation_flags]
+include::../include/gavran/pal.h[tags=pal_file_creation_flags]
 ----
 
 There aren't really many options here, we have durable mode and non durable mode, that is all. When looking at <<pal_create_file>> we can see that if we set the 
@@ -472,7 +472,7 @@ of our functions to store and read data from the file.
 
 [source,c]
 [[read_write_io]]
-.Using the file API to read & write
+.`test.c` - Using the file API to read & write
 ----
 include::./code/test.c[tags=read_write_io]
 ----
@@ -490,7 +490,8 @@ start talking about how we are going to make _use_ of this functionality.
 
 In order to make sure that we are producing good software, and that means tests. Now that the chapter is over, it is time to see its tests. I'm not going
 to deeply into the testing side of the pool, but I have found them to be invaluable to ensure that the software does what you _think_ it does.
-In this case, you already saw the test cases, <<read_write_io>> and <<create_and_set_file>>, so I won't bother repeating them. 
+In this case, you already saw the major test cases, <<read_write_io>> and <<create_and_set_file>>, but I got a few that test more esoteric pieces of the API
+as well in <<tests_ch03>>.
 
 .A note on testing
 ****
@@ -503,3 +504,10 @@ UPS that I can trigger via an API and a machine that I don't mind frying.
 ****
 
 And now we are ready to see how we are going to be _using_ the files.
+
+[source,c]
+[[tests_ch03]]
+.`test.c` - Testing the PAL API
+----
+include::./code/test.c[tags=tests]
+----

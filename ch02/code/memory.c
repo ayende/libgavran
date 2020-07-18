@@ -18,7 +18,7 @@ result_t mem_alloc(void** buffer, size_t size) {
 result_t mem_alloc_page_aligned(void** buffer, size_t size) {
   void* tmp_buf;
   int err = posix_memalign(&tmp_buf, 4096, size);
-  if (!err) {
+  if (err) {
     failed(err, msg("Unable to allocate page aligned buffer"),
            with(size, "%zu"));
   }

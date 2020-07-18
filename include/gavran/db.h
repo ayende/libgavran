@@ -5,9 +5,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include "defer.h"
-#include "errors.h"
-#include "pal.h"
+#include <gavran/infrastructure.h>
+#include <gavran/pal.h>
 
 // tag::tx_flags[]
 // <1>
@@ -16,15 +15,18 @@
 #define TX_COMMITED (1 << 24)
 // end::tx_flags[]
 
-typedef struct transaction txn_t;
+typedef struct txn txn_t;
 typedef struct db_state db_state_t;
+
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 // tag::paging_api[]
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
 #define TO_PAGES(size) \
-  ((size) / PAGE_SIZE + ((size) % PAGE_SIZE ? 1 : 0))
+  MAX(((size) / PAGE_SIZE + ((size) % PAGE_SIZE ? 1 : 0)), 1)
 
 typedef struct page {
   void *address;
@@ -43,31 +45,29 @@ typedef struct page_metadata page_metadata_t;
 // tag::file_header[]
 // <1>
 typedef struct __attribute__((__packed__)) file_header {
-  uint8_t version;
-  uint8_t page_size_power_of_two;
   uint64_t number_of_pages;
   uint64_t last_tx_id;
   uint64_t free_space_bitmap_start;
+  uint8_t version;
+  uint8_t page_size_power_of_two;
+  uint8_t _padding[6];
 } file_header_t;
 // end::file_header[]
 
-// tag::tx_api[]
-// <1>
+// tag::tx_structs[]
 typedef struct db_state db_state_t;
 typedef struct txn_state txn_state_t;
 typedef struct pages_hash_table pages_hash_table_t;
 
-// <2>
-typedef struct database {
+typedef struct db {
   db_state_t *state;
 } db_t;
 
-// tag::txn_t[]
-typedef struct transaction {
+typedef struct txn {
   txn_state_t *state;
   pages_hash_table_t *working_set;
 } txn_t;
-// end::txn_t[]
+// end::tx_structs[]
 
 // tag::database_page_validation_options[]
 enum database_page_validation_options {
@@ -76,7 +76,7 @@ enum database_page_validation_options {
   page_validation_always = 2
 };
 
-typedef struct database_options {
+typedef struct db_options {
   uint64_t minimum_size;
   uint64_t maximum_size;
   uint64_t wal_size;
@@ -85,7 +85,7 @@ typedef struct database_options {
   enum database_page_validation_options page_validation;
   uint32_t avoid_mmap_io;
   uint32_t _padding;
-} database_options_t;
+} db_options_t;
 
 // end::database_page_validation_options[]
 
@@ -104,14 +104,14 @@ typedef struct wal_state {
   wal_file_state_t files[2];
 } wal_state_t;
 
+// tag::db_state_t[]
 typedef struct db_global_state {
-  char _padding[6];
-  file_header_t header;
   span_t span;
+  file_header_t header;
 } db_global_state_t;
 
 typedef struct db_state {
-  database_options_t options;
+  db_options_t options;
   db_global_state_t global_state;
   file_handle_t *handle;
   wal_state_t wal_state;
@@ -123,6 +123,7 @@ typedef struct db_state {
   uint64_t original_number_of_pages;
   uint64_t oldest_active_tx;
 } db_state_t;
+// end::db_state_t[]
 
 typedef struct cleanup_callback {
   void (*func)(void *state);
@@ -130,42 +131,35 @@ typedef struct cleanup_callback {
   char state[];
 } cleanup_callback_t;
 
+// tag::txn_state_t[]
 typedef struct txn_state {
   db_state_t *db;
+  db_global_state_t global_state;
+  pages_hash_table_t *modified_pages;
   cleanup_callback_t *on_forget;
   cleanup_callback_t *on_rollback;
-  db_global_state_t global_state;
-
   txn_state_t *prev_tx;
   txn_state_t *next_tx;
   uint64_t can_free_after_tx_id;
-  size_t usages;
+  uint32_t usages;
   uint32_t flags;
-  uint32_t _padding;
-  pages_hash_table_t *pages;
 } txn_state_t;
+// end::txn_state_t[]
 
-// <4>
-result_t db_create(const char *filename, database_options_t *options,
+// tag::txn_api[]
+result_t db_create(const char *filename, db_options_t *options,
                    db_t *db);
-
 result_t db_close(db_t *db);
-// <5>
 enable_defer(db_close);
 
-// <6>
 result_t txn_create(db_t *db, uint32_t flags, txn_t *tx);
-
 result_t txn_close(txn_t *tx);
-// <7>
 enable_defer(txn_close);
 
 result_t txn_commit(txn_t *tx);
-
-// <8>
-result_t txn_get_page(txn_t *tx, page_t *page);
-result_t txn_modify_page(txn_t *tx, page_t *page);
-// end::tx_api[]
+result_t txn_raw_get_page(txn_t *tx, page_t *page);
+result_t txn_raw_modify_page(txn_t *tx, page_t *page);
+// end::txn_api[]
 
 // tag::new_tx_api[]
 result_t txn_free_page(txn_t *tx, page_t *page);

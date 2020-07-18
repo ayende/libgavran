@@ -1,7 +1,6 @@
-#include <errno.h>
+#include <gavran/db.h>
 
-#include "db.h"
-
+// tag::paging-impl[]
 result_t pages_get(txn_t *tx, page_t *p) {
   db_global_state_t *state = &tx->state->global_state;
   uint64_t offset = p->page_num * PAGE_SIZE;
@@ -22,3 +21,4 @@ result_t pages_write(db_state_t *db, page_t *p) {
          msg("Unable to write page"), with(p->page_num, "%lu"));
   return success();
 }
+// end::paging-impl[]

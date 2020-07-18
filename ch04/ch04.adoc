@@ -1,4 +1,4 @@
-== At the pages layer, building transactions
+== THe paging layer and our first transactions
 
 We have gotten to the point where we can read and write data to a file. It will take a while to understand why we didn't simply call `write` or `read` directly and call
 it a day. We'll discuss that in detail when we implement transactions. Right now, I want to focus on how we are going to lay out the data on the file. 
@@ -94,10 +94,10 @@ _any_ sense now. Instead of building pages and then the database infrastructure,
 relevant definitions in <<paging-api>>. 
 
 [source]
-<<paging-api>>
-.db.h - The low level paging API
+[[paging-api]]
+.`gavran/db.h` - The low level paging API
 ----
-include::./code/db.h[tags=paging_api]
+include::../include/gavran/db.h[tags=paging_api]
 ----
 
 In <<paging-api>>, we define the `PAGE_SIZE` constant and the `page_t` struct as well as functions that we'll use to read and write those pages.
@@ -105,13 +105,37 @@ The fields that we care about at this point in `page_t` are `address`, `size` an
 address of the page in memory, the `size` is the size of the data that is stored on the page. This may actually be more than single page's worth of data, in some
 cases. And the `page_num` is the page number, naturally. It is important to note that this is an _in memory_ structure, this is never persisted to disk.
 
-The `pages_get` and `pages_write` functions uses types that we haven't seen yet, `txn_t` and `db_state_t`. For now, we'll ignore these, I'll introduce how they work
+The `pages_get()` and `pages_write()` functions uses types that we haven't seen yet, `txn_t` and `db_state_t`. For now, we'll ignore these, I'll introduce how they work
 shortly.
 
 We can use the API in <<paging-api>> to get a particular page or to write a set of pages. Let's explore how we can use this API to implement the same read & write operation as we did in 
-<<read_write_io>>. 
-One caveat we have to take into account is that we _can't_ modify the result of the `pages_get` directly. This is because the memory is mapped as readonly. Attempts
-to write to it will result in a segmentation fault. In order to deal with that, we'll copy the page to our own buffer and use the `pages_write` to update its content.
+the `read_write_io()` function in the previous chapter. 
+One caveat we have to take into account is that we _can't_ modify the result of the `pages_get()` directly. This is because the memory is mapped as readonly. Attempts
+to write to it will result in a segmentation fault. In order to deal with that, we'll copy the page to our own buffer and use the `pages_write()` to update its content.
+
+We are working with pages, so we want to use system page aligned memory, which usually means that we want to make use of `posix_memalign()`. We already saw how we wrapped this 
+function in `mem_alloc_page_aligned()` for our needs. With that in place, we can now write the code to modify the data. You can see how that is done in <<create_and_write_file>>.
+
+We get the page, copy it to our own buffer, modify our own copy and then write it back. This technique is called Copy On Write and it has some highly desirable
+properties. For example, until I call `pages_write()`, there has been no change to the file. That means that I can abort an operation midway through, free the 
+copy of the memory I used and move on without need to write compensation logic to restore things to the way it was. <<paging-impl>> shows the implementation of
+`pages_get()` and `pages_write()`.
+
+
+[source]
+[[create_and_write_file]]
+.`test.c` - Reading and writing using the paging API
+----
+include::./code/test.c[tags=create_and_write_file]
+----
+<1> Create the file and set its size.
+<2> Map the file to memory.
+<3> Manual setup (for now) of the data structures we need to make things happen. 
+<4> Get the page from the memory mapped file.
+<5> Allocate a standalone buffer for the page.
+<6> Copy the page from the data file to the new buffer and then modify the _copy_.
+<7> Write the copied data back to the data file.
+<8> Ensure that we can see the changes in the page after we written to the file.
 
 [CAUTION]
 .System page size vs. `PAGE_SIZE`
@@ -121,38 +145,26 @@ going to be 4KB on pretty much all platforms. You can see this https://stackover
 choice. 
 
 When we talk about page aligned memory, we are actually talking about memory that is aligned on 4KB boundary (system page size), because that is what the API and hardware
-will demand from us. When we are talking about pages in our data file, then we refer to the 8KB pages that Gavran will use. 
+will demand from us. When we are talking about pages in our data file, then we refer to the 8KB pages that Gavran will use. In <<paging-api>>, you can see it as `PAGE_SIZE`
+vs. `PAGE_ALIGNMENT`. 
 ====
 
-We are working with pages, so we want to use system page aligned memory, which usually means that we want to make use of `posix_memalign`. We already saw how we wrapped this 
-function in `mem_alloc_page_aligned` for our needs. With that in place, we can now write the code to modify the data.
+The code in <<create_and_write_file>> deals with creating the appropriate `db_state_t` and `txn_state_t` is pretty nasty, we are manually setting up a lot of data structured 
+that I haven't introduced yet. I decided that it is  better to show you the end result, rather than iterate through the same function multiple times. You can see that for now, 
+we simply need a way to pass the `span_t` that we mapped and the `handle` to the `pages_get()` and `pages_write()` functions.
 
 [source]
-.Listing 4.2 - main.c - Reading and writing using the paging API
+[[paging-impl]]
+.`pages.c` - Reading and writing using the paging API
 ----
-include::./code/main.c[tags=create_and_write_file]
-----
-<1> Changes from Listing 2.11 start here. We setup the `db_state_t` with the previous defined values we created.
-<2> We ask to get a (read only) page 0.
-<3> We allocate a (mutable) page from memory (unrelated to the file).
-<4> We copy the data from page 0 to the mutable page.
-<5> We copy a string to mutable page.
-<6> We write the modified page back to the file.
-<7> Using memory mapped I/O, we read the values we just wrote to the file.
-
-We get the page, copy it to our own buffer, modify our own copy and then write it back. This technique is called Copy On Write and it has some highly desirable
-properties. For example, until I call `pages_write`, there has been no change to the file. That means that I can abort an operation midway through, free the 
-copy of the memory I used and move on without need to write compensation logic to restore things to the way it was. Listing 4.3 shows the implementation of
-`pages_get` and `pages_write`.
-
-[source]
-.Listing 4.3 - paging.c - Reading and writing using the paging API
-----
-include::./code/paging.c[]
+include::./code/pages.c[tags=paging-impl]
 ----
 
-The code for `pages_get` and `pages_write` right now is mostly about forwarding the calls. I created these functions because they will become much more important
+The code for `pages_get()` and `pages_write()` right now is mostly about forwarding the calls. I created these functions because they will become much more important
 down the line. 
+
+I'm likely not going to be able to keep track of everything in a system that need to modify more than a single page.  We need some way to manage pages in a more
+seamless manner, to handle the Copy On Write, the writes of all the modified pages back to the file and to free all that memory.
 
 [IMPORTANT]
 .Trust the hardware, but verify
@@ -160,9 +172,6 @@ down the line.
 One of the things that we'll need to implement at some point is checksum of the pages data. If the data was corrupted on disk, we want to learn about this as soon
 as possible. We'll likely implement checksum operations in those methods. Data encryption is also very likely to be implemented at this location as well. 
 ====
-
-I'm likely not going to be able to keep track of everything in a system that need to modify more than a single page.  We need some way to manage pages in a more
-seamless manner, to handle the Copy On Write, the writes of all the modified pages back to the file and to free all that memory.
 
 For that matter, what happens if I need to modify the same page twice? Am I going to have multiple copies? What will end up in the file in the end?
 All of that leads me to realize that we can't remain at the level of working with a single page, we need some higher scope to work with here. We need to implement
@@ -176,179 +185,226 @@ that is the right term for where we will be.
 A transaction is a short lived object that is meant to do a specific operation. This is important because we don't expect a transaction to last very long or be very large.
 I'm sure we'll get some of those, but we are going to optimize for small & short transactions. Long or big transactions will work, but they aren't our optimization target.
 
-Look at Listing 4.4, which shows the API we are going to expose for our users. 
-
-[source]
-.Listing 4.4 - db.h - Transaction API declaration for our storage engine
-----
-include::./code/db.h[tags=tx_api]
-----
-<1> Forward declaration of opaque data types holding the state that the engine will need to manage its work.
-<2> The publicly defined structs that users will use to hold the data about databases and transactions.
-<3> The database options as strongly typed values. Currently very minimal.
-<4> Database create and close APIs.
-<5> Enabling `defer` support for closing a database.
-<6> Transaction create and close APIs.
-<7> Enabling `defer` support for closing a transaction.
-<8> Page modifications API.
-
-The idea in Listing 4.4 is that we want to do _everything_ within the scope of a transaction. Note that if you want to get or modify a page, you must provide a 
-valid transaction to do so. The functions are also named `txn_low_get_page`, the `low` part of the name indicates that they are low level interface. I don't 
-intend for our users to _ever_ work at that level. These functions will be moved to an internal header and not exposed as we provide more features to callers. 
-
-We now have a `txn_t` struct that we can use to represent the transaction, but the actual implementation is hidden away in the `txn_state_t`. We'll shortly 
-see why that is a _very_ useful approach for what we want to do. We also introduced the concept of a `db_t`, which will hold the `file_handle_t` and any other 
-resources that will be required.
-
 [CAUTION]
 .Paying attention to the man behind the screen
 ==== 
 C is a great low level language, but I'm really feeling the lack of data types. I want to make sure that everything that goes into the engine 
-is covered here, but I'm not sure how useful it will be to have you go through  a hash table implementation, for example.
+is covered here, but I'm not sure how useful it will be to have you go through a hash table implementation, for example.
  
 I'm assuming that if you are reading this book, you probably are familiar with this enough so that should be of no interest to you. For now,
 I want to keep putting all the code here, but I think that when I'll start using code beyond the standard library, I'm going to just point
 you to that code and not put it here.
 ====
 
-As you can imagine, the transaction API is going to be of enormous importance for our storage engine and as such, so we'll spend some time fleshing out the API.
-This is where we start to put together the skeleton of Gavran. Let's take a look at the first stage, creating a database, shown in Listing 4.5.
+Look at <<txn_api>>, which shows the API we are going to expose for our users. The idea in <<txn_api>> is that we want to do _everything_ within the scope of a transaction. 
+Note that if you want to get or modify a page, you must provide a 
+valid transaction to do so. The functions are also named `txn_raw_get_page()`, the `raw` part of the name indicates that they are raw interface. I don't 
+intend for our users to _ever_ work at that level. These are here for the internal implementation, nothing else. Building Gavran in layers like that helps to stabilize the 
+architecture of the system. It also help us reduce the internal dependencies. A raw method call can be done with no setup, but higher level calls likely need more details.
+
+We now have a `txn_t` struct that we can use to represent the transaction, but the actual implementation is hidden away in the `txn_state_t`. We'll shortly 
+see why that is a _very_ useful approach for what we want to do. We also introduced the concept of a `db_t`, which similarity hold the `db_state_t` and not much else. The
+idea is that `txn_t` and `db_t` are values that the user is using, while the `db_state_t` and `txn_state_t` are used by Gavran internally.
 
 [source]
-.Listing 4.5 - db.c - Creating an database instance
+[[txn_api]]
+.`gavran/db.h` - Transaction API declaration for our storage engine
 ----
-include::./code/db.c[]
+include::../include/gavran/db.h[tags=tx_structs]
+
+include::../include/gavran/db.h[tags=txn_api]
 ----
+
+As you can imagine, the transaction API is going to be of enormous importance for our storage engine and as such, so we'll spend some time fleshing out the API.
+
+[IMPORTANT]
+.How the code is structured?
+====
+I thought a lot about how to present the code in this book, because I don't want to dump all the concerns that we have to deal with in building a storage engine on you all at
+once. Once option was to show you a piece of code and how it changes over time. That ended up being pretty hard to work through. Similarly to trying to explain a change by
+looking at the diff. 
+
+Instead, I'm structuring the code so we are looking at the complete solution, but I've broken apart the implementation so it is composed of individual functions. I'm only going
+to be discussing the relevant functions at any given point in time. If I'm not calling out a particular function, you can assume that it has no impact on the functionality we
+discussed and ignore it at this point. I'll come back later and explain it in detail.
+====
+
+This is where we start to put together the skeleton of Gavran. Let's take a look at the first stage, creating a database, shown in <<create_db>>.
+
+[source]
+[[create_db]]
+.`db.c` - Creating an database instance
+----
+include::./code/db.c[tags=db_create]
+----
+
+The code in <<create_db>> is _dense_, I'm afraid. There is quite a lot of stuff going here that would be discussed in future chapters, for now, let's talk about the parts that 
+we are most interested on. We allocate the state for the database, create the file and set its minimum size, note that we _aren't_ setting the maximum size. If we were, and the 
+file was larger than the maximum size, we may discard parts of the data file. There is a lot of other things that are going here, setting up the database, creating default read 
+transaction, various options, etc. I'm ignoring all of these at this point.
 
 I'm sorry for the code dump, but I assume that it is best to show everything as a single unit rather than tease and reveal them one piece at a time. 
+Let's look at the actual implementation details. We'll start by looking at the `db_state_t` and `txn_state_t` structs that we are using in <<create_db>>.
+There are quite a lot of fields there that we'll only need in the future. You can see the full details in <<state_structs>>.
 
-A `db_t` is a simple structure that holds a single opaque pointer. I'm using the same approach in `txn_t` as well and it means that I have encapsulation as well
-as a way to modify the state of the object without needing to change the value that holds it. We'll see how useful that is when we get to building transactions.
+At this point, we can ignore all but the first three fields on each of the structs in <<state_structs>>. The `db_state_t` contains the options for the database (currently we only
+care for the `minimum_size` field), the file handle the the mapped memory in the `global_state`. The `txn_state_t` also has a copy of the `global_state` (and thus, the mapping). 
 
-The `struct database_state` (shown in Listing 4.1) itself isn't very big at the moment. It contains the database options (currently only the minimum size of the database), 
-the file handle and the memory map result. As times goes by, we'll see more and more data being managed at the database level, but it is important to start with the
-proper structure now, to avoid extra work later.
+[source]
+[[state_structs]]
+.`gavran/db.h` - Internal state structures
+----
+include::../include/gavran/db.h[tags=db_state_t]
 
-We check and validate the options, then we use our existing PAL file system API to create a file, set it to the right size and map it. With the use of `ensure` and
-`try_defer`, the entire thing reads as if we had no error handling. Note that we use multiple `try_defer` statements to setup resource cleanup in the event of a 
-failure. They are guaranteed to run in reverse order of definition.
+include::../include/gavran/db.h[tags=txn_state_t]
+----
 
-In the next chapter, we are going to focus on `handle_newly_opened_database` and do a lot of work there, but for now, I want to focus on transactions.
+In <<create_db>> we call to `db_validate_options()` to validate the options and copy the user defined values to our own copy. I'm showing the code in <<db_validate_options>>,
+note that this is a simplified version of what we'll have in the future. Whenever you see a code sample that come from a `<name>.simplified.c`, you can assume that this is going to 
+be reworked on in later chapters. You can see in <<db_validate_options>> that the code validates the provided settings and copy them to our own `db_options_t` struct. 
 
-=== Starting to implement transactions
+The user can also just pass null for the `options` and we'll use the default ones. In <<db_validate_options>> you can also see that I'm using `implementation_detail` macro. This 
+is just to let the compiler know that this is a hidden function which shouldn't be exported from the library.
+<<db_validate_options>> also shows the default options initialization. Right now we don't have much there, but it will grow over time.
 
-You already saw the external API to create a transaction in Listing 4.4, now we want to actually build it. Before we can do that, I want to go over what transactions _are_.
-A transaction in the context of Gavran is a set of changes that are applied to the database. Until they are applied, they are not visible to any other transactions.
+After handling the `options`, <<create_db>> then uses our PAL interface to create the file, ensure that it is a match to the minimum size we require and map it to memory. You'll note
+that there is actually quite a few resources that are involved in the process. The use of `ensure` and `try_defer` allows us to dramatically reduce the amount of error handing code that
+we would other need to manage. We actually have multiple `try_defer` calls and we use `done` to indicate that the function completed successfully and we should _not_ clean up those
+resources. Otherwise, everything gets cleaned up. The `try_defer` calls are guaranteed to be called in reversed order of declaration, so we can be sure of the destruction order.
 
-Before we dive into the details of how a transaction is implemented in code, I want to talk about what we are trying to _do_. The attachments that we'll build in this
+[source]
+[[db_validate_options]]
+.`db.simplified.c` - Validating the database's options and default options initialization
+----
+include::./code/db.simplified.c[tags=db_validate_options]
+
+include::./code/db.simplified.c[tags=db_initialize_default_options]
+----
+
+In the next chapter, we are going to focus on `db_init()` and do a lot of work there, but for now, I want to focus on transactions.
+
+=== Implementing transactions
+
+You already saw the raw structs to create a transaction in <<create_db>>, now we want to actually build real transactions API. Before we can do that, I want to go over what 
+transactions _are_. A transaction in the context of Gavran is a set of changes that are applied to the database. Until they are applied, they are not visible to any 
+other transactions.
+
+Before we dive into the details of how a transaction is implemented in code, I want to talk about what we are trying to _do_. The transactions that we'll build in this
 chapter is mostly concerned with managing a list of modified pages. The idea is that you'll always go through the transaction to modify pages, it will manage them for
-you and eventually commit them.
-
-The overall structure can be seen in Figure 5. 
-
-.The layout of a transaction with 2 modified pages
-image::{img-src}/fig5.png[]
+you and eventually commit them. The overall structure can be seen in <<tx-modified-pages>>. 
 
 Using the Copy On Write mode tha we discussed earlier, whenever we want to modify a page, we'll copy it to the side and make the modifications. Once all the changes 
 in the transaction are completed, we'll persist them all at once. Consider the implications of such a system. How would a rollback look in this case? 
 Simply free the copies, no one else had any access to them, so nothing needs to be done. 
 
+[[tx-modified-pages]]
+.The layout of a transaction with 2 modified pages
+image::tx-modified-pages.png[]
+
+
 As for commit, once all the changes has been written to the file, we are done. We saw in the previous chapter that it takes significant effort to make sure that a
 change to the file metadata is persisted. Changes to the file's data are by no means easier. We are going to deal with a single facet of the ACID properties in
 this chapter, and atomic commit. 
 
-
-.A note about multi threading
-****
-We don't have any. 
-
-Right now, the code isn't going to be able to handle multiple threads.
-The atomic property that we'll have is about sequential or interleaved transactions.
-Gavran _will_ have all of the ACID properties, including safe usage under multi threaded code, mind you. 
-****
-
-Listing 4.6 shows the structure of a transaction as well as its initialization.
-
-[source]
-.Listing 4.6 - impl.h & txn.c - Creating a transaction
-----
-include::./code/impl.h[tags=transaction_state]
-
-include::./code/txn.c[tags=txn_create]
-----
-
-
-A `txn_t` is just a pointer to `txn_state_t`, which holds the details about the transactions as well as the start of a hash table to hold
-the modified pages. We use the empty `entries` field to point past the end of the struct to the actual data. I'm doing it in this manner because
-it means that I have to do less allocations, which greatly simplify the code.
-
-You'll note that we are passing a `flags` parameter to the function, but not doing much of it. I'm currently ignoring that but we'll use that to
-set various behaviors on the transaction, such as whatever it is read only or allowed to write.
-In `txn_create`, we allocate enough space for the transaction state as well as 8 hash table entries. We'll see how they are used shortly.
-
-[CAUTION]
-.I gotta implement a hash table, argh!
-====
-I have to admit, given that I write databases for a living, I was highly amused by how reluctant I was to implement a hash table. I have wrote
-a few, so it isn't a new task. I'm also doing that while implementing a _storage engine_, which is closely related. 
-
-The good news here is that this hash table only need to support `put` and `get`, not `remove`. That makes the overall complexity much easier.
-
-Given that the readers of this book are likely interested, I'm going to go for an open addressing with linear probing model. And one of the 
-key features that I care about is avoiding the usual pointer caching that you'll typically see in hash tables. That is why the actual 
-`entries` buffer is placed after the `txn_state_t`. Data locality is a huge performance boost and I want some of that.
-
-I'm using the actual values (`page_t`) as the hash table entries, since they already contain their key. That means that I have to deal with no 
-extra space and the cost of lookup is likely very small. That might seems strange if you are coming from a language where you'll have more
-separation between the data containers and the values. 
-
-`Dictionary<K,V>` is a prime example of that. You have the container data and the data
-held by the container and they can live very far apart. That is not the case here, we always keep them very close by.
-====
+<<txn_create>> shows how we create a transaction. A `txn_t` is mostly just a pointer to `txn_state_t`, which holds the details about the transaction as well as the hash table to hold
+the modified pages. This is initialized by the `hash_new()` call. You'll note that we are passing a `flags` parameter to the `txn_create()`, but not doing much of it. I'm currently 
+ignoring that but we'll use that to set various behaviors on the transaction, such as whatever it is read only or allowed to write.
 
 One of the key responsibilities of the transaction is managing the work of `txn_modify_page`, to handle that properly, we need to store the modified
 pages in the transaction and be able to access them quickly.  Listing 4.7 has the details on how we manage that.
 
 [source]
-.Listing 4.7 - Modifying a page inside a transaction
+[[txn_create]]
+.`txn.simplified.c` - Creating a transaction
 ----
-include::./code/txn.c[tags=txn_modify_page]
+include::./code/txn.simplified.c[tags=txn_create]
 ----
 
-The `txn_modify_page` function in Listing 4.7 will first check if we already asked to modify the page in this transaction. If so, that copy of 
-the page will be returned to us. If not, we'll check that the page number if valid, allocate a copy of the page, copy the data to it and
-then register it in the hash table. 
+<<txn_create>> shows the setup of a new transaction, but it probably wouldn't make sense without looking at the most common actions that we'll have in a transaction `txn_raw_get_page()` 
+and `txn_raw_modify_page()`. Let's look at them first now.
+When using a transaction, `txn_raw_get_page()` is initially very similar to using `pages_get()`, so why do we have two layers of the API? The key difference is that `pages_get()` has 
+global scope, while `txn_raw_get_page()` is scoped to a transaction. Look back at <<tx-modified-pages>> and consider how that works. When we are calling `txn_raw_get_page()`, we first
+need to check if this transaction has a modified copy of the page in question and only if it does will we go to the data file. You can see how that looks like in <<txn_raw_get_page>>.
 
-This is called Copy On Write (COW) and it will serve as the basis for implementing one of the core ACID properties, Isolation.
+[source]
+[[txn_raw_get_page]]
+.`txn.simplified.c` - Get a page in the scope of the transaction, either locally modified copy or directly from the data file.
+----
+include::./code/txn.simplified.c[tags=txn_raw_get_page]
+----
 
-.Memory alignment
+.A note about multi threading
 ****
-In Listing 4.7 you can see that I'm using `palmem_allocate_pages` function, that make use of `posix_memaligned` under the covers. I'm asking the system
-to give me 8KB buffer with 8KB alignment.
-
-This is a match to how the operating system manage pages in memory (on 4KB alignment). It means that for the rest of my system, I can safely assume that 
-the page buffer is properly align for anything that I want to do. This is important for performance and correctness reasons, especially outside of the x64/x86 world.
+We don't have any at this point, we'll deal with them at a much later part of this book. Right now, the code isn't going to be able to handle multiple threads.
+The atomic property that we'll have is about sequential or interleaved transactions. Gavran _will_ have all of the ACID properties, including safe usage under multi threaded code, 
+mind you. I'm just building things one stage at a time, otherwise we'll drown in too much complexity, all at once.
 ****
+
+With `txn_raw_get_page()` our of the way, let's look at how we are going to implement `txn_raw_modify_page()`. We are going to use a structure very similar to <<create_and_write_file>>.
+The fact that we are never modifying the page directly is of enormous importance to the design of Gavran. This strategy is called Copy On Write (COW) and it will serve as the basis for
+implementing one of the core ACID properties, Isolation. 
+
+In <<txn_raw_modify_page>> `txn_raw_modify_page()` will first look in the `modified_pages` of the transaction and if we haven't already modified the page in question, we'll get it from
+the data file. I'm building `txn_raw_modify_page()` on top of `txn_raw_get_page()` so it will benefit from any changes that we'll make to the `txn_raw_get_page()` in the future. Once we
+have the original page, we allocate a buffer, copy the memory to the new location and register the new page in the transaction's `modified_pages`.
+
+IN <<txn_raw_modify_page>> we are also setting up the modified page with a pointer to the _old_ version of the data. In other words, we are able to look into what this page used to be
+like, before any modifications. This will become very important when the times come to do proper committing of the transaction's data.
+
+[source]
+[[txn_raw_modify_page]]
+.`txn.simplified.c` - Implementing Copy on Write in the transaction for page modifications.
+----
+include::./code/txn.simplified.c[tags=txn_raw_modify_page]
+----
+
+It is important to note that calling `txn_raw_get_page()`, `txn_raw_modify_page()` and then `txn_raw_get_page()` on the same page is something
+that you need to be aware of. The first and last `txn_raw_get_page` will return _different_ values. I haven't found this a real issue in practice, but something
+that you might want to keep in mind.
 
 === Managing the transaction state with a hash table
 
-The real work in `txn_modify_page` is inside the `lookup_entry_in_tx` and `allocate_entry_in_tx`. Let's see how these work, we'll start with
-the `lookup_entry_in_tx` in Listing 4.8, where we are searching through the hash table for a match.
+The most important piece in `txn_raw_modify_page()` is the management of the `modified_pages` on the transaction. This is a pointer to `pages_hash_table_t`, which is a hash table for 
+the modified pages in the transaction. 
+I have to admit, given that I write databases for a living, I was highly amused by how reluctant I was to implement a hash table. I have written
+a few, so it isn't a new task. I'm also doing that while implementing a _storage engine_, which is closely related. 
+
+The good news here is that this hash table only need to support `hash_put_new` and `hash_lookup`, we don't need to handle deletions at all. That makes the overall complexity much easier.
+
+Given that the readers of this book are likely interested, I'm going to go for an open addressing with linear probing model. And one of the 
+key features that I care about is avoiding the usual pointer caching that you'll typically see in hash tables. Data locality is a huge performance boost and I want some of that. This 
+is not meant to be a generic hash table, I created it specifically to hold `page_t` values indexed by their `page_num`. 
+Since `page_t` already contain the key, I can simplify my implementation significantly and the cost of lookup is likely very small. That might seems strange if you are coming from a language 
+where you'll have more separation between the data containers and the values. 
+
+`Dictionary<K,V>` is a prime example of that. You have the container data and the data held by the container and they can live very far apart. That is not the case here, we always keep them
+ very close by. You can see how the `pages_hash_table_t` is defined in <<pages_hash_table_t>>
 
 [source]
-.Listing 4.8 - txn.c -Looking up a page in the transaction's hash table
+[[pages_hash_table_t]]
+.`gavran/internal.h` - The hash table definition
 ----
-include::./code/txn.c[tags=lookup_entry_in_tx]
+include::../include/gavran/internal.h[tags=pages_hash_table_t]
 ----
 
 I'm going to skip explaining https://en.wikipedia.org/wiki/Hash_table[how hash tables work], I assume that you either have a grasp on that
 or is able to learn that from other sources. I'll mention that I'm using a hash table implementation strategy called 
 https://en.wikipedia.org/wiki/Linear_probing[linear probing]. This refers to how the hash table handles collisions. Instead of creating a 
 linked list of values on hash collision, we'll move to the next location in the array. That means that we are going to have good locality
-of reference when doing the search, the entire hash table is typically a single allocation and the `get` and `put` implementation are
-straightforward.
+of reference when doing the search, the entire hash table is typically a single allocation and the `hash_lookup` and `hash_put_new` implementations
+are straightforward.
 
-The downside of linear probing and open addressing in general is that the deletes tend to be far more complex to implement than an 
+[TIP]
+.Recommended reading
+====
+If you want to really dig down into hash table, you might want to read https://www.amazon.com/dp/B07NKYSSR1/[The Joys of Hashing] which does a great job of covering most aspects
+of hash tables design and implementation with very clear code and the background details that explain the _why_ of certain decisions.
+
+You may also want to read http://craftinginterpreters.com/hash-tables.html[the excellent hash table chapter] in Crafting Interpreters, which is much shorter, but does a great job
+explaining how hash tables work.
+====
+
+The downside of linear probing and open addressing in general is that the deletes tend to be more complex to implement than an 
 implementation that uses chaining. The good news is that we don't need to worry about that here, so the complexity is greatly reduced.
 
 There are a few other things to consider for this case:
@@ -361,48 +417,92 @@ There are a few other things to consider for this case:
 * This is where the load factor comes into play. Given that the page numbers are likely to cluster around specific values, the
   empty buckets that remain act as backstop to avoid iterating through all the buckets. 
 
-Now that we know how to get an entry from the hash table, let's look at the other side, how can we put a value in the table?
-This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. 
-The details are in Listing 4.9.
+In <<hash_new_and_lookup>> you can see how we create a new hash table using `hash_new()` and looking up a single value using `hash_lookup()`. The
+transaction's `modified_pages` field is setup via `hash_new()` in `txn_create()`. We are going to be using this hash table a _lot_. It is going 
+to serve as one of the most fundamental pieces in the transaction's implementation. 
+
+One thing to note about the implementation here, I have chosen to favor readability over performance. There are several low hanging
+fruits that we can utilize here that will likely help performance to some degree. Using shifts instead of modulus (since our `number_of_entries`
+can be assumed to be a power of two) is a simple one. We might get to that when we get to the benchmarks portion of this book, for now, simpler
+code is the key.
 
 [source]
-.Listing 4.9 - txn.c - Adding an entry to the hash table, potentially resizing it
+[[hash_new_and_lookup]]
+.`hashtable.h` - Creating a hash table and looking up a single value
 ----
-include::./code/txn.c[tags=allocate_entry_in_tx]
+include::./code/hashtable.c[tags=hash_new_and_lookup]
 ----
 
-The code in Listing 4.9 starts out in the same manner as `lookup_entry_in_tx` does, by doing a scan on the buckets from the starting position based on the
-modulus of the page number with the number of buckets. We are searching for one of two cases:
+In <<hash_new_and_lookup>> you can see that creating a new hash table is simple, we allocate a single buffer, for the `pages_hash_table_t` as well
+as the `entries` immediately following it. That is why we have an "empty" array at the end of `pages_hash_table_t`, that indicates to the compiler
+that the value of the field is the area immediately following the struct. 
 
-* A bucket that has the same page number, which we error on, because after the page has been allocated, there should never be any overwrites.
-* An empty bucket, which we can reuse. The way I implemented this hash table, we will write to the first empty bucket. That means that if we find any
-  empty bucket during a scan, we know that the page number we search can't be on a later bucket.
+For lookups, we simply scan through the `entries` array, the starting location depends on the page that we are looking for. But if we found a value
+that isn't the page we are looking for, we know that we need to continue scanning. This is what open address means, that the value can be (because
+of collisions) further away from where it is meant to be. 
 
-Once we found an empty slot of put the value in, we check the load factor on the table. If it is lower than 75%, we can assign the bucket to the page
-and return successfully. But if we are over the 75% mark, we need to resize the hash table. This is done in `expand_hash_table`, which we will explore
-shortly. 
+This might make more sense when we'll look into how we are going to implement _putting_ a value into the hash table.
+This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. The details are in <<hash_put_new>>.
 
-There are three possible return values for `expand_hash_table`:
+<<hash_put_new>> starts by expanding the hash table if needed, then scans through the table for an empty location that we can place the new value in,
+starting with the `page_num` modulus the size of the table. It is an error to add a value that already exists in the table. When we add a value, we 
+check if the _next_ call to `hash_put_new()` should expand the table. This is done by checking if we are over 75% full. As mentioned, I'm not going to 
+explain how hash tables work, if you have questions on the implementation, there are more than enough resources about hash tables available.
 
-* Success, in which case we increased the size of the hash table and will recurse to add the page in the right location.
-* Failure, the function has run into unrecoverable problem. 
-* Unable to resize because of memory pressure. In this case, we have two separate behaviors. If there isn't enough memory, but there is still room in 
-  the hash table we'll allow the load factor to grow as needed. We'll only raise an error when the load factor reach 100% and we cannot complete the 
-  allocation at all.
+[source]
+[[hash_put_new]]
+.`hashtable.h` - Put a new value inside the hash table
+----
+include::./code/hashtable.c[tags=hash_put_new]
+----
 
-The idea behind this behavior is to be robust to temporary conditions. We don't *have* to resize the hash table if there is memory pressure right now.
-We can increase the load factor and gain more time. Maybe the transaction will complete and we can throw away the entire table, for example.
+Let's look how expanding the table works. We are going to use simple doubling of the hash table whenever we get to 75% load factor. In other words, if we
+start with 8 entries by default, we'll increase to 16 when we get to the 7th entry, to 32 when we get to 13, and 64 when we get to 25.
+Note that since we are actually using `page_t` as our entries, we have to take into account it is somewhat large, on 64 bits, it is going to 
+be 32 bytes.
+
+<<hash_expand_table>> shows how we double the size of the table. We allocate a new buffer, twice as large, iterate over the old hash table using `hash_get_next()`
+and add to the new hash table using `hash_put_new()`, pretty simple, overall.
+We are using `mem_calloc()` to allocate the memory, but couldn't we use `mem_realloc()` instead, to reallocate the buffer without 
+needing to copy the data gain? The answer is no. Part of the expansion of the hash table means that we need to hash the entries _again_, placing them in 
+new locations, based on the new size.
+
+[source]
+[[hash_expand_table]]
+.`hashtable.h` - Doubling the size of the hash table
+----
+include::./code/hashtable.c[tags=hash_expand_table]
+----
+
+There are a few interesting implications to the way we built `hash_expand_table()`. First, any `hash_put_new()` may cause the table to shift, that is why 
+we send an indirect pointer to the function. 
+You cannot mix `hash_get_next()` and `hash_put_new()`, iteration and mutations generally don't mix with one another.
+
+Finally, let's look at `hash_get_next()`, shown in <<hash_get_next>>.
+The implementation simple scans through the table, but we use the externally provided `state` variable to hold our state between calls.
+We expect `hash_get_next()` to be used as it is used in <<hash_expand_table>>. Initialize the `iter_state` value to `0` and call `hash_get_next()` until it returns `false`. 
+
+The hash table implementation we have here is a pretty basic one, intentionally. You can see more options on how I could have implemented it in 
+https://www.amazon.com/dp/20/B07NKYSSR1[The Joys of Hashing], but the idea is to get this working properly and fix any performance issues later. That said, I don't expect to
+have too many problems around the hash table implementation, but I was surprised in the past... 
+
+[source]
+[[hash_get_next]]
+.`hashtable.h` - Iterating over the hash table
+----
+include::./code/hashtable.c[tags=hash_get_next]
+----
 
 .Memory management in Linux
 ****
-By default, Linux will never fail a `malloc`. In other words, when calling `malloc`, you'll never get `NULL` back. If you care to know more about 
+By default, Linux will never fail a `malloc()`. In other words, when calling `malloc()`, you'll never get `NULL` back. If you care to know more about 
 this behavior, search for https://lwn.net/Articles/317814/[over commit and the OOM killer]. A good paper on why over commit is required is 
 https://www.microsoft.com/en-us/research/publication/a-fork-in-the-road/["A fork() in the road"]. 
 
 In essence, too much software simply assume that all memory allocations will succeed. Even the Linux kernel has this an issue with
 https://lwn.net/Articles/627419/[this kind of expectation]. 
 
-The problem with not failing `malloc` is that Linux cannot just magic some more RAM, and even with swap, you'll eventually run out. The issue
+The problem with not failing `malloc()` is that Linux cannot just magic some more RAM, and even with swap, you'll eventually run out. The issue
 is how it _handles_ this scenario. And the way Linux work is that when you use too much memory, Linux will select a victim process and _kill_ it
 to reutilize the memory it uses. The situation is worse because the triggering event that would cause the OOM killer to run and select a victim
 to kill can be a totally unrelated process.
@@ -417,109 +517,58 @@ allocating directly from the system, but that is likely to change as the impleme
 more closely and will be able to react properly to low memory events.
 ****
 
-The last piece of the puzzle for the hash table is the `expand_hash_table` function, which is covered in Listing 4.10. Inside this function you
-can find the reason we use the `state` pointer inside `txn_t`. 
-
-[source]
-.Listing 4.10 - txn.c - Expanding the hash table
-----
-include::./code/txn.c[tags=expand_hash_table]
-----
-
-The code in Listing 4.10 allocates a new bucket buffer, double the size of the old one (plus the size of the `txn_state_t`). If we fail this allocation, we let the 
-caller know about this and they can decide how to handle it. You saw the two behaviors we have for this error mode in Listing 4.9.
-
-We then copy the `txn_state_t` and then copy all the existing values from the existing table to the new one, placing them in their new location. 
-I'm handling an impossible scenario as well (`located` being `false`), just to be on the safe side. The key here is that there really isn't much that is
-interesting here. This function does the work, and that is it.
-
-There is a catch here. We allocate a _new_ buffer for the hash table and the transaction state. But the caller points to the old one. That is why we use
-the `txn_t` that holds a `state` field. The caller can keep using the same value, but we replace the internal state of the system. There are other
-important properties that we result from this behavior:
-
-* The memory is always allocated as a single buffer, aiding locality.
-* Doubling the size of the hash table means that we'll very quickly reach the appropriate size.
-* When we'll start managing memory directly, instead of using `malloc`, we'll be able to reuse this buffer across transaction calls. Meaning that allocations
-  will only need to happen on the _first_ transaction.
-
-=== Getting a page from the transaction
-
-We focused on the process of modifying a page, what about getting one? If we don't need to mutate a page, there is no need for all this copying, right?
-Checking Listing 4.12, where we show how to get a page for read only operations.
-
-[source]
-.Listing 4.12 - txn.c - Getting a page from the transaction for read only purposes
-----
-include::./code/txn.c[tags=txn_get_page]
-----
-
-This code is built so if you modified the page and then another part got the same page in the same transaction, you'll get the _modified_ page, not the 
-original one. That allows us to a unified view on the data inside a transaction.
-
-On the other hand, a sequence of `txn_get_page` (get the original), `txn_modify_page` (copy and create a new one) and then `txn_get_page` is something
-that you need to be aware of. The first and last `txn_get_page` will return _different_ values. I haven't found this a real issue in practice, but something
-that you might want to keep in mind.
-
 === Committing and closing the transaction
 
 Now that we have a way to keep track of the modified pages in the transaction, the next stage is to figure out how to commit those changes to disk. It turns out 
 that most of the work was already done for us. Listing 4.11 shows how to "commit" a transaction.
 I'm using commit in quotes here because this is not respecting any of the transaction properties, but we are laying down the foundation for actual transactions.
 
-.Listing 4.11 - txn.c - Committing the modified pages to disk
-----
-include::./code/txn.c[tags=txn_commit]
-----
+There really isn't much to do in <<txn_commit>>, to be honest. We scan through the table of modified pages and write them to the file using the `pal_write_file()` function
+we looked at in the previous chapter. If there is an error, we return, and that is about it. Note that we don't have any attempt to for durability, atomicity, etc. 
 
-There really isn't much to do in Listing 4.11, to be honest. We scan through the table of modified pages and write them to the file using the `palfs_write_file` function
-we looked at in the previous chapter. If there is an error, we return, and that is about it. Note that we don't have any attempt to for durability, 
-atomicity, etc. 
+After calling `txn_commit()`, we need to call `txn_close()` to cleanup all the resources for the transaction. If we want to rollback the transaction, we can call `txn_close()`
+without calling `txn_commit()`. 
 
-As we run through the modified pages, we are freeing them. If there is an error, nothing bad will happen, they will get cleaned up properly in `txn_close`. 
-After the transaction is committed, we can close it. Alternatively, we can close the transaction without committing it to as a rollback. Listing 4.12 shows the
-relevant code.
-
-.Listing 4.12 - txn.c - Closing the transaction and freeing resources
+[source]
+[[txn_commit]]
+.`txn.simplified.c` - Implementing commit transaction by writing modified pages to disk and closing it by freeing the memory of the transaction
 ----
-include::./code/txn.c[tags=txn_close]
-----
+include::./code/txn.simplified.c[tags=txn_commit]
 
-Closing the transaction in Listing 4.12 means that we iterate over the modified pages and free them, then we are done. 
+include::./code/txn.simplified.c[tags=txn_close]
+----
 
 A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the
-future. Get it working, get it working _right_ and only then get it working fast.
+future, when I can see benchmark results. Get it working, get it working _right_ and only then get it working fast.
 
 === Using the transaction API
 
-The last thing that we'll do in this chapter is put everything together. Listing 4.12 shows how we can now write Listing 4.3 using the new API.
+The last thing that we'll do in this chapter is put everything together. <<create_and_write_with_tx_api>> shows how we can now write <<create_and_write_file>> using the new API.
 
 [source]
-.Listing 4.12 - main.c - Reading and writing using the paging API
+[[create_and_write_with_tx_api]]
+.`test.c` - Reading and writing using the transaction API
 ----
-include::./code/main.c[tags=create_and_use_database]
+include::./code/test.c[tags=create_and_write_with_tx_api]
 ----
-<1> Function to read from the first page in a transaction
-<2> Start a transaction and modify a page
-<3> Read before committing the transaction
-<4> Read after transaction commit
 
-In Listing 4.12, you'll note that we are using _two_ transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
-of isolation. Until the `write_tx` is committed, the transaction in `print_msg` will not see any of its changes. I wrote it in this manner to show
+In <<create_and_write_with_tx_api>>, you'll note that we are using multiple transactions. One to do the writes and one for the reads. We actually got a _very_ limited form
+of isolation. Until the `write_tx` is committed, the transactions created in `validate_message()` not see any of its changes and it is committed. I wrote it in this manner to show
 how we are starting to get real features. 
-The reason the code in Listing 4.12 is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modified a 
+
+The reason the code in <<create_and_write_with_tx_api>> is able to create isolation between transactions is that the `write_tx` doesn't modify the file directly, it modifies a 
 _copy_ of the page and the act of committing the transaction make it apparent to the next transaction.
+
+You can also see that I'm passing `TX_WRITE` and `TX_READ` flags to the `txn_create` function. At the moment, it does nothing, but it will become important down the line.
 
 === Unit tests
 
 Finally, before we close this chapter, we need to make sure that the software _works_. 
-
-[source,python]
-.Listing 4.13 - Unit testing the transaction API
-----
-include::../pyapi/tests04.py[]
-----
-
-The actual Python API I'm using here is not mirroring the C API directly, mind you. I'm trying to get a more realistic API that wraps some C code. It also
-makes for a far simpler system to setup more complex scenarios, which is where we are heading.
-
 Our next topic is going to be... managing the pages and disk space.
+
+[source,c]
+[[tests_ch04]]
+.`test.c` - Testing the transactions API and copy of write
+----
+include::./code/test.c[tags=tests]
+----

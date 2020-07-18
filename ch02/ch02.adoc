@@ -58,7 +58,7 @@ it does and then we'll discuss how they all fit together. I'll discuss how they 
 
 [source]
 [[read_int_to_str_buffer]]
-.test.c - Mostly automatic handling of resource usage and error handling in C
+.`test.c` - Mostly automatic handling of resource usage and error handling in C
 ----
 include::./code/test.c[tags=read_int_to_str_buffer]
 ----
@@ -160,9 +160,9 @@ thing happen automatically.
 
 [source]
 [[defer-api]]
-.defer.h - Implementation of defer and try_defer using the {attribute_cleanup}
+.`gavran/infrastructure.h` - Implementation of defer and try_defer using the {attribute_cleanup}
 ```
-include::./code/defer.h[tags=defer]
+include::../include/gavran/infrastructure.h[tags=defer]
 ```
 <1> The `cancel_defer_t` struct allow to capture the state that will be sent through the `defer()` call as well as the pointer to the cancellation flag.
 <2> The actual macro implementing `try_defer()` and `defer()`. Note that we set the `cancelled` field to track the marker value provided by the caller.
@@ -184,9 +184,9 @@ This can be very important if you are using `realloc()`, for example.
 
 [source]
 [[defer-define]]
-.defer.h - Adding support for calling cleanup functions via `defer()`
+.`gavran/infrastructure.h` - Adding support for calling cleanup functions via `defer()`
 ----
-include::./code/defer.h[tags=defer_free]
+include::../include/gavran/infrastructure.h[tags=defer_free]
 
 enable_defer_imp(close, -1, *(int*), "%d");
 ----
@@ -214,9 +214,9 @@ On top of these, several macros and being able to rely on `defer()` gives us the
 
 [source]
 [[errors_api]]
-.errors.h - Internal errors API implementation
+.`gavran/infrastructure.h` - Internal errors API implementation
 ----
-include::./code/errors.h[tags=errors_api]
+include::../include/gavran/infrastructure.h[tags=errors_api]
 ----
 
 A lot is going on in <<errors_api>>, allow me to go through this one at a time. We start by forward declaring `op_result_t`. We don't actually _have_ such 
@@ -274,7 +274,7 @@ We'll start talking about our errors handling implementation with <<errors-impl-
 
 [source]
 [[errors-impl-declarations]]
-.errors.c - Storage declaration for the errors API
+.`errors.c` - Storage declaration for the errors API
 ----
 include::./code/errors.c[tags=declarations]
 ----
@@ -317,7 +317,7 @@ Howard Chu's (author of LMDB) discussion of https://www.openldap.org/lists/openl
 
 [source]
 [[try_sprintf]]
-.errors.c - String processing routines
+.`errors.c` - String processing routines
 ----
 include::./code/errors.c[tags=try_sprintf]
 ----
@@ -327,7 +327,7 @@ our code string processing routine looks much simpler, see for yourself in <<err
 
 [source]
 [[error-push]]
-.errors.c - Pushing a new error into the thread's buffer----
+.`errors.c` - Pushing a new error into the thread's buffer----
 ----
 include::./code/errors.c[tags=errors_push_new]
 ----
@@ -347,7 +347,7 @@ Now that you have seen how we push a new error, let's see how we provide more co
 
 [source]
 [[errors_append_message]]
-.errors.c - Appending a message to the current error
+.`errors.c` - Appending a message to the current error
 ----
 include::./code/errors.c[tags=errors_append_message]
 ----
@@ -362,7 +362,7 @@ macro.
 
 [source]
 [[errors-rest]]
-.errors.c - The rest of the implementation
+.`errors.c` - The rest of the implementation
 ----
 include::./code/errors.c[tags=rest]
 ----
@@ -389,9 +389,9 @@ changing the way I'm writing code to build upon our infrastructure. <<mem-usage>
 
 [source]
 [[mem-usage]]
-.util.c - Allocation of memory using the errors API
+.`memory.c` - Allocation of memory using the errors API
 ----
-include::./code/util.c[tags=mem_usage]
+include::./code/memory.c[tags=mem_usage]
 ----
 
 The code in <<mem-usage>> isn't really that interesting. What is interesting is that now that I have it, I can skip a lot of checks in my code and rely on the 
