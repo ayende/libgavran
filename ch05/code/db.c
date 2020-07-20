@@ -4,7 +4,6 @@
 #include <string.h>
 
 #define GAVRAN_VERSION 1
-#define FILE_HEADER_MAGIC "GVRN!"
 
 static result_t db_is_new_file(db_t *db, bool *is_new) {
   txn_t tx;
@@ -117,7 +116,7 @@ static result_t db_validate_file_on_startup(db_t *db) {
   return success();
 }
 
-weak_symbol implementation_detail result_t db_init(db_t *db) {
+implementation_detail result_t db_init(db_t *db) {
   bool is_new;
   ensure(db_is_new_file(db, &is_new));
 
