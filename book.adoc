@@ -45,7 +45,6 @@ include::./ch03/ch03.adoc[]
 :!figure-number:
 :!listing-number:
 include::./ch04/ch04.adoc[]
-////
 
 :figure-caption: Figure 5,
 :listing-caption: Listing 5,
@@ -54,8 +53,13 @@ include::./ch04/ch04.adoc[]
 include::./ch05/ch05.adoc[]
 
 ////
-:listing-caption: Listing 6, 
+
+:figure-caption: Figure 6,
+:listing-caption: Listing 6,
+:!figure-number:
+:!listing-number: 
 include::./ch06/ch06.adoc[]
+////
 
 :listing-caption: Listing 7, 
 include::./ch07/ch07.adoc[]

@@ -38,7 +38,7 @@ typedef struct page {
   void *address;
   void *previous;  // relevant only for modified page
   uint64_t page_num;
-  uint64_t size;
+  uint64_t number_of_pages;
 } page_t;
 
 result_t pages_get(txn_t *tx, page_t *p);
@@ -61,10 +61,7 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_free = 0,
   page_flags_file_header = 1,
   page_flags_metadata = 2,
-  page_flags_single = 3,
-  page_flags_overflow_first = 4,
-  page_flags_overflow_rest = 5,
-  page_flags_free_space_bitmap = 6,
+  page_flags_free_space_bitmap = 3,
 } page_flags_t;
 
 typedef struct free_space_bitmap_heart {
@@ -219,6 +216,7 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 
 // tag::tx_allocation[]
 result_t txn_allocate_page(txn_t *tx, page_t *page,
+                           page_metadata_t *metadata,
                            uint64_t nearby_hint);
 result_t txn_free_page(txn_t *tx, page_t *page);
 // end::tx_allocation[]
@@ -239,10 +237,10 @@ static inline bool bitmap_is_set(uint64_t *buffer, uint64_t pos) {
 }
 // end::bit-manipulations[]
 
-// tag::page_metadata[]
+// tag::metadata_api[]
 result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
                           page_metadata_t **metadata);
 
 result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
                              page_metadata_t **metadata);
-// end::page_metadata[]
+// end::metadata_api[]

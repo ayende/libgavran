@@ -38,7 +38,7 @@ static result_t db_init_free_space_bitmap(txn_t *tx) {
       page_flags_free_space_bitmap;
   entry[free_space_start].free_space.number_of_pages = pages;
 
-  page_t p = {.page_num = 1, .size = pages * PAGE_SIZE};
+  page_t p = {.page_num = 1, .number_of_pages = pages};
   ensure(txn_raw_modify_page(tx, &p));
   // mark header & free space pages as busy
   for (size_t i = 0; i <= pages; i++) {

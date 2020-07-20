@@ -1,14 +1,15 @@
 == Page management
 
 We now have a system that is capable of allocating disk space inside a file, work with individual pages and allocate and free pages dynamically. 
-We are almost ready to start working on  data structures. There is a minor issue, the most that we can use is a single page at a time. That works 
-if everything that we need to work with is 8Kb or less, but isn't really a viable option to go on with.
+There is a minor issue, the most that we can use is a single page at a time. That works if everything that we need to work with is 8KB or less, 
+but isn't really a viable option to go on with.
 
-We need to introduce the notion of an _overflow_ page. This refers to a value that must reside on multiple pages (so it overflows the page boundary). Listing 6.1 shows
-what we want to achieve using the current code. As you can see, it is badly broken.
+We need to introduce the notion of an _overflow_ page. This refers to a value that must reside on multiple pages (so it overflows the page boundary). 
+In <<overflow_problem>> you can see what we want to achieve using the current code. As you can see, it is badly broken.
 
 [source]
-.Listing 6.1 - Trying to set a value greater than 8Kb on a page
+[[overflow_problem]]
+.Trying to set a value greater than 8Kb on a page
 ----
 txn_t tx;
 ensure(tx_create(&db, 0, &tx));
@@ -16,53 +17,50 @@ defer(tx_close, &tx);
 page_t page = {0};
 ensure(txn_allocate_page(&tx, &page));
 
-// <1> will write beyond the boundary of the page!!!
-memcpy(page.address, buffer, 12288);
+// will write beyond the boundary of the page!!!
+memcpy(page.address, buffer, 12 * 1024);
 
 ensure(tx_commit(&tx));
 ensure(tx_close(&tx));
 
 ensure(tx_create(&db, 0, &tx));
-ensure(txn_get_page(&tx, &page));
+ensure(txn_raw_get_page(&tx, &page));
 
-char new_buf[12288];
-// <2> Again, reads past end of buffer
-memcpy(new_buf, page.address, 12288);
+char new_buf[ 12 * 1024];
+// Again, reads past end of buffer
+memcpy(new_buf, page.address, 12 * 1024);
 ----
 
-The issue is that we are allocating a single page at a time, which won't work. And worse, when we try to _read_, the `txn_get_page` will give us a single page because
+The issue is that we are allocating a single page at a time, which won't work. And worse, when we try to _read_, the `txn_raw_get_page()` will give us a single page because
 it doesn't understand that you can _have_ multi pages in a single run. Right now, in order to handle this properly we'll need to allocate two pages and do separate writes 
 and reads to get it. It seems obvious that we need to provide a mechanism at the database level to manage values that cross more than a single page. The way we'll do that 
 is to allow to allocate pages in a group. So you can ask for a page, or three pages, etc. 
 
-In order to support this, we will use the `page_t` structure to pass the `overflow_size` of the value that we intend to put in the page. We use a `uint32_t` here, 
-so the  maximum size of a single value would be 4GB. Why are we passing the _size_ of the value instead of the number of requested pages? The reasoning behind 
-that is that we need to know what is the size of the value when we get it back from `txn_get_page`. 
+In order to support this, we will use the `page_t` structure to pass the `number_of_pages` of the value that we intend to put in the page. We use a `uint64_t` here, 
+so the maximum size of a single value is effectively infinite. Note that we are passing the number of _pages_ that we want. If we want to deal with values, which may be 
+of arbitrary size, we'll need to store that somewhere. We'll see exactly where we can _keep_ this value this this chapter.
 
 .Value vs. page
 ****
-I'm using two different terms here that may be confusing. The overflow page (rather, pages) is a consecutive set of pages that are managed as a single 
+I'm using two different terms here that may be confusing. A page (rather, pages) that form a consecutive set of pages that are managed as a single 
 unit by Gavran. The value I refer to here is the _user provided_ value, which does not need to fit on a page boundary. If I want to persist a value 
 that is 10,000 bytes in size, I'll need to use two pages for that.
 
-When I'm reading it back using `txn_get_page`, we'll read those two pages, but we need to provide the caller with the size of the that was previous stored 
-in those pages. When we use `txn_modify_page`, we must ensure that our copy covers both pages.
+When I'm reading it back using `txn_raw_get_page()`, we'll read those two pages, but we need to provide the caller with the size of the that was previous stored 
+in those pages. When we use `txn_raw_modify_page()`, we must ensure that our copy covers both pages. That doesn't sounds very "raw" to me though.
 ****
 
-In addition to adding the `overflow_size` field, take note of the `nearby_hint` parameter for `txn_allocate_page`, so callers can specified their preferred location.
-The changes to `txn_allocate_page` are simple, we already have all the mechanics in place to handle this feature. And indeed, you'll not run into issues when
-handling this. The problem starts when you have to write `txn_get_page`.
-
-The actual issue is pretty simple, where are we going to put the `overflow_size` value? We need to put it _somewhere_, but we have no room for it. This isn't
-information that goes into the page, it is information _about_ the page. Where would it go?
+The actual issue is pretty simple, where are we going to put the size of the actual value we want to keep? (Those  10,000 bytes I mentioned earlier).
+We need to put it _somewhere_, but we have no room for it. This isn't information that goes into the page, it is information _about_ the page. Where would it go?
 
 === Placement of pages metadata
 
 The typical location for metadata information about a page in a header inside the page. The storage engine will reserve the first few bytes of a page to itself for its
-own book keeping purposes. You can see how this looks in Figure 9. This is how it works for LMDB and Voron, for example, among many others.
+own book keeping purposes. You can see how this looks in <<page-common>>. This is how it works for LMDB and Voron, for example, among many others.
 
+[[page-common]]
 .A page with inlined metadata in the header
-image::{img-src}/fig9.png[]
+image::page-common.png[]
 
 Keeping the metadata in the page header has a number of useful properties:
 
@@ -70,8 +68,8 @@ Keeping the metadata in the page header has a number of useful properties:
 * There is great locality of reference for the metadata.
 
 It also have an annoying downside, it means that you don't actually have the full page available for the user. In Voron, the header size is 64 bytes and LMDB has a 16 
-bytes header. As you can see in Figure 9, that means that you are left with 8,128 bytes to work with in a page with Voron and 8,176 bytes in LMDB. That isn't bad, per
-se, but it does have a _very_ important implication. The size of a value is never going to be a power of two if you are using page headers. 
+bytes header. As you can see in  <<page-common>>, that means that you are left with 8,128 bytes to work with in a page with Voron and 8,176 bytes in LMDB. That isn't bad, per
+se, but it does have a _very_ important implication. The size of a value is **never** going to be a power of two if you are using page headers. 
 
 Consider how we'll need to implement the free space bitmaps in the presence of page headers. It will make things much harder. Not _too_ hard, admittedly, but this is a
 very simple case. There are several data structures which assume that the data is going to be based on a power of 2. Two such examples are 
@@ -87,9 +85,9 @@ real redeeming features.
 A https://shareok.org/bitstream/handle/11244/14203/Thesis-1989-R234p.pdf?sequence=1[performance comparison] of the two found that Extensible Hashing uses less  
 space but might be slower if the directory (a key element in the algorithm) cannot be kept in memory. That analysis in from 1990 and the code was run on a 
 http://www.1000bit.it/ad/bro/perkin/PerkinElmer-3230.pdf[Perkin-Elmer 3230] machine. That used to cost over 100,000 USD in 1980s dollars
-(about 285,000 USD in today's dollars). You can top that machine with a whopping 8 MB of RAM. 
+(about 285,000 USD in today's dollars). You can buy that machine (if you went all out) with a whopping 8 MB of RAM. 
 
-Even under those conditions, linear hashing was recommended only if you have memory pressure. I think that memory pressure in this context is no longer relevant
+Even under _those_ conditions, linear hashing was recommended only if you have memory pressure. I think that memory pressure in this context is no longer relevant
 and you should always go with Extendible Hashing. We'll be implementing the algorithm later in this book.
 ****
 
@@ -97,14 +95,15 @@ I also want to create proper layering in the system. We have now a page based st
 on what is going on. That is a very desirable property in my opinion. So I want to avoid a page header. 
 
 If the page metadata isn't on the page, where are we going to place it? Let's assume that we need to keep 16 bytes of metadata per page. The obvious solution is to 
-go with the same route we did with the free space bitmap. We'll put the pages metadata in the pages themselves. A look at Figure 10 might help makes things clearer.
-
-.Dedicated pages metadata page contain metadata for all pages, including themselves, the free space bitmap and the header
-image::{img-src}/fig10.png[]
+go with the same route we did with the free space bitmap. We'll put the pages metadata in the pages themselves. A look at <<pages-recursive>> might help makes things clearer.
 
 Assuming that we have 64 bytes of metadata per page, that means that we can fit 128 pages metadata in an 8Kb page. In other words, we use one 8Kb metadata page 
 for every MB of disk space we use. And each GB of disk space will require 2MB of metadata. Note that we were going to need to make use of this space _anyway_, 
 by the way. The issue is whatever this is internal use in a page or external with dedicated space.
+
+[[pages-recursive]]
+.Dedicated pages metadata page contain metadata for all pages, including themselves, the free space bitmap and the header
+image::pages-recursive.png[]
 
 [TIP]
 .Using 64 bytes for page metadata
@@ -112,14 +111,15 @@ by the way. The issue is whatever this is internal use in a page or external wit
 It is entirely possible to get away with using merely 16 bytes as the page header, which would allow us to pack 512 metadata entries into a single 8KB page.
 Why go with 64 bytes, then? 
 
-* I want to be able to encrypt the data, and in order to handle that, I need to be to store 28 bytes of data per page for the encryption state. We'll also 
-  need at least some additional state per page, so we'll round it to 64 bytes and work with that. 
-* Having more space in the header (64 - 28 = 36 bytes) gives us a lot of options with regards to manage data about the pages. 
+* Remember the `crypto` field in the `page_metadata_t` structure, that alone takes 32 bytes. That is required to handle encryption of pages as well as store 
+  cryptographic hash of the page. These will both be discussed at length on Chapter 11.
+* Having more space in the header (64 - 32 = 32 bytes) gives us a lot of options with regards to manage data about the pages. And given the fact that we are
+  already are greater than 32 bytes, we might as well go to 64 bits as the next logical stop.
 ====
 
-In Figure 10, we place the metadata of the 3rd page in the file. That is easy to do and works well with the code that we have so far. However, that approach contains
+In <<pages-recursive>>, we place the metadata of the 3rd page in the file. That is easy to do and works well with the code that we have so far. However, that approach contains
 an important flaw. What happens when the data file grows too large to fit all the metadata values in a single page. That isn't a far off concern. It will happen as
-soon as the file exceeds the MB mark.
+soon as the file exceeds the 1MB mark.
 
 With the free space bitmap, I didn't concern myself with worrying about this. A 512GB file will use a total of 8Mb, so if we run out of space for the bitmap up, 
 the cost of moving the bitmap to another location is negligible. With the pages metadata, on the situation is different. A 512GB file will use 1Gb of disk space to
@@ -133,45 +133,55 @@ There are other issues that we have to consider:
 
 A good solution would be to place a metadata page at the start of each megabyte of disk space. That will give us a constant computation to figure out where a particular 
 page's metadata is.  It will also ensure that a single bad block in the disk will not have a disastrous impact on the entire data file. However, if we choose this method, 
-we'll run into  other issues. Let's take a look at Figure 11 to see what would happen then.
+we'll run into  other issues. Let's take a look at <<pages-one-mb>> to see what would happen then.
 
+[[pages-one-mb]]
 .Placing a metadata page at the start of each MB in the file
-image::{img-src}/fig11.png[]
+image::pages-one-mb.png[]
 
-Looking at Figure 11, can you see what is the problem with this approach? There are a few. If you'll compare to Figure 10, you'll note that we lost the header
+Looking at <<pages-one-mb>>, can you see what is the problem with this approach? There are a few. If you'll compare to  <<pages-recursive>>, you'll note that we lost the header
 page. It used to be located in the first page, but that is now a metadata page. We'll need to figure that issue out, but before we come to the solutions, let's
 talk about the other issue. 
 
 === Dealing with large values
 
-What if we want to do an allocation that is a MB in size (or longer)? We _have_ the free space for it. We just don't have a continuous range of it. It would probably be
-safe to accept this limitation. Having Mb max size limit for a single value isn't typically a concern (actually, 1016KB, to be exact).  
+What if we want to do an allocation that is 1MB in size (or longer)? We _have_ the free space for it. We just don't have a continuous range of it. It would probably be
+safe to accept this limitation. Having 1MB (actually, 1,016KB to be exact) max size limit for a single value isn't typically a concern.  
 Even if you want to store large values, it usually make sense to break them to manageable pieces first. That said, I'm not happy with this approach.
 
-There is a limit already on the size of a value in Gavran, that is based on the `overflow_size` being a `uint32_t`, so 4Gb. That is big enough to either not care 
-ever about this limit (most values) or knowing that you'll have values in the tens / hundreds of GB (typically videos). At this point, you're not going to be dealing 
+If the value was limited to 4GB, I would be willing to accept this as a limit. That is big enough to either not care 
+ever about this limit (most cases) or knowing that you'll have values in the tens / hundreds of GB (typically videos). At this point, you're not going to be dealing 
 with the full data size anyway, so you can place it in multiple chunks.
 
 That is actually a very important factor. It is rare to need to deal with a single buffer that is multiple GB in size. But we deal with multi megabytes buffers every
-day. I just checked my phone and the last image I took and it was 2.5Mb, I took a screen shot and it was over 1Mb. Placing a limit as low as one Mb is not sustainable.
-If we want to allow users to allocate enough space to store 4Gb values, that means that the metadata pages needs to be at least 8Gb apart. 
+day. I just checked my phone and the last image I took and it was 2.5MB, I took a screen shot and it was over 1MB. Placing a limit as low as 1MB is not sustainable.
+On the other hand, if we want users to be able to allocate 4GB of continuous space, the metadata pages needs to be at least 8Gb apart. 
 
 I started to go with that route, but it got a bit complex, too soon for my taste. Another advantage of having the pages metadata placed on every MB is that 
 it helps avoid an issue with a single disk location becoming corrupted and impacting the whole system. There is also greater data locality, which is 
-always great.
-
-We just need to be able to handle values that are larger than 1MB. How can we do that?
+always desirable. We just need to be able to handle values that are larger than 1MB. How can we do that?
 
 The solution is straightforward, we only need a page metadata if there are actually pages in range. If there aren't any pages in that range
-(because that entire range is used for values), we can re-purpose that space and use it for data. Figure 12 shows how this will look like in practice.
+(because that entire range is used for values), we can re-purpose that space and use it for data. <<pages-final>> shows how this will look like in practice.
 
+[[pages-final]]
 .Allocating a value that is greater than 1 MB will span metadata locations and extend to the next full MB
-image::{img-src}/fig12.png[]
+image::pages-final.png[]
 
-You can see in Figure 12 that we asked to allocate a value that requires 268 pages, but given the structure of the file at that time, we find an available
+You can see in <<pages-final>> that we asked to allocate a value that requires 268 pages, but given the structure of the file at that time, we find an available
 range for this request and place the end of the allocation on a 128 page boundary (1 MB), then take the space _backward_. 
 The idea is that we want to tie up as little extra space as possible. By moving the large allocation so it ends on a metadata page boundary, we ensure that
 this is the case. 
+
+.The location of the file header
+****
+In the previous chapter, we placed the file header in the first page. Now, that first page is the metadata page for the first MB in the data. What do we do
+with the file header?
+
+The answer is that we are going to keep it in just the same place. The `file_header_t` structure is actually just a `page_metadata_t` value that is going to
+be stored in the right location to refer to itself. In other words, we'll be able to put in inside the _metadata_ for the first page, which is itself stored in the 
+first page. The whole thing is a bit recursive, but I believe that this would provide an elegant solution for this task. 
+****
 
 There is one issue with this approach, however, if the allocation size is a multiple of 128 pages. In this case, we'll add another extra page to the 
 allocation, ensuring that the first page will reside in a metadata page range that has a valid page. 
@@ -179,166 +189,117 @@ This adds a bit of complication to large value allocations, but it isn't a massi
 space that we can immediately use is of great benefit, so we'll go with this. It also means that at worst we waste 8KB for a 1 MB allocation, so it isn't a
 critical amount.
 
-.The location of the file header
-****
-In the previous chapter, we placed the file header in the first page. Now, that first page is the metadata page for the first MB in the data. What do we do
-with the file header?
-
-The answer is that we are going to put it on a diet, but keep it in just the same place. The size of the current `file_header_t` is 40 bytes, which is a bit
-high, if we can narrow it down enough, we'll be able to put in inside the _metadata_ for the first page, which is itself stored in the first page. The whole
-thing is a bit recursive, but I believe that this would provide an elegant solution for this task. 
-****
 
 === The structure of the metadata 
 
-We need to decide what kind of information we are going to place in the page metadata. Listing 6.2 show the initial structure we have.
+We need to decide what kind of information we are going to place in the page metadata. We already saw the `page_metadata_t` structure in the previous chapter.
+The first part of which is made of the `crypto` segment that we'll discuss in Chapter 11. The first byte of the second part of `page_metadata_t` is the
+`page_flags`, telling us what kind of metadata we have. The other 31 bytes are free for us to use as we see fit. The first metadata entry is the `file_header`
+and we also saw `free_space` for the free space bitmap. As we adds capabilities to Gavran, we can add additional metadata options to `page_metadata_t`. 
+<<metadata_api>> shows the API we'll use to work with the metadata of our pages. 
 
 [source]
-.Listing 6.2 - impl.h & db.h - The structure of page metadata and the API to work with it
+[[metadata_api]]
+.`txn.metadata.c` - The page metadata API we can use to get and manipulate pages metadata
 ----
-// from impl.h
-include::./code/impl.h[tags=page_metadata_t]
-
-// from db.h
-include::./code/db.h[tags=page_metadata]
+include::./code/txn.metadata.c[tags=metadata_api]
 ----
 
-All types of pages have an `overflow_size` and a `type` field to work with. There are currently 31 free bytes that we get to use and 28 bytes that we reserve
-for implementing encryption. We also have a couple of new functions to work with page metadata. Let's see how they are implemented in Listing 6.3, and then 
-we'll start using them to setup the database.
+The API in <<metadata_api>> is built upon `txn_raw_get_page()` and `txn_raw_modify_page()` and provides us with a way to get or modify the metadata for a page. As you can see,
+actually finding the metadata page is a matter of a division to find the right page and then a modulus operation to find the entry in the page. I'm actually using masking here
+because that is much more efficient than division, but it is probably that the compiler will generate the same code for the mask and division cases. 
+Note that in both the get and modify cases, we validate that the page is already a metadata page, but who sets _this_ up? We did that, in `db_init()`. The metadata API expects that the 
+metadata page flags will either be set to `page_flags_metadata` or `page_flags_file_header` (if this is the first page in the file). 
 
-[source]
-.Listing 6.3 - txn.c - API implementation to work with page metadata
-----
-include::./code/txn.c[tags=page_metadata]
-----
-
-The API in Listing 6.3 is built upon `txn_get_page` and `txn_modify_page` and provide us with a way to get or modify the metadata for a page. As you can see,
-actually finding the metadata page is a matter of a division to find the right page and then a modulus operation to find the entry in the page. Note that in
-both the get and modify cases, we validate that the page is already a metadata page, but who sets _this_ up? Let's look at the modified `set_file_header` in
-Listing 6.4 and see how that changed. The previous incarnation of this function was Listing 5.4.
-
-[source]
-.Listing 6.4 - db.h & db.c - Initializing the database
-----
-// from db.h
-include::./code/db.h[tags=file_header]
-
-// from db.c
-include::./code/db.c[tags=initialize_file_structure]
-----
-<1> We put `file_header_t` on a diet, see the sidebar below for more details on the changes. The end result was that `file_header_t` now takes 26 bytes, down from 40.
-<2> The size of the free space is now computed in bytes taken for the bitmap, and there is a maximum size now. It is 2EB (exabytes), so I'm not worried. 
-<3> We manually setup the metadata for the free space bitmap, as well as it's size using the metadata `overflow_size` field.
-<4> Setting up the metadata page for the first time in the database initialization.
-<5> Copying the file header to its proper place in the metadata for the first page.
-
-.The diet of `file_header_t`
-****
-You can see that the `file_header_t` was significantly modified:
-
-* `free_space_bitmap_in_pages` was removed entirely. We'll now use the `overflow_size` in the first free space bitmap page to 
-   record that information. Savings: 8 bytes.
-* `version` was modified from `uint32_t` to `uint8_t`. Savings: 3 bytes.
-* `page_size` was modified from `uint32_t` to `uint8_t page_size_power_of_two`. Savings: 3 bytes.
-
-Total savings: 14 bytes, taking the `file_header_t` structure from 40 bytes to mere 26 bytes. That matters, because we have to fit it within the space
-that is available for us in the metadata for the page (and in this case, the whole file). It is very likely that the `file_header_t` will change more
-as we evolve the storage engine. 
-
-We are now marking as `packed`, so the compiler would squeeze it into as short a range as possible. The next up on the chopping block is the `magic` 
-field. We currently use 8 bytes for that, but we can reduce that to 4 easily enough. There is enough space now, but I'm making a note of this.
-****
+That works for the first metadata page (the file header), but what about the others? How are they handled? We are going to handle that in a lazy fashion, as we allocate 
+pages, we'll set up the appropriate metadata pages for them.
 
 === Implementing multi page allocations
 
 The reason we _have_ page metadata in the first place is to be able to allocate multiple pages at the same time as a single unit. Let's take a look
 at what we need to do in order to get it to work. We need to add this behavior in the following locations:
 
+* Getting or modifying a page  - we need to figure out how to know whatever we are using a multi page value and get / clone all of the pages in the range.
+* In `txn_allocate_page` - we need to reserve enough pages as requested and remember the size requested.
+* In `txn_free_page` - we need to free all the pages involved and make sure that if all the pages in a metadata range are free, the metadata page will also be freed. 
 
-* `txn_get_page` - return to the caller the specified `overflow_size` when the pages were allocated.
-* `txn_modify_page` - copy all the relevant pages to separate buffer as a single continuous unit. 
-* `txn_allocate_page` - reserve enough space as requested and remember the size requested.
-* `txn_free_page` - need to make sure that if all the pages in a metadata range are free, the metadata page will also be freed. 
-
-We'll tackle them in turn, in order of increasing complexity. Right now, we are only going to be using this to get or set the `overflow_size`, but that
-will become much more useful down the road. 
+I already prepared some of the ground for us. In both `txn_raw_get_page()` and `txn_raw_modify_page()`, we already respect the `number_of_pages` value that the caller provides.
+We aren't _using_ it anywhere, though. Time to change this and introduce the non raw version of getting and modifying a page. You can see how that looks like in <<txn_get_modify_page>>.
 
 [source]
-.Listing 6.5 - txn.c - Updating `txn_get_page` to account for page metadata
+[[txn_get_modify_page]]
+.`txn.c` - Getting or modifying a page in a transaction, the higher level API
 ----
-include::./code/txn.c[tags=txn_get_page]
+include::./code/txn.c[tags=txn_get_modify_page]
 ----
 
-The key change here is the `set_page_overflow_size` addition. There isn't much to do in `txn_get_page` that needs to be different, we just need to set the
-recorded `overflow_size` value at the moment. If you'll inspect the `set_page_overflow_size` function, you'll see that we check if the page we are trying
-to load is our own page, in which case we take the first entry. That is to stop infinite recursion since `txn_get_metadata` will call `txn_get_page`
-internally.
-
-Next, we have Listing 6.6 covering the `txn_modify_page`.
+The code in <<txn_get_modify_page>> relies on the `txn_get_number_of_pages()` function, which uses the page's metadata to figure out how many pages the lower level API should account for.
+You can see the implementation in <<txn_get_number_of_pages>>. An important feature of `txn_modify_page()` is that it is going to _validate_ the pages we modify. You cannot modify a page
+that is marked as free, for example. That blocks a certain set of errors from being possible.
 
 [source]
-.Listing 6.6 - mem.c & txn.c - Updating `txn_modify_page` to account for page metadata
+[[txn_get_number_of_pages]]
+.`txn.c` - Computing the size of a page, based on its type and metadata
 ----
-// from mem.c
-include::./code/mem.c[tags=palmem_allocate_pages]
-
-// from db.c
-include::./code/txn.c[tags=txn_modify_page]
+include::./code/txn.c[tags=txn_get_number_of_pages]
 ----
-<1> Call `set_page_overflow_size` to figure out what the size of the value is.
-<2> Compute the size in pages from the `overflow_size` value, which is in bytes.
-<3> Allocate enough pages to hold the data.
-<4> Copy all the data from the file to our own memory. 
 
-You can see that we had to change `palmem_allocate_pages` as well, to allow us to allocate more than a single page at a time. Beyond that, we need to call
-`set_page_overflow_size` and then account for the additional size in a few places in the function.
+In <<txn_get_number_of_pages>> right now, all pages except for `page_flags_free_space_bitmap` use a single page, but the free space bitmap may be composed of multiple pages. We now can
+change the `txn_allocate_page()` and `txn_free_page()` to use `txn_get_page()` and `txn_modify_page()` instead of the raw API. That means that we can now support free space bitmaps that
+are larger than a single page. Remember that the metadata for the free space bitmap is being setup as part of `db_init_free_space_bitmap()`. 
 
 [CAUTION]
-.Touching the lowest levels, with care.
+.Modifying the free space bitmap at scale
 ====
-Both `txn_get_page` and `txn_modify_page` are used at the initialization of the database file. That means that they must be _robust_ and able to operate
-without too much hassle. For example, we call `txn_modify_page` on the first page in the file when everything is full of zeros, and it is going to work
-out. This is just something that we have to make sure works even in those situations. Otherwise, we'll have to build a parallel set of code that will work
-just for the startup, which is no fun at all. 
+As things are currently set up, we have somewhat of a problem with the free space once we get to a large database size. When the database size is 512GB, the free space bitmap will be
+8MB in size. That means that allocating or freeing a single page will cause us to modify the whole 8MB bitmap (and then commit it to disk) while we only need to flip a single bit.
+
+I'm calling this out explicitly, because it is a weakness in the design. We'll need to provide a better way to modify a single page of multiple pages value, but I'll wait for the benchmarks to 
+show us the problem before addressing this issue.
 ====
 
-The next function to discuss is `txn_allocate_page`. Here we need to take care of an additional concern. We may be allocating in a range that doesn't _have_
-an metadata page yet, so we have to check and reserve that page first. The code for that is in Listing 6.7.
+The next function to discuss is `txn_allocate_page()`. Here we need to take care of an additional concern. We may be allocating in a range that doesn't _have_
+an metadata page yet, so we have to check and reserve that page first. I've added a `txn_allocate_metadata_entry()` call at the end of `txn_allocate_page()`, you can see
+how that is implemented in <<txn_allocate_metadata_entry>>. 
+
+In `txn_allocate_metadata_entry()` we first get the metadata page for the requested `page_num`. We have to deal with the possibility that this metadata page wasn't setup previous, so we 
+may need to initialize the metadata page as part of allocating the metadata entry for the page. We do that by checking if the metadata page is marked as busy in the free space bitmap
+or not. Because the page may not be allocated yet, we use `txn_raw_modify_page()` instead of `txn_modify_page()`. The later will refuse to modify a page that hasn't been allocated yet, 
+after all.
+The rest of the code in `txn_allocate_metadata_entry()` is just getting the right metadata entry and zeroing it before handing it back to the caller. 
+
 
 [source]
-.Listing 6.7 - txn.alloc.c - Updating `txn_allocate_page` to account for page metadata
+[[txn_allocate_metadata_entry]]
+.`txn.alloc.c` - Allocating metadata for a page (and maybe allocating the metadata page itself)
+----
+include::./code/txn.alloc.c[tags=txn_allocate_metadata_entry]
+----
+
+There is still an issue, however, with the code we have in `txn_allocate_page()`. As it current stands, the `bitmap_search()` is not aware of our actual limitations. That means
+that it may very well suggest a free page on a 128 pages boundary (1 MB), which is where we want to place the metadata. It is also not aware about the manners in
+which we need to allocate requests that are 128 or higher. Our next challenge is to implement this behavior. 
+
+<<txn_allocate_page_with_multiple_pages>> shows the changed required for `txn_allocate_page()`.
+There are also some changes that we must make to the bitmap search itself. These are isolated to the `bitmap_is_acceptable_match()`, which is called by the `bitmap_search_once()`. 
+The implementation of `bitmap_is_acceptable_match()` is shown in <<bitmap_is_acceptable_match>>.
+
+In `bitmap_is_acceptable_match()` we check if we need to allocate a large (greater than 128 pages) or a small range. We deal with those differently. A large range is handled by 
+`bitmap_is_acceptable_match()` directly. We know here that the large range cannot be a multiple of 128, so it must stride over a metadata page. We change the allocation so it 
+will _end_ just before the _next_  metadata page. 
+
+[source]
+[[txn_allocate_page_with_multiple_pages]]
+.`txn.alloc.c` - Allocating pages, now with multiple pages allocation support
 ----
 include::./code/txn.alloc.c[tags=txn_allocate_page]
 ----
-<1> Allow to check if a page is marked as busy or not. 
-<2> In `allocate_metadata_entry` we check if the metadata page is busy or not.
-<3> If the metadata page wasn't previously reserved, we reserve it from the system and initialize it.
-<4> Inside `txn_allocate_page` we now start to refer to the number of pages that allocation is going to take.
+<1> We make sure that we never ask the `bitmap_search` for a value that is a multiple of 128 pages.
+<2> After we found the page, we allocate a metadata entry for it, as shown in <<txn_allocate_metadata_entry>>.
 
-There is an issue, however, with the code we have here. As it current stands, the `search_free_range_in_bitmap` is not aware of our actual limitations. That means
-that it may very well suggest a free page on a 128 pages boundary (1 MB), which is where we want to place the metadata. It is also not aware about the manners in
-which we need to allocate requests that are 128 or higher. Our next challenge is to implement this behavior. Listing 6.8 shows how we wrote expressed the desired
-constraints on where we can allocate.
 
-[source]
-.Listing 6.7 - bitmap.c - Checking if the range found match our requirements
-----
-include::./code/bitmap.c[tags=init_search]
-
-include::./code/bitmap.c[tags=filter_unacceptable_ranges]
-----
-<1> In `init_search`, we make sure that we requests for sizes that are a multiple of 128 are padded by one page.
-<2> When verifying small allocations, we'll check if the allocation is starting on a 128 page boundary, and if so, try to shift it by one page forward.
-<3> If the allocation is not on 128, we'll check if the allocation will cover the position of a metadata page.
-<4> If the allocation is striding a metadata page, try to shift it so it will be on the next full MB range.
-<5> Check whatever the allocation is small (< 1,016Kb) or large. 
-<6> If the alignment for the large allocation isn't perfect, we'll place the _end_ of the allocation at the _next_ metadata page and then count backward
-to fill the allocation. 
-
-There is quite a lot that is going on in Listing 6.7, so I think an example might be best. We start with a file that is 4MB in side, or 512 pages.
-We first allocate 2 pages manually (first metadata and the free space bitmap) at positions 0 and 1. The rest of the pages are empty. Let's play with some
-scenarios on how the allocations will behave.
+Let's consider a file that is 4MB in side (512 pages), as part of `db_init()` we already allocated  2 pages manually (header page and the free space bitmap) at positions 0 and 1.
+The rest of the pages are empty. Let's play with some scenarios on how the allocations will behave.
 
 Consider a request for an allocation for 268 pages. The bitmap finds us the first available range, pages `2 .. 511`. However, we can't place the allocation 
 on page 2. If we were to do that, it would span from page 2 to page 270. And there is an metadata page on pages `0`, `128`, `256` and `384`. If we were 
@@ -348,38 +309,70 @@ and render the pages from `256 .. 384` unusable.
 Instead, we'll allocate the page on page `116 .. 383`. In that matter, we leave open the range from `2 .. 115` open for other allocations and have no wasted
 space. 
 
-Another example is when we need to allocate two 64 pages allocation requests. The first one will fit in `128` pages range and will consume `2 .. 65` pages. 
+[source]
+[[bitmap_is_acceptable_match]]
+.`bitmap.range.c` - Determine if a range is an acceptable allocation
+----
+include::./code/bitmap.range.c[tags=bitmap_is_acceptable_match]
+----
+
+Let's look at how we are going to handle small requests, which are shown in <<bitmap_is_acceptable_small_match>>. 
+
+If the small allocation starts on a metadata page, we'll try to shift it by one page and see if we have enough space available. We then check if the range 
+fall on the same metadata range (same MB in the file). If this is the case, we don't have to do anything, this isn't going to collide with anything. 
+However, if the range we got include another metadata page, we cannot allow it. We will try to move the allocation to the _next_ metadata range (the next MB)
+and see if we have enough space to manage there. 
+
+Going back to the 4MB file with 512 pages example. Consider the case when we need to allocate two 64 pages allocation requests. The first one will fit in `128` 
+pages range and will consume `2 .. 65` pages. 
 The second request, however, would need to cover pages `66 .. 129` covering the metadata page for the second MB range. Instead of putting it there, we shift
 it forward to allocate the range from `129 .. 192` pages. That leave the `66 .. 127` range free, and a request to allocate 32 pages will be satisfied with 
 the range `66 .. 97`.
 
+[source]
+[[bitmap_is_acceptable_small_match]]
+.`bitmap.range.c` - Determine if a small range is an acceptable allocation
+----
+include::./code/bitmap.range.c[tags=bitmap_is_acceptable_small_match]
+----
+
 === Freeing allocated disk space
 
-I saved the biggest hurdle for the end. We now need to handle a bit of a tricky situation, how do we free pages using this scheme. When we free a page now
-we need to free now just a single page, but all the pages that it is relevant for. What is more, we need to take into account that we might need to free
-the _metadata_ for that particular range. You can see how I solved the issue in Listing 6.8. 
+I saved the biggest hurdle for the end. We now need to handle a bit of a tricky situation, how do we free pages using this scheme. 
+We need to take into account not just the fact that we are freeing multiple pages at the same time but also that we might need to free
+the _metadata_ for that particular range. You can see how I solved the issue in <<txn_free_multiple_pages>>.
+
+The most interesting new behavior in `txn_free_page()` is the fact that we'll release the relevant metadata page when all the pages that belong to that metadata page
+will are freed. We do the check using the `txn_free_space_bitmap_metadata_range_is_free()` function shown on <<txn_free_space_bitmap_metadata_range_is_free>>.
+
 
 [source]
-.Listing 6.8 - txn.alloc.c - Freeing page and metadata pages
+[[txn_free_multiple_pages]]
+.`txn.alloc.c` - Freeing pages, including metadata entries and freeing related metadata pages
 ----
 include::./code/txn.alloc.c[tags=txn_free_page]
 ----
-<1> The `get_free_space_bitmap_word` allows us to get a full `uint64_t` from the free space bitmap for the relevant page. The idea is that we can very quickly compare if a 
-particular range is full of holes.
-<2> This `mark_page_as_free` does what it says, it will mark a particular page as free.
-<3> Mirror the logic in `init_search`, where if we have an allocation that is exactly on 128 pages boundary, another one it accounted for.
-<4> Mark all the pages that were freed as free in the free space bitmap.
-<5> Zero the relevant metadata entries for the pages that was freed. 
-<6> Zero the freed pages.
-<7> Check if this is the last page that is freed in a 1 MB range, in which case we can also free the metadata page for that range.
+<1> When we release a page, we zero the matching metadata entry for the page. Note that if the page was composed of multiple pages, we only zero the first entry, 
+    the others entries are not relevant.
+<2> I we aren't freeing a metadata page, we check if the metadata page is the only remaining page in the MB range it owns. If that is the case, we free it as well.
 
-The `txn_free_page` function now is able to expand is responsibilities and manage not just freeing of the page but also releasing of the metadata. By pushing this
-responsibility very deep in the structure, we make sure that we don't really have to think about this situation going forward.
+The `txn_free_space_bitmap_metadata_range_is_free()` looks strange, so let's explain how it works. We are using a bitmap composed and rely on `uint64_t` values. That means
+that a metadata range (1 MB) is covered by two `uint64_t` values. If the entire range is free, except for the metadata page, we'll have the following bits pattern:
+`1000000000000000000000000000000000000000000000000000000000000000 000000000000000000000000000000000000000000000000000000000000000`. That pattern has 128 bits and covers one MB 
+range. If we deal with it as `uint64_t`, we can simple compare the first part to `1` and the second to `0`. The result tells us if the range has only its metadata page marked
+as busy, in quite an elegant manner.
+
+[source]
+[[txn_free_space_bitmap_metadata_range_is_free]]
+.`txn.alloc.c` - Checking if the entire metadata page is free
+----
+include::./code/txn.alloc.c[tags=txn_free_space_bitmap_metadata_range_is_free]
+----
 
 There is still a lurking issue in our system. We are able to allocate disk space that we have reserved from the system, but how are we going to be able to handle
 running out of space entirely? How can we grow our file? These are great questions, but we won't answer them immediately. I'm itching to get to grips with the 
 ACID properties of the transaction, so we'll get to that next.
-
+////
 === Unit tests
 
 There have been a _lot_ of changes to the internals of the code and there is a lot more functionality to test. I have included scenarios that will test
@@ -390,3 +383,4 @@ our each of the options we have discussed in this chapter.
 ----
 include::../pyapi/tests06.py[]
 ----
+////

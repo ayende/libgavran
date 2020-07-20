@@ -63,12 +63,6 @@ static bool bitmap_search_word(bitmap_search_state_t *search) {
 }
 // end::bitmap_search_word[]
 
-static bool bitmap_is_accpetable_match(
-    bitmap_search_state_t *search) {
-  (void)search;
-  return true;
-}
-
 // tag::bitmap_search_once[]
 static bool bitmap_search_once(bitmap_search_state_t *search) {
   uint64_t original_pos = search->output.found_position;
@@ -81,9 +75,9 @@ static bool bitmap_search_once(bitmap_search_state_t *search) {
         search->internal.current_word |= mask;
       } else {
         // run out current word, but maybe we have more in the next?
-        if (search->internal.index + 1 < search->input.bitmap_size &&
-            (search->input.bitmap[search->internal.index + 1] &
-             (1UL << 63)) == 0) {
+        uint64_t next = search->internal.index + 1;
+        if (next < search->input.bitmap_size &&
+            (search->input.bitmap[next] & 1) == 0) {
           search->internal.index++;
           search->internal.current_word =
               search->input.bitmap[search->internal.index];
@@ -92,11 +86,11 @@ static bool bitmap_search_once(bitmap_search_state_t *search) {
           search->internal.current_word = ULONG_MAX;
         }
       }
-      if (!bitmap_is_accpetable_match(search)) continue;
+      if (!bitmap_is_acceptable_match(search)) continue;
       return true;
     }
     if (original_pos != search->output.found_position &&
-        bitmap_is_accpetable_match(search))
+        bitmap_is_acceptable_match(search))
       return true;
     search->internal.index++;
     if (search->internal.index >= search->input.bitmap_size)

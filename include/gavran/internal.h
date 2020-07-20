@@ -59,5 +59,8 @@ typedef struct bitmap_search_state {
 
 } bitmap_search_state_t;
 
-bool bitmap_search(bitmap_search_state_t *search);
+implementation_detail bool bitmap_search(
+    bitmap_search_state_t *search);
+implementation_detail bool bitmap_is_acceptable_match(
+    bitmap_search_state_t *search);
 // end::bitmap_search[]

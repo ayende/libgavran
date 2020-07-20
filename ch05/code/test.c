@@ -63,7 +63,7 @@ describe(allocation_tests) {
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
-    page_t p = {.size = PAGE_SIZE};
+    page_t p = {.number_of_pages = 1};
     assert(txn_allocate_page(&tx, &p, 0));
     assert(p.page_num == 2);
     assert(txn_allocate_page(&tx, &p, 0));
@@ -81,12 +81,12 @@ describe(allocation_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
     for (size_t i = 0; i < 14; i++) {
-      page_t p = {.size = PAGE_SIZE};
+      page_t p = {.number_of_pages = 1};
       assert(txn_allocate_page(&tx, &p, 0));
     }
 
     {
-      page_t p = {.size = PAGE_SIZE};
+      page_t p = {.number_of_pages = 1};
       assert(!txn_allocate_page(&tx, &p, 0));  // failed
       size_t count;
       int* codes = errors_get_codes(&count);
@@ -104,7 +104,7 @@ describe(allocation_tests) {
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
-    page_t p = {.size = PAGE_SIZE};
+    page_t p = {.number_of_pages = 1};
     assert(txn_allocate_page(&tx, &p, 0));
     uint64_t page_num = p.page_num;
 

@@ -4,7 +4,7 @@
 result_t pages_get(txn_t *tx, page_t *p) {
   db_global_state_t *state = &tx->state->global_state;
   uint64_t offset = p->page_num * PAGE_SIZE;
-  if (offset + p->size > state->span.size) {
+  if (offset + p->number_of_pages * PAGE_SIZE > state->span.size) {
     failed(ERANGE,
            msg("Requests for a page that is outside of the bounds of "
                "the file"),
@@ -17,7 +17,7 @@ result_t pages_get(txn_t *tx, page_t *p) {
 
 result_t pages_write(db_state_t *db, page_t *p) {
   ensure(pal_write_file(db->handle, p->page_num * PAGE_SIZE,
-                        p->address, PAGE_SIZE * TO_PAGES(p->size)),
+                        p->address, PAGE_SIZE * p->number_of_pages),
          msg("Unable to write page"), with(p->page_num, "%lu"));
   return success();
 }

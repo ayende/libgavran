@@ -31,9 +31,10 @@ static result_t create_and_write_file(const char* path) {
 
   // <4>
   ensure(pages_get(&txn, &p));
-  page_t copy = {.size = PAGE_SIZE};
+  page_t copy = {.number_of_pages = 1};
   // <5>
-  ensure(mem_alloc_page_aligned(&copy.address, copy.size));
+  ensure(mem_alloc_page_aligned(&copy.address,
+                                copy.number_of_pages * PAGE_SIZE));
   defer(free, copy.address);
   // <6>
   memcpy(copy.address, p.address, PAGE_SIZE);

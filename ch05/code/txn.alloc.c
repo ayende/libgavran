@@ -28,24 +28,25 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
   file_header_t *header = &tx->state->global_state.header;
   uint64_t start = header->free_space_bitmap_start;
 
-  if (!page->size) page->size = PAGE_SIZE;
-  uint64_t pages = TO_PAGES(page->size);
+  if (!page->number_of_pages) page->number_of_pages = 1;
 
   // <1>
   page_t bitmap_page = {.page_num = start};
   ensure(txn_raw_get_page(tx, &bitmap_page));
   bitmap_search_state_t search = {
-      .input = {.bitmap = bitmap_page.address,
-                .bitmap_size = bitmap_page.size / sizeof(uint64_t),
-                .space_required = pages,
-                .near_position = nearby_hint}};
+      .input = {
+          .bitmap = bitmap_page.address,
+          .bitmap_size = (bitmap_page.number_of_pages * PAGE_SIZE) /
+                         sizeof(uint64_t),
+          .space_required = page->number_of_pages,
+          .near_position = nearby_hint}};
   // <2>
   if (bitmap_search(&search)) {
     page->page_num = search.output.found_position;
     // <3>
     ensure(txn_raw_modify_page(tx, page));
-    memset(page->address, 0, PAGE_SIZE * pages);
-    for (size_t i = 0; i < pages; i++) {
+    memset(page->address, 0, PAGE_SIZE * page->number_of_pages);
+    for (size_t i = 0; i < page->number_of_pages; i++) {
       ensure(txn_free_space_mark_page(
           tx, search.output.found_position + i, true));
     }
@@ -64,10 +65,9 @@ result_t txn_free_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
   ensure(txn_raw_modify_page(tx, page));
-  uint64_t pages = TO_PAGES(page->size);
-  memset(page->address, 0, PAGE_SIZE * pages);
+  memset(page->address, 0, PAGE_SIZE * page->number_of_pages);
 
-  for (size_t i = 0; i < pages; i++) {
+  for (size_t i = 0; i < page->number_of_pages; i++) {
     ensure(txn_free_space_mark_page(tx, page->page_num + i, false));
   }
 
