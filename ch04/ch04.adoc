@@ -260,8 +260,7 @@ include::../include/gavran/db.h[tags=txn_state_t]
 ----
 
 In <<create_db>> we call to `db_validate_options()` to validate the options and copy the user defined values to our own copy. I'm showing the code in <<db_validate_options>>,
-note that this is a simplified version of what we'll have in the future. We'll update this function in the future. When looking at the code, whenever you see a function 
-decorated with a `weak_symbol` annotation, you can assume that a later chapter will update that function definition. 
+note that this is a simplified version of what we'll have in the future. We'll update this function in the future. 
 You can see in <<db_validate_options>> that the code validates the provided settings and copy them to our own `db_options_t` struct. 
 
 The user can also just pass null for the `options` and we'll use the default ones. In <<db_validate_options>> you can also see that I'm using `implementation_detail` macro. This 

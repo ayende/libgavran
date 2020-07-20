@@ -1,7 +1,6 @@
 #include <gavran/db.h>
 
 #define implementation_detail __attribute__((visibility("hidden")))
-#define weak_symbol __attribute__((weak))
 
 // tag::pages_hash_table_t[]
 typedef struct pages_hash_table {
