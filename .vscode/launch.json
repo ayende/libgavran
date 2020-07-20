@@ -26,7 +26,7 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/ch04/code/build/gavran",
+      "program": "${workspaceRoot}/ch05/code/build/gavran",
       "sourceFileMap": {
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },

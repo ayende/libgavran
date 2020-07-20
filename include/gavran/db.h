@@ -9,11 +9,14 @@
 #include <gavran/pal.h>
 
 // tag::tx_flags[]
-// <1>
 #define TX_WRITE (1 << 1)
 #define TX_READ (1 << 2)
 #define TX_COMMITED (1 << 24)
 // end::tx_flags[]
+
+#define BITS_IN_PAGE (PAGE_SIZE * 8)
+#define PAGES_IN_METADATA (128UL)
+#define PAGES_IN_METADATA_MASK (-128UL)
 
 typedef struct txn txn_t;
 typedef struct db_state db_state_t;
@@ -26,15 +29,16 @@ typedef struct file_header file_header_t;
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
 
-#define TO_PAGES(size) \
-  MAX(((size) / PAGE_SIZE + ((size) % PAGE_SIZE ? 1 : 0)), 1)
+#define ROUND_UP(size, amount) \
+  MAX(((size) / amount + ((size) % amount ? 1 : 0)), 1)
+
+#define TO_PAGES(size) ROUND_UP(size, PAGE_SIZE)
 
 typedef struct page {
   void *address;
   void *previous;  // relevant only for modified page
   uint64_t page_num;
-  uint32_t size;
-  uint8_t _padding[4];
+  uint64_t size;
 } page_t;
 
 result_t pages_get(txn_t *tx, page_t *p);
@@ -53,7 +57,6 @@ typedef struct page_crypto_metadata {
   };
 } page_crypto_metadata_t;
 
-// tag::page_metadata_t[]
 typedef enum __attribute__((__packed__)) page_flags {
   page_flags_free = 0,
   page_flags_file_header = 1,
@@ -64,25 +67,12 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_free_space_bitmap = 6,
 } page_flags_t;
 
-typedef struct page_metadata_common {
+typedef struct free_space_bitmap_heart {
   page_flags_t page_flags;
-  char padding[31];
-} page_metadata_common_t;
-
-typedef struct page_metadata {
-  page_crypto_metadata_t cyrpto;
-
-  union {
-    page_metadata_common_t common;
-    file_header_t file_header;
-  };
-} page_metadata_t;
-
-_Static_assert(sizeof(page_crypto_metadata_t) == 32,
-               "The size of page crypto must be 32 bytes");
-_Static_assert(sizeof(page_metadata_t) == 64,
-               "The size of page metadata must be 64 bytes");
-// end::page_metadata_t[]
+  uint8_t _padding1[7];
+  uint64_t number_of_pages;
+  uint8_t _padding2[16];
+} free_space_bitmap_heart_t;
 
 // tag::file_header[]
 #define FILE_HEADER_MAGIC "GVRN!"
@@ -97,6 +87,28 @@ typedef struct file_header {
   uint64_t free_space_bitmap_start;
 } file_header_t;
 // end::file_header[]
+
+// tag::page_metadata_t[]
+typedef struct page_metadata_common {
+  page_flags_t page_flags;
+  char padding[31];
+} page_metadata_common_t;
+
+typedef struct page_metadata {
+  page_crypto_metadata_t cyrpto;
+
+  union {
+    page_metadata_common_t common;
+    file_header_t file_header;
+    free_space_bitmap_heart_t free_space;
+  };
+} page_metadata_t;
+
+_Static_assert(sizeof(page_crypto_metadata_t) == 32,
+               "The size of page crypto must be 32 bytes");
+_Static_assert(sizeof(page_metadata_t) == 64,
+               "The size of page metadata must be 64 bytes");
+// end::page_metadata_t[]
 
 // tag::tx_structs[]
 typedef struct db_state db_state_t;
@@ -212,20 +224,19 @@ result_t txn_free_page(txn_t *tx, page_t *page);
 // end::tx_allocation[]
 
 // tag::free_space[]
-result_t txn_page_busy(txn_t *tx, uint64_t page_num, bool *busy);
+result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy);
 
-static inline void set_bit(uint64_t *buffer, uint64_t pos) {
+// tag::bit-manipulations[]
+static inline void bitmap_set(uint64_t *buffer, uint64_t pos) {
   buffer[pos / 64] |= (1UL << pos % 64);
 }
-
-static inline bool is_bit_set(uint64_t *buffer, uint64_t pos) {
+static inline bool bitmap_is_set(uint64_t *buffer, uint64_t pos) {
   return (buffer[pos / 64] & (1UL << pos % 64)) != 0;
 }
-
-static inline void clear_bit(uint64_t *buffer, uint64_t pos) {
+static inline void bitmap_clear(uint64_t *buffer, uint64_t pos) {
   buffer[pos / 64] ^= (1UL << pos % 64);
 }
-// end::free_space[]
+// end::bit-manipulations[]
 
 // tag::page_metadata[]
 result_t txn_get_metadata(txn_t *tx, uint64_t page_num,

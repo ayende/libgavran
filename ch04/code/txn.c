@@ -30,6 +30,7 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   if (hash_lookup(tx->state->modified_pages, page)) return success();
 
   if (!page->address) {
+    if (!page->size) page->size = PAGE_SIZE;
     ensure(pages_get(tx, page));
   }
 
@@ -52,11 +53,13 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
                                 PAGE_SIZE * TO_PAGES(original.size)));
   try_defer(free, page->address, done);
   memcpy(page->address, original.address,
-         PAGE_SIZE * TO_PAGES(original.size));
+         PAGE_SIZE * TO_PAGES(MAX(original.size, page->size)));
+  page->previous = original.address;
+  page->size = MAX(original.size, page->size);
+
   ensure(hash_put_new(&tx->state->modified_pages, page),
          msg("Failed to allocate entry"));
-  page->previous = original.address;
-  page->size = original.size;
+
   done = 1;
   return success();
 }

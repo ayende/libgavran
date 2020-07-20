@@ -260,8 +260,9 @@ include::../include/gavran/db.h[tags=txn_state_t]
 ----
 
 In <<create_db>> we call to `db_validate_options()` to validate the options and copy the user defined values to our own copy. I'm showing the code in <<db_validate_options>>,
-note that this is a simplified version of what we'll have in the future. Whenever you see a code sample that come from a `<name>.simplified.c`, you can assume that this is going to 
-be reworked on in later chapters. You can see in <<db_validate_options>> that the code validates the provided settings and copy them to our own `db_options_t` struct. 
+note that this is a simplified version of what we'll have in the future. We'll update this function in the future. When looking at the code, whenever you see a function 
+decorated with a `weak_symbol` annotation, you can assume that a later chapter will update that function definition. 
+You can see in <<db_validate_options>> that the code validates the provided settings and copy them to our own `db_options_t` struct. 
 
 The user can also just pass null for the `options` and we'll use the default ones. In <<db_validate_options>> you can also see that I'm using `implementation_detail` macro. This 
 is just to let the compiler know that this is a hidden function which shouldn't be exported from the library.
@@ -274,11 +275,11 @@ resources. Otherwise, everything gets cleaned up. The `try_defer` calls are guar
 
 [source]
 [[db_validate_options]]
-.`db.simplified.c` - Validating the database's options and default options initialization
+.`db..c` - Validating the database's options and default options initialization
 ----
-include::./code/db.simplified.c[tags=db_validate_options]
+include::./code/db..c[tags=db_validate_options]
 
-include::./code/db.simplified.c[tags=db_initialize_default_options]
+include::./code/db..c[tags=db_initialize_default_options]
 ----
 
 In the next chapter, we are going to focus on `db_init()` and do a lot of work there, but for now, I want to focus on transactions.
@@ -315,9 +316,9 @@ pages in the transaction and be able to access them quickly.  Listing 4.7 has th
 
 [source]
 [[txn_create]]
-.`txn.simplified.c` - Creating a transaction
+.`txn..c` - Creating a transaction
 ----
-include::./code/txn.simplified.c[tags=txn_create]
+include::./code/txn..c[tags=txn_create]
 ----
 
 <<txn_create>> shows the setup of a new transaction, but it probably wouldn't make sense without looking at the most common actions that we'll have in a transaction `txn_raw_get_page()` 
@@ -328,9 +329,9 @@ need to check if this transaction has a modified copy of the page in question an
 
 [source]
 [[txn_raw_get_page]]
-.`txn.simplified.c` - Get a page in the scope of the transaction, either locally modified copy or directly from the data file.
+.`txn..c` - Get a page in the scope of the transaction, either locally modified copy or directly from the data file.
 ----
-include::./code/txn.simplified.c[tags=txn_raw_get_page]
+include::./code/txn..c[tags=txn_raw_get_page]
 ----
 
 .A note about multi threading
@@ -353,9 +354,9 @@ like, before any modifications. This will become very important when the times c
 
 [source]
 [[txn_raw_modify_page]]
-.`txn.simplified.c` - Implementing Copy on Write in the transaction for page modifications.
+.`txn..c` - Implementing Copy on Write in the transaction for page modifications.
 ----
-include::./code/txn.simplified.c[tags=txn_raw_modify_page]
+include::./code/txn..c[tags=txn_raw_modify_page]
 ----
 
 It is important to note that calling `txn_raw_get_page()`, `txn_raw_modify_page()` and then `txn_raw_get_page()` on the same page is something
@@ -531,11 +532,11 @@ without calling `txn_commit()`.
 
 [source]
 [[txn_commit]]
-.`txn.simplified.c` - Implementing commit transaction by writing modified pages to disk and closing it by freeing the memory of the transaction
+.`txn..c` - Implementing commit transaction by writing modified pages to disk and closing it by freeing the memory of the transaction
 ----
-include::./code/txn.simplified.c[tags=txn_commit]
+include::./code/txn..c[tags=txn_commit]
 
-include::./code/txn.simplified.c[tags=txn_close]
+include::./code/txn..c[tags=txn_close]
 ----
 
 A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the

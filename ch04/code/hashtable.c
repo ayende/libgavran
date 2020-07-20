@@ -45,8 +45,8 @@ result_t hash_put_new(pages_hash_table_t **table_p, page_t *page) {
       state->entries[index].page_num = page_num;
       memcpy(&state->entries[index], page, sizeof(page_t));
       state->count++;
-      state->resize_required =
-          (state->count < (state->number_of_buckets * 3 / 4));
+      size_t load_factor = (state->number_of_buckets * 3 / 4);
+      state->resize_required = (state->count > load_factor);
       return success();
     }
   }

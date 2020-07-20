@@ -1,12 +1,13 @@
 #include <gavran/db.h>
 
 #define implementation_detail __attribute__((visibility("hidden")))
+#define weak_symbol __attribute__((weak))
 
 // tag::pages_hash_table_t[]
 typedef struct pages_hash_table {
   size_t number_of_buckets;
-  uint32_t count;
-  uint32_t resize_required;
+  size_t count;
+  size_t resize_required;
   page_t entries[];
 } pages_hash_table_t;
 
@@ -32,3 +33,32 @@ db_initialize_default_read_tx(db_state_t *db_state);
 
 implementation_detail void db_initialize_default_options(
     db_options_t *options);
+
+__attribute__((const)) static inline uint64_t next_power_of_two(
+    uint64_t x) {
+  return 1 << (64 - __builtin_clzll(x - 1));
+}
+
+// tag::bitmap_search[]
+typedef struct bitmap_search_state {
+  struct {
+    uint64_t *bitmap;
+    size_t bitmap_size;
+    uint64_t space_required;
+    uint64_t near_position;
+  } input;
+  struct {
+    uint64_t found_position;
+    uint64_t space_available_at_position;
+  } output;
+  struct {
+    uint64_t index;
+    uint64_t current_word;
+    uint64_t current_set_bit;
+    uint64_t previous_set_bit;
+  } internal;
+
+} bitmap_search_state_t;
+
+bool bitmap_search(bitmap_search_state_t *search);
+// end::bitmap_search[]

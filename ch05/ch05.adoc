@@ -108,9 +108,9 @@ That adds another layer of validation to protect us from bugs or disk issues.
 
 [source]
 [[db_init]]
-.`db.simplified.c` - Checking if the database already exists or is new and then setting it up
+.`db..c` - Checking if the database already exists or is new and then setting it up
 ----
-include::./code/db.simplified.c[tags=db_init]
+include::./code/db..c[tags=db_init]
 ----
 
 Now that we understand how Gavran knows whatever the file is new or not, let's look at how we are going to go about initializing the file startup.
@@ -130,9 +130,9 @@ We aren't manipulating directly, instead, we go through data structures to modif
 
 [source]
 [[db_init_file_structure]]
-.`db.simplified.c` - Initializing the file on startup
+.`db..c` - Initializing the file on startup
 ----
-include::./code/db.simplified.c[tags=db_init_file_structure]
+include::./code/db..c[tags=db_init_file_structure]
 ----
 
 We already saw how `file_header_t` looks like in <<file_header>>, we should also look at the `page_metadata_t` structure, shown in <<page_metadata_t>>, to complete the full picture. 
@@ -173,9 +173,9 @@ You might have noticed that I'm using very small functions in the code. There ar
 
 [source]
 [[db_init_from_existing_file]]
-.`db.simplified.c` - Validating the file on startup
+.`db..c` - Validating the file on startup
 ----
-include::./code/db.simplified.c[tags=db_init_from_existing_file]
+include::./code/db..c[tags=db_init_from_existing_file]
 ----
 
 Now that we understand how we structure (pun intended) the data on disk, let's see how we are actually making use of it. The database initialization is done on <<db_init_from_existing_file>>.
@@ -183,9 +183,9 @@ Although it might be a stretch to call it initialization at this point. Right no
 
 [source]
 [[db_validate_file_header]]
-.`db.simplified.c` - Validating the file header
+.`db..c` - Validating the file header
 ----
-include::./code/db.simplified.c[tags=db_validate_file_header]
+include::./code/db..c[tags=db_validate_file_header]
 ----
 
 We start by creating a transaction, remember that we can't read or modify any data from the file without a transaction. That is _important_. I know that I have talked about this previously
@@ -228,56 +228,74 @@ The answer is that we are going to manage this process _using_ the free list its
 will be to setup the initial free list bitmap. Following this, when we need to increase the free list size, we'll ask the free list itself where we
 can place the increased list size and then free the old location.
 
-////
-
-Simple, at least as a concept. Let's see what will happen when we sit down to actually implement this... the full details are in Listing 5.5.
+Simple, at least as a concept. Let's see what will happen when we sit down to actually implement this... the full details are in <<db_init_free_space>>.
 
 [source]
-.Listing 5.5 - db.h & db.c - Setting up the free space bitmap
+[[db_init_free_space]]
+.`db..c` - Creating the initial free space bitmap
 ----
-// from db.h
-include::./code/db.h[tags=free_space]
-
-// from db.c
-include::./code/db.c[tags=free_space]
+include::./code/db..c[tags=db_init_free_space]
 ----
 
-We start by computing how many pages will need for the free space bitmap, then checking how many pages of bits we'll need to fill in the 
-free space bitmap itself. We store that value in a new field `free_space_bitmap_in_pages` inside the file header. That is going to be very heavily 
-used, and the size of the file may not be a good indication of the used pages during certain operations (expanding the database file, preallocating 
-free space size, etc), so keeping that explicitly helps. For the same reason `free_space_bitmap_start` is kept so we'll know where to find the 
-free space mapping if we need to move it.
+Similarity to `db_init_file_header()`, we are starting with using the transaction to get the first header page and grab the `number_of_pages` from the 
+file header (which was previously set up in `db_init_file_header()`, which is called before `db_init_free_space()`). We setup the free space bitmap
+as the _second_ page, and register it in the metadata of the second entry in the first page on the file. This will become much clearer when we'll discuss
+how we handle pages metadata later on in the next chapter.
 
-What we are doing here is setting the busy mark on the first page (the header) as well as the subsequent pages that we reserve for the free list. By 
-using the free list itself to manage that we are able to significantly cut down on the complexity of the system. LMDB, for example, uses its own
+We compute how many pages we'll need for the free space bitmap using `ROUND_UP` and `BITS_IN_PAGE`. A page is 8KB, so we have a total of `65,536` bits in
+a page and the bitmap can handle 512MB of pages. Note that we store the page number where the free space bitmap in the file header, inside
+`free_space_bitmap_start`. Initially, this is hard coded to the second page, but as we discuss, we may need to move it as the file size grow, and that field
+will always let us know where to find it.
+
+We use `txn_raw_modify_page()` to get the page's buffer. Note that we pass a `size` value to `txn_raw_modify_page()`. This is used when we need to modify
+multiple pages as a single buffer. The next step is to simply mark the busy pages in the file at this point. The first few pages are marked as busy, those
+are the header page and the pages used by the free space bitmap itself. In most cases, when we initialize a file, the size will be less than 512MB and we'll
+use just a single free space bitmap page. I don't like placing arbitrary limits on my code, so I'm handling initialization with any size of the file.
+
+We also mark the pages in the _end_ as busy. Why is that? The free space bitmap operates in pages of 8KB, each of which contains 64K bits. If the size of the 
+file does not align on a 512MB boundary, we are bound to have more entries in the free space bitmap than we have pages in the file. We handle this scenario by
+simply marking the pages beyond the end of the file as busy. We'll need to address that when we'll allow to increase the file size.
+
+Using a bitmap for the free space management is simple and effective. It cuts down on the complexity of the system. LMDB, for example, uses its own
 data structure (B+Tree) to manage the free list. That can lead to recursion where the free list needs to allocate or free a page while a free 
 list operation is ongoing. That can lead to... issues and took a while to properly stabilize. This model, however, solve all those issues very
 neatly.
 
-We also mark the pages _beyond the end of the file_ as busy, which allows us to safely skip them. We'll need to address that when we'll allow to 
-increase the file size.
-
-.Placing limits on the transaction API
+.Low level transaction API
 ****
 Using the transaction API to manage the startup of our database is cool, but it comes at a cost. We are using the API at a time when we haven't actually
 done the setup. That means that there might be invariants that are broken. What _that_ means is that the APIs that we are using 
-(`tx_create`, `tx_modify_page` and `tx_commit`) are going to have to be able to work with no setup at all from the rest of the system.
+(`tx_create()`, `tx_raw_modify_page()` and `tx_commit()`) are going to have to be able to work with no setup at all from the rest of the system.
 
-That is how this is done right now, but this is how it will _have_ to be. I don't foresee any such issues, but I wanted to be clear that we are placing 
-a limit on what changes we can do.
+We need to be careful during initialization and many other functions that operate of transactions may not work at this point. For example, we cannot call
+`txn_allocate_page()`, because the free space bitmap that would tell us _where_ to allocate the page hasn't been setup yet.
 ****
 
-If you'll look at the code in `initialize_freespace_bitmap`, we even handle cases where recording the pages of the free list itself as busy will take
+If you'll look at the code in `db_init_free_space()`, we even handle cases where recording the pages of the free list itself as busy will take
 more than one page. That can only happen once the database exceeded 4TB in size. Not something that I expect to be common, but it doesn't take a lot
-of code to handle this. We also defined several utility functions in Listing 5.5, but there is nothing really interesting in them. 
+of code to handle this. We also used the `set_bit()` utility functions in <<db_init_free_space>>, you can see all the bit manipulations function in
+<<bit-manipulations>>. 
 
-.Layout of the file on disk after adding the free space bitmap
-image::{img-src}/fig7.png[]
-
-As you can see in Figure 7, the second page is used for the free list and the first two bits there are marked as busy. The rest of the page is 
+As you can see in <<file-layout-with-freepsace>>, the second page is used for the free list and the first two bits there are marked as busy. The rest of the page is 
 filled with zeros, indicating free pages. Where did those zeros come from, however? We didn't set them up.
 These zeros are there because we create a new file. Even though we preallocated the size of the file, the operating system ensures that the 
 contents of the file are zeroed. Otherwise, you may get sensitive data from other files. We rely on this property here to avoid doing extra work.
+
+[source]
+[[bit-manipulations]]
+.`gavran/db.h` - The page metadata structure 
+----
+include::../include/gavran/db.h[tags=bit-manipulations]
+----
+
+[[file-layout-with-freepsace]]
+.Layout of the file on disk after adding the free space bitmap
+image::file-layout-with-freepsace.png[]
+
+=== Freeing a page
+
+The act of freeing a page is a lot easier than allocating one using this model. That is typically _not_ the case, so this feature of the system
+architecture makes me very happy. Let's look at <<txn_free_page>> to see how this is done.
 
 [TIP]
 .Designing for the underlying system
@@ -289,37 +307,40 @@ to optimize.
 If we intentionally build Gavran to have patterns that the underlying software and hardware is already setup to speed up, we are going to get
 amazing benefits, with very little apparent work. A lot of thought has gone into how to structure things so you don't _need_ to write a lot
 of code to get the desired functionality.
+
+I already talked about this behavior with regards to memory mapped I/O and leaning on the operating system's page cache as a good example of this
+practice. Another example is the use of pages to work with the data, that is how the operating system, the RAM and the disk work and matching that
+behavior means that we don't have to deal with issues such as torn writes, read-modify-write costs, etc.
 ====
 
-=== Freeing a page
-
-The act of freeing a page is a lot easier than allocating one using this model. That is typically _not_ the case, so this feature of the system
-architecture makes me very happy. Let's look at Listing 5.6 to see how this is done.
-
 [source]
-.Listing 5.6 - txn.c - Freeing a page in the transaction
+[[txn_free_page]]
+.`txn.alloc..c` - Freeing a page in a transaction
 ----
-include::./code/txn.alloc.c[tags=txn_free_page]
+include::./code/txn.alloc..c[tags=txn_free_page]
 ----
 
 The fact that there is so little to do here is quite impressive. Even I'm saying this about my own code.
-The `free_page` in Listing 5.6 is getting the page that we want to free and zero it as its first action. I'm doing that for the following reasons:
+The `txn_free_page()` in <<txn_free_page>> is getting the page that we want to free and zero it as its first action. I'm doing that for the following reasons:
 
-* Ensure that if you try to access a page that was freed, you'll know about it straight away. More paranoid approach would be to physically unmap the 
+* Ensure that if you try to access a page that was freed, you'll know about it straight away. More paranoid approach would be to physically `unmap()` the 
   page, ensuring that any access will result in a seg fault, but that is probably too much.
 * Scrub away the data the user indicated the they want to delete. This isn't really a security feature, mind. You'll usually work at a level
-  smaller than a page anyway..
+  smaller than a page anyway...
 * https://devblogs.microsoft.com/oldnewthing/20161109-00/?p=94675[Zero page optimization] at the operating system level.
+* Enable us to use other optimizations down the line, because we can recognize zero filled pages.
 
 Note that aside from zeroing the page, we don't do anything special with it. Given that we set it in the free space bitmap, it may be used again if
-the transaction will allocate a new page. The only thing that matters is that the page is modified and will be written to disk. 
+the transaction will allocate a new page. The only thing that matters is that the page is modified and will be written to disk. This bears repeating. A freed
+page gets absolutely no special treatment. It is just another way to modify a page.
 
-We also modify the bitmap to record that the page is now free. We do that in a way that is blind to the fact that this is a free space page. We 
-simply apply the changes to the free space bitmap on a modified page that will be written to disk. So we don't actually _need_ to do anything special here.
+We also modify the bitmap to record that the page (or pages, if it spans multiple pages) is now free. We do that in a way that is blind to the fact that this is a free space page. We 
+simply apply the changes to the free space bitmap on a modified page that will be written to disk. So we don't actually _need_ to do anything special here. I'm really happy with 
+how this turned out.
 
 === Building an allocation strategy
 
-Memory allocation (and this is what the `txn_allocate_page` is all about) is a complex topic. There have been papers, books and dissertations written about
+Memory allocation (and this is what the `txn_allocate_page()` is all about) is a complex topic. There have been papers, books and dissertations written about
 the topic. The oldest reference that I could find for a memory allocation algorithm is from _1963_. The latest I could find was this week, I'm pretty sure
 that if you flex your Google muscles, you'll be able to find one posted today. For whatever value of today you feel like choosing.
 
@@ -336,85 +357,89 @@ A good allocator should be fast to execute, of course, but it also has a host of
 * Reduce fragmentation. Right now, we only request a single page at a time, so that is not an issue. We need to be prepared for when we'll need to deal with
   multi page allocations. In that case, we want to avoid internal fragmentation as much as possible.
 
-We already know that the backing store of the allocation is the free space bitmap. A busy page is marked with 1 and a free with 0. In essence, the allocator
+We already know that the backing store of the allocation is the free space bitmap. A busy page is marked with `1` and a free with `0`. In essence, the allocator
 needs to be able to find the position of a zero bit in the bitmap. The good news is that this is very cheap operation, usually. The bad news is that we need
 to be able to answer the question not on a single bit but on a range as well.
 
 The basis for my code is from https://lemire.me/blog/2018/02/21/iterating-over-set-bits-quickly/[Daniel Lemire's work], adapted to allow us to find a range
-of values. We start from the function declaration in Listing 5.7.
+of values. We start from the declarations in <<bitmap_search_decl>>.
 
-[source]
-.Listing 5.7 - impl.h - Declaration to find free space in bitmap for allocation
-----
-include::./code/impl.h[tags=search_free_range_in_bitmap]
-----
+This function accepts the `bitmap_search_state_t` with the bitmap buffer and its size, the required size and the preferred location and returns the found position using the `found_position`
+output value. As usual, we use the return value to indicate success or failure only. In this case, the function does no allocation and a failure here means that we couldn't find a free range 
+to satisfy the required space.
 
-[IMPORTANT]
-.This is a pure function
-=====
-The `search_free_range_in_bitmap` is a pure function. In other words, it does _not_ modify its input or make any change to the system. After finding
-the right range, the responsibility to mark it as busy is on the caller.
-=====
-
-This function accepts the bitmap buffer and its size, the required size and the preferred location and returns the found position using the `found_position`
-output value. As usual, we use the return value to indicate success or failure only. In this case, the function does no allocation and a failure here means that we
-couldn't find a free range to satisfy the required space.
 We might also find _more_ space than was asked for, so we report that to the caller so they can make an informed decision about what to do with the extra space. 
 
-Listing 5.8 shows how that function works. There are quite a few of moving pieces here, but that piece of code went through several iterations of refactoring
-and ended up being quite nice in the end. Because there is a lot going on here, I'm going to present the solution in pieces and explain each one of them 
-individually.
+The `bitmap_search_state_t` is a complex structure, meant for internal consumption only. The caller should zero initialize the structure except for the `input` nested structure. Then the
+`bitmap_search()` will find a free range in the bitmap. It is a pretty complex piece of code, composed of multiple layers. I'm going to explain it from the bottom up. 
+Starting with the most basic step in the process, the `bitmap_search_word()` function. <<bitmap_search_word>> shows how `bitmap_search_word()` works.
 
 [source]
-.Listing 5.8 - bitmap.c - Finding a range of free bits in a single word
+[[bitmap_search_decl]]
+.`gavran/internal.h` - Declarations to find free space range in bitmap
 ----
-include::./code/bitmap.c[tags=search_word]
+include::../include/gavran/internal.h[tags=bitmap_search]
 ----
 
-The `init_search` call is used to setup a search structure, which is passed to `search_free_range_in_bitmap`. Most of the work, however, is handled by the 
-the `search_word` function. This function allows you to iterate over a bitmap and find all the free ranges of the size you require. Because it is 
-meant to be called multiple times, it holds much of its state in the `bitmap_search_state_t`. 
-
-The `search_word` operates on a _single_ word (`uint64_t`). Each time it is called, it will go through up to 64 bits (thus, 64 pages or 512KB) to
+The `bitmap_search_word()` operates on a _single_ word (`uint64_t`). Each time it is called, it will go through up to 64 bits (thus, 64 pages or 512KB) to
 find the next free range. If the entire word is set (all busy), we'll return `false` and have the caller provide us with the next word to search.
 If the entire word is zero, we will check if the current available space plus whatever we have from previous words is enough to satisfy the requested space.
-This is done in the `handle_zero_word` function.
+This is done in the `bitmap_finalize_match()` function, shown in <<bitmap_finalize_match>>.
 
-:ctlz: __builtin_ctzl
-
-Things get more interesting when we have a word that has a mix of set and cleared bits. Then we need to find if there are enough cleared consecutive bits 
+The most interesting part in <<bitmap_search_word>> is when we have a word that has a mix of set and cleared bits. Then we need to find if there are enough cleared consecutive bits 
 _inside_ the word. We use the technique describe by Lemire to do so. 
 
 We measure this using `{ctlz}` which is an operation that would count the trailing zeros on the value. We use that to compute the distance to the first set bit, 
 check whatever that gives us the right range or not. If we didn't find the right range, we then clear the least significant bit using: `(x & -x)`. This will
 keep just the least significant bit in the number, and we then clear that from the current value. That allows us to count the distance to the set bit and then 
 remove that set bit and count again. We use that distance as a way to know where the cleared ranges are. To handle the case of the first bit being clear, 
-we also have an _intentional_ overflow of the `previous_set_bit` value (it is unsigned, so no undefined behavior here). 
+we also have an _intentional_ overflow of the `previous_set_bit` field (unsigned value, so no undefined behavior here). 
 
-Finally, we call `handle_zero_word` in one of two cases. If the entire word is zeroed or if we run through all the set bits and now we have a free range at the
-end of the value.  We rely on `previous_set_bit` to be set to `ULONG_MAX` by `init_search` and then add one to it. If there have been no other set bits, 
+[source]
+[[bitmap_search_word]]
+.`bitmap.c` - Finding a range of free bits inside a single word
+----
+include::./code/bitmap.c[tags=bitmap_search_word]
+----
+
+:ctlz: __builtin_ctzl
+
+Finally, we call `bitmap_finalize_match()`, in one of two cases. If the entire word is zeroed or if we run through all the set bits and now we have a free range at the
+end of the value.  We rely on `previous_set_bit` to be set to `ULONG_MAX` by the caller of `bitmap_search_word()` and then add one to it. If there have been no other set bits, 
 the value overflow and is set to 0, which is then used as the starting point of the current range. If there is a value in `previous_set_bit`, we move one
-past the filled bit and return that. 
+past the last filled bit and return that. 
 
 This code is succinct, and I like how it turned out. It took several tries to get something that works and was maintainable 
 A part of what make this function challenging is that we are keeping track of the state _across_ calls. For example, we may have a free range that strides a
-word boundary. That will be handle in _two_ calls to `search_word`. 
+word boundary. That will be handle in _two_ calls to `bitmap_search_word()`. 
 
-It might be easier to understand if you take a peek at Figure 8, which shows a bitmap in a visual manner for the bitmap:
+[source]
+[[bitmap_finalize_match]]
+.`bitmap.c` - Validating a potential range match
+----
+include::./code/bitmap.c[tags=bitmap_finalize_match]
+----
+
+It might be easier to understand if you take a peek at <<bitmap-colored>>, which shows a bitmap in a visual manner for the bitmap:
  `{0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC}`. 
 
+[[bitmap-colored]]
 .Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
-image::{img-src}/fig8.png[]
+image::bitmap-colored.png[]
 
-Figure 8 has three types of cells:
+<<bitmap-colored>> has three types of cells:
 
 * Marked with `X` - busy. 
 * Marked with `V` and colored - we'll run a few sample queries on them, so I highlighted them for ease of identification.
 * Empty - free cells. 
 
-Look at the first row of cells in Figure 8, if we want to allocate a page near the marked position (red), where would you put it? What if we wanted to 
+Look at the first row of cells in <<bitmap-colored>>, if we want to allocate a page near the marked position (red), where would you put it? What if we wanted to 
 allocate two pages? In the middle of the image, there is another marked position (yellow), I want to get 4 pages near that location. And we want to get
 7 pages near the last marked position (green). 
+
+The data in <<bitmap-colored>> has multiple words to go through, let's see how the code is handling it. We use the `bitmap_search_word()` to search a single word and 
+`bitmap_search_once()` to search the entire bitmap. The code for that function in in <<bitmap_search_once>>.
+
 
 [IMPORTANT]
 .Why are we spending so much time with the allocator?
@@ -428,39 +453,38 @@ I'm writing this in Jun of 2020, which means that five to eight years after the 
 get _right_.
 ====
 
-The data in Figure 8 has multiple words to go through, let's see how the code is handling it. We use the `search_word` to search a single word and 
-`search_bitmap` to search the entire bitmap. THe code for that function in in Listing 5.9
-
 [source]
-.Listing 5.9 - bitmap.c - Finding a range of free bits in the entire bitmap
+[[bitmap_search_once]]
+.`bitmap.c` - Finding a range of free bits in the entire bitmap
 ----
-include::./code/bitmap.c[tags=search_bitmap]
+include::./code/bitmap.c[tags=bitmap_search_once]
 ----
 
-Because most of the work is done by `search_word`, the code for `search_bitmap` is short. We try to find a range in the current word, and if we can, we
-mask it so the next call will _not_ find it. That is the core of how we iterate. If we run out of the current word, we'll switch to the next one and 
+Because most of the work is done by `bitmap_search_word()`, the code for `bitmap_search_once()` mostly deals with orchestrating it. We try to find a range in the current word, 
+and if we can, we mask it so the next call will _not_ find it. That is the core of how we iterate. If we run out of the current word, we'll switch to the next one and 
 continue the search. Note that even if we found an appropriately sized range, if it is in the end of the current word, we'll scan the next word at least
 to find what the _size_ of that range is. 
 
-We could use `search_bitmap` to manage the task of allocating the next range, but that wouldn't be ideal. Finding the first free range that fit our needs
-is an allocations strategy that is called First Fit (surprisingly). I looked it up and here are 
+We could use `bitmap_search_once()` to manage the task of allocating the next range, but that wouldn't be ideal. Finding the first free range that fit our needs
+is an allocations strategy that is called First Fit. I looked it up and here are 
 https://dl.acm.org/doi/pdf/10.1145/359436.359453[couple of papers from _1974_] that discusses 
 https://www.researchgate.net/publication/220459885_Worst_Case_Fragmentation_of_First_Fit_and_Best_Fit_Storage_Allocation_Strategies[its usefulness].
 They are mostly here as a historical interest, they are testing this out on a PDP-11.
 
 The core issue with first fit is that it can cause internal fragmentation. In other words, we allocate pages in such a pattern that even though we have the
-the right number of pages free, we don't have enough _consecutive_ pages to answer the allocation. We can do better. The key to that is shown in Listing 5.10.
+the right number of pages free, we don't have enough _consecutive_ pages to answer the allocation. We can do better. The key to that is shown in <<bitmap_search_smallest_nearby>>.
  For such a short function there is a _lot_ of functionality there.
 
 [source]
-.Listing 5.10 - bitmap.c - Finding the _best_ free range for an allocation
+[[bitmap_search_smallest_nearby]]
+.`bitmap.c` - Finding the _best_ free range for an allocation
 ----
-include::./code/bitmap.c[tags=search_for_smallest_nearby]
+include::./code/bitmap.c[tags=bitmap_search_smallest_nearby]
 ----
 
-What `search_for_smallest_nearby` does is to use `search_bitmap` in a loop, trying to find the best match. In this case, we define best as the smallest
+What `bitmap_search_smallest_nearby()` does is to use `bitmap_search_once()` in a loop, trying to find the best match. In this case, we define best as the smallest
 range that can fit the requested size. However, we also take locality of reference into account here. The code will try to find a range that starts
-within 64 pages (512Kb) from the requested position. If we can't find such a range, we'll try to either use a larger than necessary range from near
+within roughly 64 pages (512Kb) from the requested position. If we can't find such a range, we'll try to either use a larger than necessary range from near
 the requested location or the first suitable range of any size that we run into.
 
 [TIP]
@@ -468,32 +492,27 @@ the requested location or the first suitable range of any size that we run into.
 ====
 What is the worst case for this function? If the entire bitmap is full and there is no free space, or if there are no free spaces large enough for
 the required allocation. The cost of that is iterating over the bitmap memory. For a 512GB database, that will require us to scan a bitmap of 8MB. 
-That isn't going to break the bank, especially since the bitmap it a single run that we can scan through and the system will optimize this for us
+That isn't going to break the bank, especially since the bitmap is a single run that we can scan through and the system will optimize this for us
 automatically.
+
+There are ways that to optimize this, we can remember where was the last location that we were able to find a free range, for example. As usual, further
+performance optimizations will remain unimplemented unless a benchmark convince me otherwise.
 ====
 
-We can now look at `search_free_range_in_bitmap` and see how it works, take a look at Listing 5.11.
+We can now look at `bitmap_search()` itself and see how it works, take a look at <<bitmap_search>>.
 
 [source]
-.Listing 5.11 - bitmap.c - The implementation for `search_free_range_in_bitmap` to allocate bitmaps
+[[bitmap_search]]
+.`bitmap.c` - Allocate a range from the bitmap
 ----
-include::./code/bitmap.c[tags=search_for_smallest_nearby]
+include::./code/bitmap.c[tags=bitmap_search]
 ----
 
-We call `search_for_smallest_nearby` from `search_free_range_in_bitmap` with range that starts at the current location. In other words, we are skipping
+We call `bitmap_search_smallest_nearby()` from `bitmap_search()` with range that starts at the current location. In other words, we are skipping
 looking at the pages that come before the requested location. We'll look there only if we couldn't find a range afterward. This is important because
 it bias the allocations forward.
 
-.The allocator operates over a single bitmap
-****
-This allocator uses a single bitmap to find the ranges. As it current stands, we deal with each page independently, so we have to scan them 
-individually. That means that if we have a request to allocate more than can be fit into a single page, we will fail. Right now, that means
-that we can't allocate more than 512MB in one shot. 
-
-We'll fix this issue in a little bit, as well as the problem of the free space bitmap initialization.
-****
-
-That is an intentional design decision. The idea is that you'll call `search_free_range_in_bitmap` with the location of an item you already have and
+That is an intentional design decision. The idea is that you'll call `bitmap_search()` with the location of an item you already have and
 ask it to be placed nearby. As you'll likely do that over a wide range of locations, that should balance things out. You can also pass `0` as the 
 starting location, in which case we'll search for the _best_ fit in the entire bitmap, ignoring the location sensitive brake.
 
