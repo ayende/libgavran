@@ -8,12 +8,50 @@
 #include <gavran/db.h>
 #include <gavran/test.h>
 
+// tag::allocate_page_and_use_it[]
+static result_t allocate_page_and_use_it(const char* path) {
+  // <1>
+  db_t db;
+  db_options_t options = {.minimum_size = 128 * 1024};
+  ensure(db_create(path, &options, &db));
+  defer(db_close, db);
+
+  // <2>
+  txn_t tx;
+  ensure(txn_create(&db, TX_WRITE, &tx));
+  defer(txn_close, tx);
+
+  // <3>
+  page_t page = {0};
+  ensure(txn_allocate_page(&tx, &page, 0));
+
+  // <4>
+  strcpy(page.address, "Hello Gavran");
+
+  // <5>
+  ensure(txn_commit(&tx));
+  ensure(txn_close(&tx));
+
+  // <6>
+  ensure(txn_create(&db, 0, &tx));
+  ensure(txn_raw_get_page(&tx, &page));
+
+  ensure(strcmp("Hello Gavran", page.address) == 0);
+
+  return success();
+}
+// end::allocate_page_and_use_it[]
+
 // tag::tests[]
-describe(db_basic_tests) {
+describe(allocation_tests) {
   before_each() {
     errors_clear();
     system("mkdir -p /tmp/db");
     system("rm -f /tmp/db/*");
+  }
+
+  it("can allocate, write and then read data") {
+    assert(allocate_page_and_use_it("/tmp/db/try"));
   }
 
   it("can allocate pages") {

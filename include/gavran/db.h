@@ -227,14 +227,15 @@ result_t txn_free_page(txn_t *tx, page_t *page);
 result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy);
 
 // tag::bit-manipulations[]
-static inline void bitmap_set(uint64_t *buffer, uint64_t pos) {
-  buffer[pos / 64] |= (1UL << pos % 64);
+static inline void bitmap_set(uint64_t *buffer, uint64_t pos,
+                              bool val) {
+  if (val)
+    buffer[pos / 64] |= (1UL << pos % 64);
+  else
+    buffer[pos / 64] ^= (1UL << pos % 64);
 }
 static inline bool bitmap_is_set(uint64_t *buffer, uint64_t pos) {
   return (buffer[pos / 64] & (1UL << pos % 64)) != 0;
-}
-static inline void bitmap_clear(uint64_t *buffer, uint64_t pos) {
-  buffer[pos / 64] ^= (1UL << pos % 64);
 }
 // end::bit-manipulations[]
 

@@ -5,21 +5,7 @@
 
 #define GAVRAN_VERSION 1
 
-static result_t db_is_new_file(db_t *db, bool *is_new) {
-  txn_t tx;
-  ensure(txn_create(db, TX_READ, &tx));
-  defer(txn_close, tx);
-
-  page_t page = {.page_num = 0};
-  ensure(txn_raw_get_page(&tx, &page));
-  page_metadata_t zero;
-  memset(&zero, 0, sizeof(page_metadata_t));
-  page_metadata_t *entry = page.address;
-  *is_new = memcmp(&entry->file_header, &zero,
-                   sizeof(page_metadata_t)) == 0;
-  return success();
-}
-
+// tag::db_init_file_header[]
 static result_t db_init_file_header(db_t *db, txn_t *tx) {
   page_t page = {.page_num = 0};
   ensure(txn_raw_modify_page(tx, &page));
@@ -35,7 +21,9 @@ static result_t db_init_file_header(db_t *db, txn_t *tx) {
 
   return success();
 }
+// end::db_init_file_header[]
 
+// tag::db_init_free_space_bitmap[]
 static result_t db_init_free_space_bitmap(txn_t *tx) {
   page_t page = {.page_num = 0};
   ensure(txn_raw_modify_page(tx, &page));
@@ -54,16 +42,18 @@ static result_t db_init_free_space_bitmap(txn_t *tx) {
   ensure(txn_raw_modify_page(tx, &p));
   // mark header & free space pages as busy
   for (size_t i = 0; i <= pages; i++) {
-    bitmap_set(p.address, i);
+    bitmap_set(p.address, i, true);
   }
   // mark as busy the pages beyond the end of the file
   size_t end = entry->file_header.number_of_pages % BITS_IN_PAGE;
   for (size_t i = end; i < BITS_IN_PAGE; i++) {
-    bitmap_set(p.address, i);
+    bitmap_set(p.address, i, true);
   }
   return success();
 }
+// end::db_init_free_space_bitmap[]
 
+// tag::db_init_file_structure[]
 static result_t db_init_file_structure(db_t *db) {
   txn_t tx;
   ensure(txn_create(db, TX_WRITE, &tx));
@@ -81,7 +71,9 @@ static result_t db_init_file_structure(db_t *db) {
   ensure(txn_commit(&tx));
   return success();
 }
+// end::db_init_file_structure[]
 
+// tag::db_validate_file_on_startup[]
 static result_t db_validate_file_on_startup(db_t *db) {
   txn_t tx;
   ensure(txn_create(db, TX_READ, &tx));
@@ -115,16 +107,31 @@ static result_t db_validate_file_on_startup(db_t *db) {
 
   return success();
 }
+// end::db_validate_file_on_startup[]
+
+// tag::db_init[]
+static result_t db_is_new_file(db_t *db, bool *is_new) {
+  txn_t tx;
+  ensure(txn_create(db, TX_READ, &tx));
+  defer(txn_close, tx);
+
+  page_t page = {.page_num = 0};
+  ensure(txn_raw_get_page(&tx, &page));
+  page_metadata_t zero;
+  memset(&zero, 0, sizeof(page_metadata_t));
+  page_metadata_t *entry = page.address;
+  *is_new = memcmp(&entry->file_header, &zero,
+                   sizeof(page_metadata_t)) == 0;
+  return success();
+}
 
 implementation_detail result_t db_init(db_t *db) {
   bool is_new;
   ensure(db_is_new_file(db, &is_new));
-
   if (is_new) {
     ensure(db_init_file_structure(db));
   }
-
   ensure(db_validate_file_on_startup(db));
-
   return success();
 }
+// end::db_init[]

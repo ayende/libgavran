@@ -116,7 +116,8 @@ static bool bitmap_search_smallest_nearby(
 
   // the bigger the request range, the less we care about locality
   size_t boundary =
-      MAX_SEARCH_DISTANCE + search->input.space_required;
+      (search->input.near_position + MAX_SEARCH_DISTANCE +
+       search->input.space_required);
   while (bitmap_search_once(search)) {
     if (search->input.space_required ==
         search->output.space_available_at_position)

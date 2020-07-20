@@ -103,7 +103,7 @@ in `db_is_new_file()` isn't actually a check on a single byte, instead we check 
 in just a little bit. If the first `page_metadata_t` is zeroed, we consider the file to be new and will call to `db_init_file_structure()` to perform the actual
 initialization.
 
-Regardless of whatever the file is new or not, we'll validate its structure and initialize our in memory state from the file in `db_init_from_existing_file()`. 
+Regardless of whatever the file is new or not, we'll validate its structure and initialize our in memory state from the file in `db_validate_file_on_startup()`. 
 That adds another layer of validation to protect us from bugs or disk issues.
 
 [source]
@@ -123,10 +123,12 @@ the file under the radar. Our transactions will make sure that the data changes 
 
 <<db_init_file_structure>> is the also first time that _Gavran_ is actually starting to use its own API to implement real functionality. As part of starting up the database
 we'll create a transaction, modify the first page so we can write the headers and commit to the file. That is cool!
+Another interesting thing about the `db_init_file_structure()` function is that it creates a transaction, and then pass it to other functions to do the actual work. The real
+work is done by `db_init_file_header()` and `db_init_free_space_bitmap()`.
 
-Another interesting thing about the `db_init_file_header()` function is that it neither _creates_ a transaction not _commits_ it, that is actually handled by `db_init_file_structure()`
-because we need to coordinate a bit more than just setting of the header. Before we can get to that, though, we need to talk about another interesting aspect of `db_init_file_header()`.
-We aren't manipulating directly, instead, we go through data structures to modify the data in memory and then persist that data to disk. 
+We already saw how `file_header_t` looks like in <<file_header>>, we should also look at the `page_metadata_t` structure, shown in <<page_metadata_t>>, to complete the full picture. 
+This is a _persistent_ data structure, in the sense that we are going to write it to disk and use it quite often. As such, there are a number of of things that we should discuss about 
+this critical structure. We are using these structures to manipulate the persistent data on disk using C structures in a type safe manner, instead of manipulating the bits directly.
 
 [source]
 [[db_init_file_structure]]
@@ -135,14 +137,14 @@ We aren't manipulating directly, instead, we go through data structures to modif
 include::./code/db.c[tags=db_init_file_structure]
 ----
 
-We already saw how `file_header_t` looks like in <<file_header>>, we should also look at the `page_metadata_t` structure, shown in <<page_metadata_t>>, to complete the full picture. 
-This is a _persistent_ data structure, in the sense that we are going to write it to disk and use it quite often. As such, there are a number of of things that we should discuss about 
-this critical structure.
-
 The `page_metadata_t` is exactly 64 bytes in size. The first 32 bytes of the structure are taken by a `crypto` header. I'm going to spend the whole of Chapter 11 to discuss that, so 
 we'll skip this for now. The rest of `page_metadata_t` is a union of the structures that may be part of the page metadata. We use the `page_metadata_common_t`, which define the 
 `page_flags` field to check what is the actual type of the page and then we can switch to the right union member and work with it directly. All the structures in the union _must_
 have `page_flags` as their first field and be up to 32 bytes in size.
+
+Now that we understand how we structure (pun intended) the data on disk, let's see how we are actually making use of it. The database initialization is done on <<db_validate_file_on_startup>>.
+Although it might be a stretch to call it initialization at this point. Right now the only thing that we are going to do is to validate the on disk data. 
+
 
 [NOTE]
 .What about alignment?
@@ -151,12 +153,21 @@ One of the dangers of casting between pointers between different structures is t
 and making sure that the initial field match across all of the types that will be stored in the `page_metadata_t`. 
 ====
 
+We start by creating a transaction, remember that we can't read or modify any data from the file without a transaction. That is _important_. I know that I have talked about this previously
+but it is well worth repeating. By making sure that there are no cheats, we are going to create a robust system. Using the read transaction we create, we access the first page and verify
+that it is setup to be a file header page. We then validate that the header is valid in <<db_validate_file_on_startup>>.
+
+In `db_validate_file_on_startup()` we validate that the header match our expectation. The `page_size` and `version` are as expected and that we have the magic value in the right place. Note that
+because the `page_metadata_t` has a `crypto` for its first 32 bytes, the actual `magic` field is located on bytes 36 - 41. That is not typically where you'll put the string identifying your
+file. Usually that is the very first bytes of the file. I'm doing it this way to make it (much) easier for me when we get to Chapter 11 and talk about the `crypto` part of the page metadata.
+
 [source]
 [[page_metadata_t]]
 .`gavran/db.h` - The page metadata structure 
 ----
 include::../include/gavran/db.h[tags=page_metadata_t]
 ----
+
 
 [TIP]
 .Why all the small functions?
@@ -165,42 +176,23 @@ You might have noticed that I'm using very small functions in the code. There ar
 
 * Shorter functions tend to be more readable and the using `defer` and `ensure` means that I don't have so much visible plumbing.
 * I need to fit these functions into a book format, which means that I have a hard limit on how much code I can show on a single page. Aside from the unit tests, I want to avoid multi page
-  code listing. They are rather daunting and make it hard to explain exactly what is going on in the engine.
+  code listing. These are rather daunting and make it hard to explain exactly what is going on in the engine.
 * Small functions means that I can update a single function's behavior and then show what changed there, without having to provide too much additional context. Here is the new version of
   `do_something_small()` is so much better than trying to push a diff of a longer function, in terms of readability.
 ====
 
-
 [source]
-[[db_init_from_existing_file]]
+[[db_validate_file_on_startup]]
 .`db.c` - Validating the file on startup
 ----
-include::./code/db.c[tags=db_init_from_existing_file]
+include::./code/db.c[tags=db_validate_file_on_startup]
 ----
-
-Now that we understand how we structure (pun intended) the data on disk, let's see how we are actually making use of it. The database initialization is done on <<db_init_from_existing_file>>.
-Although it might be a stretch to call it initialization at this point. Right now the only thing that we are going to do is to validate the on disk data. 
-
-[source]
-[[db_validate_file_header]]
-.`db.c` - Validating the file header
-----
-include::./code/db.c[tags=db_validate_file_header]
-----
-
-We start by creating a transaction, remember that we can't read or modify any data from the file without a transaction. That is _important_. I know that I have talked about this previously
-but it is well worth repeating. By making sure that there are no cheats, we are going to create a robust system. Using the read transaction we create, we access the first page and verify
-that it is setup to be a file header page. We then validate that the header is valid in <<db_validate_file_header>>.
-
-In `db_validate_file_header()` we validate that the header match our expectation. The `page_size` and `version` are as expected and that we have the magic value in the right place. Note that
-because the `page_metadata_t` has a `crypto` for its first 32 bytes, the actual `magic` field is located on bytes 36 - 41. That is not typically where you'll put the string identifying your
-file. Usually that is the very first bytes of the file. I'm doing it this way to make it (much) easier for me when we get to Chapter 11 and talk about the `crypto` part of the page metadata.
 
 === Allocating and freeing pages
 
 Now that we have all of this setup properly, the question _why_ raises itself. We want to implement `txn_free_page()` and `txn_allocate_page()`, how does this 
 help us? The answer is that in order to write those functions, we need to have a place to store metadata about the file. We now have a place to do this
-setup: `db_init_file_structure()`.
+setup: `db_init_free_space_bitmap()`, which is called from `db_init_file_structure()`.
 
 The next step is deciding exactly how we'll implement the free list. I want to reduce complexity as much as possible, so any complex data structure is going to be hard
 to build at this point, without much infrastructure in place. The easiest way to manage the free space is to use a bitmap or a bit array for the free/in used marker.
@@ -228,17 +220,10 @@ The answer is that we are going to manage this process _using_ the free list its
 will be to setup the initial free list bitmap. Following this, when we need to increase the free list size, we'll ask the free list itself where we
 can place the increased list size and then free the old location.
 
-Simple, at least as a concept. Let's see what will happen when we sit down to actually implement this... the full details are in <<db_init_free_space>>.
-
-[source]
-[[db_init_free_space]]
-.`db.c` - Creating the initial free space bitmap
-----
-include::./code/db.c[tags=db_init_free_space]
-----
+Simple, at least as a concept. Let's see what will happen when we sit down to actually implement this... the full details are in <<db_init_free_space_bitmap>>.
 
 Similarity to `db_init_file_header()`, we are starting with using the transaction to get the first header page and grab the `number_of_pages` from the 
-file header (which was previously set up in `db_init_file_header()`, which is called before `db_init_free_space()`). We setup the free space bitmap
+file header (which was previously set up in `db_init_file_header()`, which is called before `db_init_free_space_bitmap()`). We setup the free space bitmap
 as the _second_ page, and register it in the metadata of the second entry in the first page on the file. This will become much clearer when we'll discuss
 how we handle pages metadata later on in the next chapter.
 
@@ -252,6 +237,13 @@ multiple pages as a single buffer. The next step is to simply mark the busy page
 are the header page and the pages used by the free space bitmap itself. In most cases, when we initialize a file, the size will be less than 512MB and we'll
 use just a single free space bitmap page. I don't like placing arbitrary limits on my code, so I'm handling initialization with any size of the file.
 
+[source]
+[[db_init_free_space_bitmap]]
+.`db.c` - Creating the initial free space bitmap
+----
+include::./code/db.c[tags=db_init_free_space_bitmap]
+----
+
 We also mark the pages in the _end_ as busy. Why is that? The free space bitmap operates in pages of 8KB, each of which contains 64K bits. If the size of the 
 file does not align on a 512MB boundary, we are bound to have more entries in the free space bitmap than we have pages in the file. We handle this scenario by
 simply marking the pages beyond the end of the file as busy. We'll need to address that when we'll allow to increase the file size.
@@ -260,6 +252,11 @@ Using a bitmap for the free space management is simple and effective. It cuts do
 data structure (B+Tree) to manage the free list. That can lead to recursion where the free list needs to allocate or free a page while a free 
 list operation is ongoing. That can lead to... issues and took a while to properly stabilize. This model, however, solve all those issues very
 neatly.
+
+If you'll look at the code in `db_init_free_space()`, we even handle cases where recording the pages of the free list itself as busy will take
+more than one page. That can only happen once the database exceeded 4TB in size. Not something that I expect to be common, but it doesn't take a lot
+of code to handle this. We also used the `bitmap_set()` utility functions in <<db_init_free_space_bitmap>>, you can see all the bit manipulations function in
+<<bit-manipulations>>. 
 
 .Low level transaction API
 ****
@@ -271,10 +268,6 @@ We need to be careful during initialization and many other functions that operat
 `txn_allocate_page()`, because the free space bitmap that would tell us _where_ to allocate the page hasn't been setup yet.
 ****
 
-If you'll look at the code in `db_init_free_space()`, we even handle cases where recording the pages of the free list itself as busy will take
-more than one page. That can only happen once the database exceeded 4TB in size. Not something that I expect to be common, but it doesn't take a lot
-of code to handle this. We also used the `set_bit()` utility functions in <<db_init_free_space>>, you can see all the bit manipulations function in
-<<bit-manipulations>>. 
 
 As you can see in <<file-layout-with-freepsace>>, the second page is used for the free list and the first two bits there are marked as busy. The rest of the page is 
 filled with zeros, indicating free pages. Where did those zeros come from, however? We didn't set them up.
@@ -296,22 +289,6 @@ image::file-layout-with-freepsace.png[]
 
 The act of freeing a page is a lot easier than allocating one using this model. That is typically _not_ the case, so this feature of the system
 architecture makes me very happy. Let's look at <<txn_free_page>> to see how this is done.
-
-[TIP]
-.Designing for the underlying system
-====
-We haven't touched on this much yet, but one of the core design principles that I keep in mind while build Gavran is that I want to work _with_
-the systems I'm using. That means understanding how hardware, processors, memory and operating systems are built and what patterns they seek
-to optimize.
-
-If we intentionally build Gavran to have patterns that the underlying software and hardware is already setup to speed up, we are going to get
-amazing benefits, with very little apparent work. A lot of thought has gone into how to structure things so you don't _need_ to write a lot
-of code to get the desired functionality.
-
-I already talked about this behavior with regards to memory mapped I/O and leaning on the operating system's page cache as a good example of this
-practice. Another example is the use of pages to work with the data, that is how the operating system, the RAM and the disk work and matching that
-behavior means that we don't have to deal with issues such as torn writes, read-modify-write costs, etc.
-====
 
 [source]
 [[txn_free_page]]
@@ -389,11 +366,19 @@ This is done in the `bitmap_finalize_match()` function, shown in <<bitmap_finali
 The most interesting part in <<bitmap_search_word>> is when we have a word that has a mix of set and cleared bits. Then we need to find if there are enough cleared consecutive bits 
 _inside_ the word. We use the technique describe by Lemire to do so. 
 
+:ctlz: __builtin_ctzl
+
+
 We measure this using `{ctlz}` which is an operation that would count the trailing zeros on the value. We use that to compute the distance to the first set bit, 
 check whatever that gives us the right range or not. If we didn't find the right range, we then clear the least significant bit using: `(x & -x)`. This will
 keep just the least significant bit in the number, and we then clear that from the current value. That allows us to count the distance to the set bit and then 
 remove that set bit and count again. We use that distance as a way to know where the cleared ranges are. To handle the case of the first bit being clear, 
 we also have an _intentional_ overflow of the `previous_set_bit` field (unsigned value, so no undefined behavior here). 
+
+Finally, we call `bitmap_finalize_match()`, in one of two cases. If the entire word is zeroed or if we run through all the set bits and now we have a free range at the
+end of the value.  We rely on `previous_set_bit` to be set to `ULONG_MAX` by the caller of `bitmap_search_word()` and then add one to it. If there have been no other set bits, 
+the value overflow and is set to 0, which is then used as the starting point of the current range. If there is a value in `previous_set_bit`, we move one
+past the last filled bit and return that. 
 
 [source]
 [[bitmap_search_word]]
@@ -402,16 +387,12 @@ we also have an _intentional_ overflow of the `previous_set_bit` field (unsigned
 include::./code/bitmap.c[tags=bitmap_search_word]
 ----
 
-:ctlz: __builtin_ctzl
-
-Finally, we call `bitmap_finalize_match()`, in one of two cases. If the entire word is zeroed or if we run through all the set bits and now we have a free range at the
-end of the value.  We rely on `previous_set_bit` to be set to `ULONG_MAX` by the caller of `bitmap_search_word()` and then add one to it. If there have been no other set bits, 
-the value overflow and is set to 0, which is then used as the starting point of the current range. If there is a value in `previous_set_bit`, we move one
-past the last filled bit and return that. 
-
 This code is succinct, and I like how it turned out. It took several tries to get something that works and was maintainable 
 A part of what make this function challenging is that we are keeping track of the state _across_ calls. For example, we may have a free range that strides a
 word boundary. That will be handle in _two_ calls to `bitmap_search_word()`. 
+
+It might be easier to understand if you take a peek at <<bitmap-colored>>, which shows a bitmap in a visual manner for the bitmap:
+ `{0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC}`. 
 
 [source]
 [[bitmap_finalize_match]]
@@ -419,13 +400,6 @@ word boundary. That will be handle in _two_ calls to `bitmap_search_word()`.
 ----
 include::./code/bitmap.c[tags=bitmap_finalize_match]
 ----
-
-It might be easier to understand if you take a peek at <<bitmap-colored>>, which shows a bitmap in a visual manner for the bitmap:
- `{0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC}`. 
-
-[[bitmap-colored]]
-.Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
-image::bitmap-colored.png[]
 
 <<bitmap-colored>> has three types of cells:
 
@@ -436,10 +410,6 @@ image::bitmap-colored.png[]
 Look at the first row of cells in <<bitmap-colored>>, if we want to allocate a page near the marked position (red), where would you put it? What if we wanted to 
 allocate two pages? In the middle of the image, there is another marked position (yellow), I want to get 4 pages near that location. And we want to get
 7 pages near the last marked position (green). 
-
-The data in <<bitmap-colored>> has multiple words to go through, let's see how the code is handling it. We use the `bitmap_search_word()` to search a single word and 
-`bitmap_search_once()` to search the entire bitmap. The code for that function in in <<bitmap_search_once>>.
-
 
 [IMPORTANT]
 .Why are we spending so much time with the allocator?
@@ -452,6 +422,28 @@ However, it took _time_ and a lot of hard work to get there. In Gavran, I'm tryi
 I'm writing this in Jun of 2020, which means that five to eight years after the fact, I still remember how hard getting free space handling in Voron was to
 get _right_.
 ====
+
+[[bitmap-colored]]
+.Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
+image::bitmap-colored.png[]
+
+
+The data in <<bitmap-colored>> has multiple words to go through, let's see how the code is handling it. We use the `bitmap_search_word()` to search a single word and 
+`bitmap_search_once()` to search the entire bitmap. The code for that function in in <<bitmap_search_once>>.
+
+[TIP]
+.Designing for the underlying system
+====
+ne of the core design principles that I keep in mind while build Gavran is that I want to work _with_ the systems I'm using. 
+That means understanding how hardware, processors, memory and operating systems are built and what patterns they seek
+to optimize. A lot of thought has gone into how to structure things so you don't _need_ to write a lot
+of code to get the desired functionality.
+
+I already talked about this behavior with regards to memory mapped I/O and leaning on the operating system's page cache as a good example of this
+practice. Another example is the use of pages to work with the data, that is how the operating system, the RAM and the disk work and matching that
+behavior means that we don't have to deal with issues such as torn writes, read-modify-write costs, etc.
+====
+
 
 [source]
 [[bitmap_search_once]]
@@ -487,18 +479,6 @@ range that can fit the requested size. However, we also take locality of referen
 within roughly 64 pages (512Kb) from the requested position. If we can't find such a range, we'll try to either use a larger than necessary range from near
 the requested location or the first suitable range of any size that we run into.
 
-[TIP]
-.Worst case performance
-====
-What is the worst case for this function? If the entire bitmap is full and there is no free space, or if there are no free spaces large enough for
-the required allocation. The cost of that is iterating over the bitmap memory. For a 512GB database, that will require us to scan a bitmap of 8MB. 
-That isn't going to break the bank, especially since the bitmap is a single run that we can scan through and the system will optimize this for us
-automatically.
-
-There are ways that to optimize this, we can remember where was the last location that we were able to find a free range, for example. As usual, further
-performance optimizations will remain unimplemented unless a benchmark convince me otherwise.
-====
-
 We can now look at `bitmap_search()` itself and see how it works, take a look at <<bitmap_search>>.
 
 [source]
@@ -514,65 +494,82 @@ it bias the allocations forward.
 
 That is an intentional design decision. The idea is that you'll call `bitmap_search()` with the location of an item you already have and
 ask it to be placed nearby. As you'll likely do that over a wide range of locations, that should balance things out. You can also pass `0` as the 
-starting location, in which case we'll search for the _best_ fit in the entire bitmap, ignoring the location sensitive brake.
+starting location, in which case we'll search for the _best_ fit in the entire bitmap, without trying to find a nearby location.
 
 === Allocating pages
 
-Now that we have an allocator ready, let see what it takes to actually allocate a page, shall we? Without further ado, skip ahead to Listing 5.12 to
+Now that we have an allocator ready, let see what it takes to actually allocate a page, shall we? Without further ado, skip ahead to <<txn_allocate_page>> to
 see how it all comes together.
 
 [source]
-.Listing 5.12 - txn.c - Allocate a page in the transaction
+[[txn_allocate_page]]
+.`txn.alloc.c` - Allocate a page in the transaction
 ----
 include::./code/txn.alloc.c[tags=txn_allocate_page]
 ----
-<1> This utility function is used to mark a page as busy in the free space bitmap.
-<2> Right now we deal with all pages as single units. We cannot search across free space pages. We'll be fixing this later.
-<3> Here we run the actual search.
-<4> When we find an available page, we zero it (just to be on the safe side) mark it as busy in the bitmap and return.
-<5> Handling the case of no space left on the file. 
+<1> Get the free space bitmap.
+<2> Perform the search for a range in the bitmap.
+<3> When we find an available page, we zero it (just to be on the safe side) mark it as busy in the bitmap and return.
+<4> Handling the case of no space left on the file. 
 
-We are scanning through the free space bitmap, one page at a time, trying to find a free page. When we find the page, we call `txn_modify_page` on it. We then
+We are scanning through the free space bitmap, one page at a time, trying to find a free page. When we find the page, we call `txn_raw_modify_page()` on it. We then
 zero it. This isn't something that we _have_ to do, we already zero pages when we free them and we know that we are getting zeroed pages from the file 
 system. I'm doing this to make doubly sure that we don't end up with strange things in here. The rule is that if you asked for a new page, you'll get it
-free and clear.
+free and clear.  While getting a new page from the OS is guaranteed to be zero, we may allocate a page that was previously used. We _are_ zeroing it on free, but
+better safe than sorry.
 
-Now, I need to mark the newly allocated page as busy. Note that I _cannot_ just use `bitmap_page` here, I got that through `txn_get_page`, which returns a 
-read only copy. I need to call `txn_modify_page` on the page and then work with he _new_ address that we get. After that, it is just an issue of setting the
-right bit and completing the operation successfully.
+[TIP]
+.Worst case allocation performance
+====
+What is the worst case for allocating pages in Gavran? If the entire bitmap is full and there is no free space, or if there are no free spaces large enough for
+the required allocation. The cost of that is iterating over the bitmap memory. For a 512GB database, that will require us to scan a bitmap of 8MB. 
+That isn't going to break the bank, especially since the bitmap is a single run that we can scan through and the system will optimize this for us
+automatically.
 
-As it currently stand, the `txn_allocate_page` will fail once we have run out of the internally allocated space. We'll need to address that, we want to allow
-the user to increase the file size as needed. We'll deal with this issue as well in the next chapter.
+There are ways that to optimize this, we can remember where was the last location that we were able to find a free range, for example. As usual, further
+performance optimizations will remain unimplemented unless a benchmark convince me otherwise.
+====
+
+Now, I need to mark the newly allocated page as busy. Note that I _cannot_ just use `bitmap_page` here, I got that through `txn_raw_get_page()`, which returns a 
+read only copy. The actual setting of the page as busy is done in <<txn_free_space_mark_page>>, where we are calling `txn_raw_modify_page()` to make sure that we 
+can modify the bitmap's memory.
+
+As it currently stand, the `txn_allocate_page()` will fail once we have run out of the internally allocated space. We'll need to address that, we want to allow
+the user to increase the file size as needed. We'll deal with this issue as well in the next chapter. 
+[source]
+[[txn_free_space_mark_page]]
+.Listing 5.12 - txn.c - Marking a page as busy in the free space bitmap
+----
+include::./code/txn.alloc.c[tags=txn_free_space_mark_page]
+----
 
 === Putting it all together
 
-This chapter has gone on longer than I expected, but we are finally here. You can look at Listing 4.18 to see how we can use the new API. I decided to skip
-the error handling here, since this is just concept code. It makes the intent much more readable.
+This chapter has gone on longer than I expected, but we are finally here. You can look at <<allocate_page_and_use_it>> to see how we can use the new API.
+The code in `allocate_page_and_use_it()` will test that the content of the newly allocated page is set to string "Hello Gavran". 
+You can run this multiple times to see how it allocates a new page on each run. Calls to `txn_free_page()` will make the page available for allocations again.
+The next chapter will deal with issues such as allocating multiple pages and managing pages metadata.
 
 [source]
-.Listing 5.13 - main.c - Using the transaction allocation API
+[[allocate_page_and_use_it]]
+.`test.c` - Using the transaction allocation API
 ----
-include::./code/main.c[tags=allocate_page_and_use_it]
+include::./code/test.c[tags=allocate_page_and_use_it]
 ----
-<1> Create the database (and set close on function end via `defer`).
-<2> Create a transaction (and close via `defer`).
+<1> Create the database (and set close on function end via `defer()`).
+<2> Create a transaction (and close via `defer()`).
 <3> Allocate a new page using the free space bitmap
 <4> Copy data to the new page
 <5> Commit and close the transaction
-<6> Create a new transaction to read the data. Note that _this_ transaction will be closed via the previous setup `defer`.
-
-The code in Listing 5.13 will print the new allocated page number (2) and the string "Hello Gavran". 
-You can run this multiple times to see how it allocates a new page on each run. Calls to `txn_free_page` will make the page available for allocations again.
-We still have work to do on the infrastructure, but we
-are very nearly ready to start implementing higher level concepts, like data structures. The next chapter will deal with issues such as allocating multiple
-pages and managing pages metadata.
+<6> Create a new transaction to read the data. Note that _this_ transaction will be closed via the previous setup `defer()`.
 
 === Unit tests
 
-As usual, chapter close means that we need to unit test our code. 
+As usual, a chapter close means that we need to unit test our code. You can see how we are putting the allocation API through its paces in <<tests>>.
 
-[source,python]
-.Listing 5.14 - Unit testing the transaction API
+[source]
+[[tests]]
+.`test.c` - Testing the allocation API
 ----
-include::../pyapi/tests05.py[]
+include::./code/test.c[tags=tests]
 ----
