@@ -62,7 +62,15 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_file_header = 1,
   page_flags_metadata = 2,
   page_flags_free_space_bitmap = 3,
+  page_flags_overflow = 4,
 } page_flags_t;
+
+typedef struct overflow_page {
+  page_flags_t page_flags;
+  uint8_t _padding1[7];
+  uint64_t number_of_pages;
+  uint64_t size_of_value;
+} overflow_page_t;
 
 typedef struct free_space_bitmap_heart {
   page_flags_t page_flags;
@@ -98,6 +106,7 @@ typedef struct page_metadata {
     page_metadata_common_t common;
     file_header_t file_header;
     free_space_bitmap_heart_t free_space;
+    overflow_page_t overflow;
   };
 } page_metadata_t;
 
@@ -214,9 +223,12 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page);
 result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 // end::txn_api[]
 
+result_t txn_get_page(txn_t *tx, page_t *page);
+result_t txn_modify_page(txn_t *tx, page_t *page);
+
 // tag::tx_allocation[]
 result_t txn_allocate_page(txn_t *tx, page_t *page,
-                           page_metadata_t *metadata,
+                           page_metadata_t **metadata,
                            uint64_t nearby_hint);
 result_t txn_free_page(txn_t *tx, page_t *page);
 // end::tx_allocation[]

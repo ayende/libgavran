@@ -6,8 +6,9 @@ static result_t get_metadata_entry(uint64_t page_num,
                                    page_t *metadata_page,
                                    page_metadata_t **metadata) {
   page_metadata_t *entries = metadata_page->address;
-  page_flags_t expected =
-      page_num ? page_flags_metadata : page_flags_file_header;
+  page_flags_t expected = metadata_page->page_num
+                              ? page_flags_metadata
+                              : page_flags_file_header;
   ensure(expected == entries->common.page_flags,
          msg("Got invalid metadata page"), with(page_num, "%lu"));
 

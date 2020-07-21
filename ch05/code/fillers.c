@@ -13,7 +13,7 @@ db_initialize_default_read_tx(db_state_t *db_state) {
   return success();
 }
 
-implementation_detail bool bitmap_is_accpetable_match(
+implementation_detail bool bitmap_is_acceptable_match(
     bitmap_search_state_t *search) {
   (void)search;
   return true;

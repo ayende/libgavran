@@ -11,6 +11,8 @@ static result_t txn_get_number_of_pages(page_metadata_t *metadata,
     case page_flags_metadata:
       *number_of_pages = 1;
       return success();
+    case page_flags_overflow:
+      *number_of_pages = metadata->overflow.number_of_pages;
     case page_flags_free_space_bitmap:
       *number_of_pages = metadata->free_space.number_of_pages;
       return success();

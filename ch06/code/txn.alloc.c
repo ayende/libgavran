@@ -22,6 +22,15 @@ static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
 }
 // end::txn_free_space_mark_page[]
 
+result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
+  uint64_t bitmap_start =
+      tx->state->db->global_state.header.free_space_bitmap_start;
+  page_t bitmap_page = {.page_num = bitmap_start};
+  ensure(txn_get_page(tx, &bitmap_page));
+  *busy = bitmap_is_set(bitmap_page.address, page_num);
+  return success();
+}
+
 // tag::txn_allocate_metadata_entry[]
 static result_t txn_allocate_metadata_entry(txn_t *tx,
                                             uint64_t page_num,
@@ -36,7 +45,9 @@ static result_t txn_allocate_metadata_entry(txn_t *tx,
     self->common.page_flags = page_flags_metadata;
     ensure(txn_free_space_mark_page(tx, meta_page.page_num, true));
   }
-  ensure(self->common.page_flags == page_flags_metadata,
+  page_flags_t expected = meta_page.page_num ? page_flags_metadata
+                                             : page_flags_file_header;
+  ensure(self->common.page_flags == expected,
          msg("Expected page to be metadata page, but wasn't"),
          with(page_num, "%lu"), with(self->common.page_flags, "%x"));
 
@@ -55,7 +66,7 @@ static result_t txn_allocate_metadata_entry(txn_t *tx,
 
 // tag::txn_allocate_page[]
 result_t txn_allocate_page(txn_t *tx, page_t *page,
-                           page_metadata_t *metadata,
+                           page_metadata_t **metadata,
                            uint64_t nearby_hint) {
   file_header_t *header = &tx->state->global_state.header;
   uint64_t start = header->free_space_bitmap_start;
@@ -79,15 +90,14 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
   }
   if (bitmap_search(&search)) {
     page->page_num = search.output.found_position;
-    ensure(txn_modify_page(tx, page));
+    ensure(txn_raw_modify_page(tx, page));
     memset(page->address, 0, PAGE_SIZE * page->number_of_pages);
     for (size_t i = 0; i < page->number_of_pages; i++) {
       ensure(txn_free_space_mark_page(
           tx, search.output.found_position + i, true));
     }
     // <2>
-    ensure(
-        txn_allocate_metadata_entry(tx, page->page_num, &metadata));
+    ensure(txn_allocate_metadata_entry(tx, page->page_num, metadata));
     return success();
   }
 
@@ -130,20 +140,20 @@ result_t txn_free_page(txn_t *tx, page_t *page) {
   }
 
   // <1>
-  page_metadata_t *metadata;
-  ensure(txn_modify_metadata(tx, page->page_num, &metadata));
-  memset(metadata, 0, sizeof(page_metadata_t));
-
-  // <2>
   uint64_t metadata_page_num =
       page->page_num & PAGES_IN_METADATA_MASK;
   if (metadata_page_num != page->page_num && page->page_num) {
+    // <2>
+    page_metadata_t *metadata;
+    ensure(txn_modify_metadata(tx, page->page_num, &metadata));
+    memset(metadata, 0, sizeof(page_metadata_t));
+
     bool is_free;
     ensure(txn_free_space_bitmap_metadata_range_is_free(
         tx, metadata_page_num, &is_free));
     if (is_free) {
       page_t metadata_page = {.page_num = metadata_page_num};
-      ensure(txn_free(tx, &metadata_page));
+      ensure(txn_free_page(tx, &metadata_page));
     }
   }
 

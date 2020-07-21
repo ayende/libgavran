@@ -266,8 +266,9 @@ In `txn_allocate_metadata_entry()` we first get the metadata page for the reques
 may need to initialize the metadata page as part of allocating the metadata entry for the page. We do that by checking if the metadata page is marked as busy in the free space bitmap
 or not. Because the page may not be allocated yet, we use `txn_raw_modify_page()` instead of `txn_modify_page()`. The later will refuse to modify a page that hasn't been allocated yet, 
 after all.
-The rest of the code in `txn_allocate_metadata_entry()` is just getting the right metadata entry and zeroing it before handing it back to the caller. 
-
+The rest of the code in `txn_allocate_metadata_entry()` is just getting the right metadata entry and zeroing it before handing it back to the caller. It is important to understand that
+the _caller_ of `txn_allocate_page()` is responsible to setup the metadata after the call, so if there are multiple pages being used, the caller should register that in the metadata that
+was returned from the `txn_allocate_page()` call.
 
 [source]
 [[txn_allocate_metadata_entry]]
@@ -352,9 +353,9 @@ will are freed. We do the check using the `txn_free_space_bitmap_metadata_range_
 ----
 include::./code/txn.alloc.c[tags=txn_free_page]
 ----
-<1> When we release a page, we zero the matching metadata entry for the page. Note that if the page was composed of multiple pages, we only zero the first entry, 
+<1> If we aren't freeing a metadata page, we check if the metadata page is the only remaining page in the MB range it owns. If that is the case, we free it as well.
+<2> When we release a page, we zero the matching metadata entry for the page. Note that if the page was composed of multiple pages, we only zero the first entry, 
     the others entries are not relevant.
-<2> I we aren't freeing a metadata page, we check if the metadata page is the only remaining page in the MB range it owns. If that is the case, we free it as well.
 
 The `txn_free_space_bitmap_metadata_range_is_free()` looks strange, so let's explain how it works. We are using a bitmap composed and rely on `uint64_t` values. That means
 that a metadata range (1 MB) is covered by two `uint64_t` values. If the entire range is free, except for the metadata page, we'll have the following bits pattern:

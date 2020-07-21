@@ -1,7 +1,7 @@
 #include <gavran/internal.h>
 
 // tag::bitmap_is_acceptable_small_match[]
-implementation_detail bool bitmap_is_acceptable_small_match(
+static bool bitmap_is_acceptable_small_match(
     bitmap_search_state_t *s) {
   if (!(s->output.found_position & ~PAGES_IN_METADATA_MASK)) {
     // cannot use, falls on metadata page, try to shift it
