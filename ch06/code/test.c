@@ -8,7 +8,7 @@
 #include <gavran/db.h>
 #include <gavran/test.h>
 
-// tag::tests[]
+// tag::tests06[]
 describe(metadata_tests) {
   before_each() {
     errors_clear();
@@ -128,4 +128,4 @@ describe(metadata_tests) {
     assert(p3.page_num == 116);
   }
 }
-// end::tests[]
+// end::tests06[]

@@ -411,6 +411,25 @@ Look at the first row of cells in <<bitmap-colored>>, if we want to allocate a p
 allocate two pages? In the middle of the image, there is another marked position (yellow), I want to get 4 pages near that location. And we want to get
 7 pages near the last marked position (green). 
 
+The data in <<bitmap-colored>> has multiple words to go through, let's see how the code is handling it. We use the `bitmap_search_word()` to search a single word and 
+`bitmap_search_once()` to search the entire bitmap. The code for that function in in <<bitmap_search_once>>.
+
+[[bitmap-colored]]
+.Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
+image::bitmap-colored.png[]
+
+Because most of the work is done by `bitmap_search_word()`, the code for `bitmap_search_once()` mostly deals with orchestrating it. We try to find a range in the current word, 
+and if we can, we mask it so the next call will _not_ find it. That is the core of how we iterate. If we run out of the current word, we'll switch to the next one and 
+continue the search. Note that even if we found an appropriately sized range, if it is in the end of the current word, we'll scan the next word at least
+to find what the _size_ of that range is. 
+
+We could use `bitmap_search_once()` to manage the task of allocating the next range, but that wouldn't be ideal. Finding the first free range that fit our needs
+is an allocations strategy that is called First Fit. I looked it up and here are 
+https://dl.acm.org/doi/pdf/10.1145/359436.359453[couple of papers from _1974_] that discusses 
+https://www.researchgate.net/publication/220459885_Worst_Case_Fragmentation_of_First_Fit_and_Best_Fit_Storage_Allocation_Strategies[its usefulness].
+They are mostly here as a historical interest, they are testing this out on a PDP-11.
+
+
 [IMPORTANT]
 .Why are we spending so much time with the allocator?
 ====
@@ -423,45 +442,12 @@ I'm writing this in Jun of 2020, which means that five to eight years after the 
 get _right_.
 ====
 
-[[bitmap-colored]]
-.Visualization of the bitmap 0x80520A27102E21, 0xE0000E00020, 0x1A40027F025802C8, 0xEE6ACAE56C6C3DCC
-image::bitmap-colored.png[]
-
-
-The data in <<bitmap-colored>> has multiple words to go through, let's see how the code is handling it. We use the `bitmap_search_word()` to search a single word and 
-`bitmap_search_once()` to search the entire bitmap. The code for that function in in <<bitmap_search_once>>.
-
-[TIP]
-.Designing for the underlying system
-====
-ne of the core design principles that I keep in mind while build Gavran is that I want to work _with_ the systems I'm using. 
-That means understanding how hardware, processors, memory and operating systems are built and what patterns they seek
-to optimize. A lot of thought has gone into how to structure things so you don't _need_ to write a lot
-of code to get the desired functionality.
-
-I already talked about this behavior with regards to memory mapped I/O and leaning on the operating system's page cache as a good example of this
-practice. Another example is the use of pages to work with the data, that is how the operating system, the RAM and the disk work and matching that
-behavior means that we don't have to deal with issues such as torn writes, read-modify-write costs, etc.
-====
-
-
 [source]
 [[bitmap_search_once]]
 .`bitmap.c` - Finding a range of free bits in the entire bitmap
 ----
 include::./code/bitmap.c[tags=bitmap_search_once]
 ----
-
-Because most of the work is done by `bitmap_search_word()`, the code for `bitmap_search_once()` mostly deals with orchestrating it. We try to find a range in the current word, 
-and if we can, we mask it so the next call will _not_ find it. That is the core of how we iterate. If we run out of the current word, we'll switch to the next one and 
-continue the search. Note that even if we found an appropriately sized range, if it is in the end of the current word, we'll scan the next word at least
-to find what the _size_ of that range is. 
-
-We could use `bitmap_search_once()` to manage the task of allocating the next range, but that wouldn't be ideal. Finding the first free range that fit our needs
-is an allocations strategy that is called First Fit. I looked it up and here are 
-https://dl.acm.org/doi/pdf/10.1145/359436.359453[couple of papers from _1974_] that discusses 
-https://www.researchgate.net/publication/220459885_Worst_Case_Fragmentation_of_First_Fit_and_Best_Fit_Storage_Allocation_Strategies[its usefulness].
-They are mostly here as a historical interest, they are testing this out on a PDP-11.
 
 The core issue with first fit is that it can cause internal fragmentation. In other words, we allocate pages in such a pattern that even though we have the
 the right number of pages free, we don't have enough _consecutive_ pages to answer the allocation. We can do better. The key to that is shown in <<bitmap_search_smallest_nearby>>.

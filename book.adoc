@@ -7,12 +7,11 @@
 :source-highlighter: coderay
 :source-language: c
 :xrefstyle: short
-
+////
 = Practical Storage Engine Design & Implementation
 Oren Eini <oren@ravendb.net>
 June 2020
 
-////
 [dedication]
 
 = Dedication
@@ -52,8 +51,6 @@ include::./ch04/ch04.adoc[]
 :!listing-number:
 include::./ch05/ch05.adoc[]
 
-////
-
 :figure-caption: Figure 6,
 :listing-caption: Listing 6,
 :!figure-number:
@@ -61,9 +58,13 @@ include::./ch05/ch05.adoc[]
 include::./ch06/ch06.adoc[]
 ////
 
-:listing-caption: Listing 7, 
+:figure-caption: Figure 7,
+:listing-caption: Listing 7,
+:!figure-number:
+:!listing-number: 
 include::./ch07/ch07.adoc[]
 
+////
 :listing-caption: Listing 8, 
 include::./ch08/ch08.adoc[]
 

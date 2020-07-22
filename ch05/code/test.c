@@ -34,7 +34,7 @@ static result_t allocate_page_and_use_it(const char* path) {
   ensure(txn_close(&tx));
 
   // <6>
-  ensure(txn_create(&db, 0, &tx));
+  ensure(txn_create(&db, TX_READ, &tx));
   ensure(txn_raw_get_page(&tx, &page));
 
   ensure(strcmp("Hello Gavran", page.address) == 0);

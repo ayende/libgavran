@@ -244,9 +244,9 @@ that is marked as free, for example. That blocks a certain set of errors from be
 include::./code/txn.c[tags=txn_get_number_of_pages]
 ----
 
-In <<txn_get_number_of_pages>> right now, all pages except for `page_flags_free_space_bitmap` use a single page, but the free space bitmap may be composed of multiple pages. We now can
-change the `txn_allocate_page()` and `txn_free_page()` to use `txn_get_page()` and `txn_modify_page()` instead of the raw API. That means that we can now support free space bitmaps that
-are larger than a single page. Remember that the metadata for the free space bitmap is being setup as part of `db_init_free_space_bitmap()`. 
+In <<txn_get_number_of_pages>> right now, all pages except for `page_flags_free_space_bitmap` and `page_flags_overflow` use a single page, but the free space bitmap or overflow pages may
+be composed of multiple pages. We now can change the `txn_allocate_page()` and `txn_free_page()` to use `txn_get_page()` and `txn_modify_page()` instead of the raw API. That means that we 
+can now support free space bitmaps that are larger than a single page. Remember that the metadata for the free space bitmap is being setup as part of `db_init_free_space_bitmap()`. 
 
 [CAUTION]
 .Modifying the free space bitmap at scale
@@ -373,15 +373,19 @@ include::./code/txn.alloc.c[tags=txn_free_space_bitmap_metadata_range_is_free]
 There is still a lurking issue in our system. We are able to allocate disk space that we have reserved from the system, but how are we going to be able to handle
 running out of space entirely? How can we grow our file? These are great questions, but we won't answer them immediately. I'm itching to get to grips with the 
 ACID properties of the transaction, so we'll get to that next.
-////
+
 === Unit tests
 
 There have been a _lot_ of changes to the internals of the code and there is a lot more functionality to test. I have included scenarios that will test
 our each of the options we have discussed in this chapter.
 
-[source,python]
-.Listing 6.9 - Unit testing multi page allocations
+One thing to note about the tests, when we call `txn_free_page()` now, we _must_ do so on a page that was _properly_ setup. In other words, just calling `txn_allocate_page()`
+isn't enough. One of hte values that you'll get from the function is a pointer to the metadata for the page. You must set at least the `page_flags` to something meaningful
+and if you are using `page_flags_overflow`, as we do in the tests, you must also setup the `overflow` struct on the `page_metadata_t`.
+
+[source]
+[[tests06]]
+.`test.c` - Testing the allocation API
 ----
-include::../pyapi/tests06.py[]
+include::./code/test.c[tags=tests06]
 ----
-////

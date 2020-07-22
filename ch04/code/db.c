@@ -70,6 +70,7 @@ result_t db_close(db_t *db) {
     errors_push(EIO, msg("Unable to properly close the database"));
   }
 
+  free(db->state->default_read_tx);
   free(db->state);
   db->state = 0;
 

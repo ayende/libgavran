@@ -5,12 +5,14 @@ in the commit. That isn't nearly enough. We want to allow concurrent transaction
 
 Gavran is going to implement a model called single writer / concurrent readers. In this model, we split the transactions into two modes. We have read transactions
 and a write transaction. At any given point in time, we may have any number of read transactions but only a single write transaction. Supporting multiple write 
-transactions is usually something that you need to do if you have a chatty network interface, and as embedded database, that is not required for Gavran.
+transactions is usually something that you need to do if you have a chatty network interface, and as embedded database, that is not required for Gavran. We already
+have the API for that with `TX_WRITE` and `TX_READ` flags being used to indicate what type of transaction we have. We aren't _using_ them at the moment, but the API
+is already there.
 
 .Single write transaction vs. Concurrent writers
 ****
-Most embedded databases implement some for of single write transactions. LMDB, Sqlite and Voron all share this design decision. Berkley DB has a similar 
-limitation, but with Berkley DB, you can only have a single write transaction, with no concurrent read transactions.
+Most embedded databases implement some form of single write transactions. LMDB, Sqlite, LevelDB, RocksDB and Voron all share this design decision. Berkley DB has a similar 
+limitation, but with Berkley DB, you can only have a single write transaction, with no concurrent read transactions. 
 
 Databases such as MySQL or PostgreSQL has the notion of concurrent write transactions, but they use a very different model. In a network database with 
 transactions that involve multiple network round trips, the latency is too high to allow a single write transaction. You have to have concurrent ones and
@@ -21,12 +23,13 @@ https://dl.acm.org/doi/full/10.1145/3226595.3226635[OLTP Through the Looking Gla
 to locking and latching to manage concurrent writers. A single threaded solution can actually be faster.
 ****
 
-With concurrent readers, we need to decide on the concurrency strategy for Gavran. Take a look at Figure 13, where we show a timeline of a few transactions.
+With concurrent readers, we need to decide on the concurrency strategy for Gavran. Take a look at <<tx-timeline>>, where we show a timeline of a few transactions.
 
+[[tx-timeline]]
 .A timeline of concurrent read transactions and a write transaction
-image::{img-src}/fig13.png[]
+image::tx-timeline.png[]
 
-Read transaction no. 1 was started after the write transaction and ended after the write transaction was committed. Read transaction no. 2 was created
+Read transaction no. 1 in <<tx-timeline>> was started after the write transaction and ended after the write transaction was committed. Read transaction no. 2 was created
 before the write transaction and closed afterward. Only read transaction no. 3 was created after the write transaction commit. Only the third transaction
 is going to be able to see the modifications made by the write transaction. The other two transactions are frozen at the time of their creation, seeing
 unchanging data of the last transaction that has committed when they were opened.
@@ -53,8 +56,19 @@ we write them to the file, which is shared. What would happened if we _won't_ wr
 
 === Implementing isolation between transactions
 
-I'm afraid that I had to touch quite a few locations for this to work. I'm going to show them in pieces, so we can paint the whole picture. We'll start
-with Listing 7.1.
+I'm afraid that I had to touch quite a few locations for this to work. I'm going to show them in pieces, so we can paint the whole picture. The idea behind
+transaction in Gavran is that the act that expose the data modified by the transaction to other transactions is writing the data to the data file.
+In that case, a transaction that reads a page from the data file may observe a value from another transaction.
+
+The solution to this is simple, let's avoid writing the data to the data file entirely. Instead, when we commit a transaction, we'll register the modified 
+pages to be written at a later date. A new transaction will be able to access the hash table of modified pages. When the new transaction needs to read a 
+page, it will get it from the previous transactions hash table, thus getting the latest version.
+Existing transactions, on the other hand, will not have access to the updated hash table and will continue reading the pages directly from the data file. 
+
+When all the transactions that were started before the write transaction commit are done, we know that all the running transactions are going to look at 
+the _modified_ pages in memory, thus no one is observing the data file. We are going to take advantage of this and write the data to the data file at 
+that point.
+We can then clear the hash table from the in memory copy and have new transactions go back to reading directly from the data file.
 
 .Thread safety, what's that?
 ****
@@ -65,66 +79,83 @@ We'll have complete thread safety, mind you, but I want to add that once all the
 transactions in Gavran has been carefully selected to enable a mostly seamless transition to multi threaded usage.
 ****
 
+We are basically going to play a shell game with the data. Now its here, not it's not.
+We'll start by looking at the changes in `txn_commit()`, which you can see in <<txn_commit_07>>.
+
 [source]
-.Listing 7.1 - txn.c - Delay writing the modified pages to the data file.
-```
+[[txn_commit_07]]
+.`txn.c` - Mark the transaction as committed and register that on the database
+----
 include::./code/txn.c[tags=txn_commit]
+----
 
+The `txn_commit()` is not doing much of anything now, it seems. We are marking the transaction as committed, setting the `usages` count to `1` and register
+the add the transaction to the linked list on `db\->last_write_tx`. We ignored that field and the `next_tx` field on the `txn_state_t` structure so far, but
+now it is coming together. We can use the `last_write_tx` to track all the write transactions in the database, we'll see why that is useful shortly. Since
+the `txn_commit()` isn't really doing much, let's look at the next stage of the process, what is different in `txn_close()`? You can see that in <txn_close_07>>.
+
+Most importantly, `txn_commit()` no longer writes to the data file. We'll need to see how the next transaction is able to read the information from the older
+transaction, now that it can't get the data from the file.
+
+[source]
+[[txn_close_07]]
+.Clos
+.`txn.c` - If the transaction wasn't committed, free it immediately, otherwise, register it for release later
+----
 include::./code/txn.c[tags=txn_close]
-```
-<1> Setting the transaction flags as committed and the usages count as well as registering the current transaction state in the list of 
-committed transactions.
-<2> Setting the stage for memory management of transactions, discussed in depth later in this chapter.
-<3> If the transaction was _not_ committed, we can `free` the memory associated with it immediately and return, no work was actually done.
-<4> Register the transaction to be `free` at a later date, if needed. 
-<5> Reduce the usage count and call `txn_gc_tx` , we'll discuss these later in this chapter.
+----
 
-The key change in `txn_commit` is that we are no longer writing to the file and `txn_close` is no longer freeing the modified pages.
+The new version of `txn_close()` doesn't actually close the transaction. To be rather more exact, if we haven't committed the transaction, we will release it
+immediately. But otherwise, the `txn_close()` will put the transaction in the `transactions_to_free` field on the database if there isn't any other transaction
+here and call `txn_gc()` if there are no more usages of this transaction.
+
+.Transaction reuse and reference counting
+****
+The idea with the transactional system in Gavran is that we have one write transaction that on commit become the head for all the future read transactions and
+the next write transaction. Once a transaction has been committed, it is the basis for all future transactions and no one can open a transaction that belongs
+to an older transaction. 
+
+That is why we can set `transaction_to_free` if it isn't already set. We _know_ that if it is set, it belongs to an _older_ transaction. The only exception to
+this role is the `default_read_tx`, which we'll discuss in detail later.
+****
+
+Since `txn_close()` isn't going to free the `modified_pages` in the transaction, they are going to hang around in memory until we do something with them. That 
+is the responsibility of `txn_create()`, which you can see in <<txn_create_07>>.
+
 Let's us see why we keep the pages around for committed transactions as well as the changes for `txn_create` in Listing 7.2.
 
 [source]
-.Listing 7.2 - db.h, impl.h & txn.c - Modifications to the transaction creation
-```
-// from db.h
-include::./code/db.h[tags=tx_flags]
-
-// from impl.h
-include::./code/impl.h[tags=transaction_state]
-
-// from txn.c
+[[txn_create_07]]
+.`txn.c` - Modifications to the transaction creation
+----
 include::./code/txn.c[tags=txn_create]
-```
-<1> We now have flags that we must pass to the `txn_create` function, checking if the transaction is a read or write transaction. There is also a flag to
-    mark that a transaction has been committed. 
-<2> New fields in the `txn_state_t` structure to support multiple readers and a single writer.
-<3> If we have a read transaction, we use the state from the `last_write_tx` and increment its usage count.
-<4> Validating the flags parameter and ensuring that there is only ever a single write transaction.
-<5> New code here, setting the `prev_tx` from the `last_write_tx` for write transactions, incrementing the transaction id and marking the currently
+----
+<1> If we have a read transaction, we use the state from the `last_write_tx` and increment its usage count. No allocation is required.
+<2> Validating the flags parameter and ensuring that there is only ever a single write transaction.
+<3> New code here, setting the `prev_tx` from the `last_write_tx` for write transactions, incrementing the transaction id and marking the currently
 active write transaction.
 
-Things start to get interesting now. Read transactions now require _no_ allocation or work to start. And write transaction set themselves up to be the next 
-state for all future read transactions. What is actually going on in the code for implementing transactions? Let's check Listing 7.3.
+Things start to get interesting now. Read transactions now require _no_ allocation or work to start. And the write transaction will set itself up to be the next 
+state for all future read transactions. What is actually going on in the code for implementing transactions? We now need to wire this behavior into the transaction
+itself. You can see how this is done in <<txn_raw_get_page_07>>.
 
 [source]
-.Listing 7.3 - txn.c - Get a page, from the current transaction or a previous transaction or the file directly.
+[[txn_raw_get_page_07]]
+.`txn.c` - Get a page, from the current transaction or a previous transaction or the file directly.
 ```
-include::./code/txn.c[tags=txn_get_page]
+include::./code/txn.c[tags=txn_raw_get_page]
 ```
-<1> Here we iterate over the past transactions and try to find a modified copy of the page and only if it doesn't exist do we go to the file.
+<1> Iterating over the past transactions and try to find a modified copy of the page and only if it doesn't exist do we go to the file.
 
-Listing 7.3 shows the beauty of this approach, when we need to find a page, we start searching in the modified page map, just like before. But we are 
+<<txn_raw_get_page_07>> shows the beauty of this approach, when we need to find a page, we start searching in the modified page map, just like before. But we are 
 going to look in our own map as well as the maps of _past transactions_. The `prev_tx` creates a linked list of transactions (and their modified pages) that we
 can use to find the most recent version of a page. We'll only check the data file for the page if there is no transaction in the list that has this page. 
 
-You can see how that works in Figure 14, we have 3 transactions (4,5 and 6), each of them modified a common page as well as a page just for that particular
-transaction.
-
-.Transactions look first at their own modify pages, then at past transactions to find the most recent version of a page.
-image::{img-src}/fig14.png[]
-
-Let's see what each transaction will see when it ask for a particular page.
-
 :hash: #
+
+You can see how that works in <<concurrent-transactions>>, we have 3 transactions ({hash}4, {hash}5 and {hash}6), each of them modified a common page as well as a page just for that particular
+transaction.
+Let's see what each transaction will see when it ask for a particular page.
 
 |===
 |                     | Page 1    | Page 2    | Page 3    | Page 4
@@ -135,27 +166,35 @@ Let's see what each transaction will see when it ask for a particular page.
 
 Looking at Transaction {hash}6, we can see that when it accesses Page 1 from its own copy, but Page 2 will come from the copy created by Transaction {hash}4 and
 Page 3 and Page 4 will come from the copies created by Transaction {hash}5. This allow each transaction to have its own view of the world and protect us
-from data being modified while we read the data. Listing 7.4 show how implement `txn_modify_page` with the new behavior.
+from data being modified while we read the data. Let's see the changes that we need to make to `txn_raw_modify_page()` to support the new behavior, the new
+behavior is shown on <<txn_raw_modify_page_07>>.
 
-The idea is that a write transaction may modify pages (its own copies of them, at least). When we commit the transaction, these modified copy are now 
+[[concurrent-transactions]]
+.Transactions look first at their own modify pages, then at past transactions to find the most recent version of a page.
+image::concurrent-transactions.png[]
+
+
+Because `txn_raw_modify_page()` is implemented using `txn_raw_get_page()`, there isn't actually anything that we need to do. We are just going to enforce
+the fact that only a write transaction can modify a page. In fact, that is the _only_ check we need for this validation. Without modifying pages, there is nothing
+that you can do to change Gavran's data, after all.
+
+The idea behind all of this work is that we have two stages in the lifetime of a write transaction. The active phase, in which you can modify pages, change things, etc.
+Then there is the commit, which moves the transaction from to an immutable phase. All the modified copies of the pages we changed are now 
 considered immutable, a change to these pages in a future transaction will need its own copy. 
 
 [source]
-.Listing 7.4 - txn.c - Modify a page whose source may be the data file or a previous transaction
+[[txn_raw_modify_page_07]]
+.`txn.c` - Modifications to `txn_raw_modify_page()` to support the new behavior
 ```
-include::./code/txn.c[tags=txn_modify_page]
-```
-<1> We validate that this is a write transaction, a read transaction cannot modify the database.
-<2> We first check if the page was modified already in this transaction
-<3> We scan through the previous transactions to see if we have a copy of the page.
-<4> If we can't find the page, we'll read it from the file.
-<5> We create a copy of the page and register it in the transaction.
+include::./code/txn.c[tags=txn_raw_modify_page]
 
-The `txn_modify_page` function now checks older transactions for updated copies of the page before reading it from disk. It is important to note that if the
-page was found in an older transaction, we'll create a _copy_ of the page. That is because other transactions may be looking at it, so we need to maintain
+// no further changes for the rest of the function
+```
+
+The `txn_modify_page` function now checks older transactions for updated copies of the page before reading it from disk by using the `txn_raw_get_page()`. It is important to note that if the
+page was found in an older transaction, we'll create a _copy_ of the page. That is because other transactions may be looking at the same copy of the page, so we need to maintain
 the immutability of the data from already committed transactions. In effect, we do another Copy on Write on top of the older copy. 
 This approach allows us to maintain multiple _levels_ of isolation in our transactions.
-I've also simplified `txn_get_metadata` and `txn_modify_metadata`, to express them based on our existing API rather than repeat ourselves.
 
 .MVCC - Multi version concurrency control
 ****
@@ -165,43 +204,39 @@ https://ayende.com/blog/175073/voron-internals-mvcc-all-the-moving-parts[I have 
 https://medium.com/@kousiknath/how-mvcc-databases-work-internally-84a27a380283[this post discusses PostgreSQL, LMDB and CouchDB's implementations].
 ****
 
-What about when we have _no_ previous transactions? This is handled at the database startup, as shown in Listing 7.5.
+What about when we have _no_ previous transactions? This is handled at the database startup, by `db_initialize_default_read_tx()`, which is called from `db_create()`.
+You can see how this looks like in <<db_initialize_default_read_tx>>.
 
 [source]
-.Listing 7.5 - impl.h & db.c - Setting up `default_read_tx` and `last_write_tx` as part of the database initialization.
+[[db_initialize_default_read_tx]]
+.`db.c` - Setting up `default_read_tx` and `last_write_tx` as part of the database initialization.
 ```
-// from impl.h
-include::./code/impl.h[tags=database_state]
-
-// from db.c - inside db_create
-include::./code/db.c[tags=default_read_tx]
+include::./code/db.c[tags=db_initialize_default_read_tx]
 ```
-<1> Added new fields to track the most recent write transaction.
-<2> Added the size of a `txn_state_t` struct to the allocated size for `db_state_t` buffer.
-<3> Setup the default read transaction which will be used as the base for `txn_get_page` and `txn_modify_page`.
 
 The `default_read_tx` is an empty transaction, it has no modified pages and it is always the oldest transaction we have. We use that to 
 simplify the logic and know when we need to go and read from the file directly. We need to actually create such a transaction so we will
 not need to do any allocations when a user opens a read transaction.
 
 And that is pretty much it. We have MVCC and isolation between transactions. We are well on our way to having _real_ transactions. Hurray!
-Listing 7.6 shows working code using this feature.
+<<mvcc>> shows working code using this feature.
 
-[source]
-.Listing 7.6 - main.c - Using MVCC features to check a page that was modified in a write transaction created after the read transaction.
-```
-include::./code/main.c[tags=mvcc]
-```
-<1> Creating a write transaction
-<2> Creating a read transaction (before committing the write transaction), none of the write transaction changes will be visible to the 
-    read transaction.
-<3> Committing the write transaction, which does not change what the read transaction can see.
-<4> There is nothing to output here, this transaction cannot see changes that happened after it was started.
-
-As you can see, `rtx` was created after `wtx`, but it isn't aware of anything that happened inside `wtx`, even after the commit of `wtx`. 
+As you can see in <<mvcc>>, `rtx` was created after `wtx`, but it isn't aware of anything that happened inside `wtx`, even after the commit of `wtx`. 
 If we want to see the changes in `wtx`, we need to create a _new_ transaction, one created _after_ the commit of `wtx`. 
 
 Congratulation, we now have *snapshot isolation* working.
+
+[source]
+[[mvcc]]
+.`test.c` - Using MVCC features to check a page that was modified in a write transaction created after the read transaction.
+----
+include::./code/test.c[tags=mvcc]
+----
+<1> Creating a write transaction and modifying a page.
+<2> Creating a read transaction (*before* committing the write transaction), none of the write transaction changes will be visible to the 
+    read transaction.
+<3> Committing the write transaction, which does not change what the read transaction can see.
+<4> There is nothing to see here, this transaction cannot see changes that happened after it was started.
 
 === Writing to disk again
 
@@ -213,18 +248,19 @@ are ongoing changes. It is also _highly_ problematic, because we haven't address
 
 As it currently stands, we have a transient dataset as well as a memory leak. And as we have more and more transactions, the need to iterate
 over the past transactions is going to make our code slower and slower. We need some way to clean this up, so we need to decide when we can 
-write to the disk. Let's take a look at Figure 15 and see what we can do about this issue.
+write to the disk. Let's take a look at <<read-and-write-txs>> and see what we can do about this issue.
 
+[[read-and-write-txs]]
 .At the top, committed write transactions, at the bottom, read transactions that refers to them
-image::{img-src}/fig15.png[]
+image::read-and-write-txs.png[]
 
-What we can see in Figure 15 is that _all_ the read transactions belong to transaction 4 or higher. There are no read transactions associated
-with transaction 3. What does this mean? It means that we can be sure that no transaction is going to to try to read the data from the file
-for the pages modified by transaction 3. 
+What we can see in <<read-and-write-txs>> is that _all_ the read transactions belong to Transaction 4 or higher. There are no read transactions associated
+with Transaction 3. What does this mean? It means that we can be sure that no transaction is going to to try to read the data from the file
+for the pages modified by Transaction 3. 
 
 .How can we be sure of the isolation?
 ****
-In Figure 15, there are no active transactions that use Transaction 3 as a base. We take the opportunity to write any changes that happened
+In <<read-and-write-txs>>, there are no active transactions that use Transaction 3 as a base. We take the opportunity to write any changes that happened
 in Transaction 3 or before that to disk, but is it safe to do so?
 
 Let's assume that Transaction 3 modified Page 7. Because each new transaction will search earlier transactions
@@ -233,10 +269,28 @@ transaction that attempts to read from Page 7 will _have_ to get either the copy
 
 Regardless of what option is actually in effect, we can be sure that for _the pages modified by Transaction 3 (and earlier transactions)_
 no active transaction is going to look at the pages in the file. That means, in turn, that we have a chance to write those pages to disk
-without having to do any additional actions.
+without having to do any additional work.
 ****
 
-At the point in time shown in Figure 15, it would be safe to write all the pages from transaction 3 or lower to the data file. It wouldn't 
+[source]
+[[txn_gc]]
+.`txn.c` - The `txn_gc()` will write to disk pages from transactions that are no longer referenced and free orphaned transactions.
+```
+include::./code/txn.c[tags=txn_gc]
+```
+<1> A transaction can be freed once all the _existing_ transactions in the system at the time of it was closed has been also closed.
+    We manage that by allow to free the transaction once the most up to date transaction is no longer active.
+<2> The `default_read_tx` is always the oldest transaction, we start scanning unused transaction from it. If there are any transactions
+    which are based on the `default_read_tx`, it means that they are reading directly from the file, and we have to wait for them to be 
+    closed as well.
+<3> An unused transaction is one whose `usages` is zeroed. We iterate through the transactions list in their creation order to find the 
+    newest transaction that has zero `usages` _and_ all its predecessors also have zero `usages`.
+<4> We set the oldest active transaction on the database and check if this is the last transaction in the system. If this is the last 
+    transaction and no one is looking, we can free it immediately instead of waiting for the next transaction.
+<5> Now that we know what is the latest unused transaction, we can clean it up. 
+
+
+At the point in time shown in <<read-and-write-txs>>, it would be safe to write all the pages from transaction 3 or lower to the data file. It wouldn't 
 be possible for us to _release_ the transaction yet, however. The other transactions may still refer to the pages that it holds. We would
 need to wait until all of _those_ transactions are closed before we can free the memory held by those transactions.
 
@@ -251,29 +305,11 @@ You already saw that we have `usages` field on a `txn_state_t` now. This is used
 using this transaction state as their base. There is also the `next_tx` field, which is used to go from each write transaction
 to its successor. We use these in order to tell what is the current state of the system at large. 
 
-Let's look at the code in Listing 7.7 and then we'll discuss how it works in depth.
-
-[source]
-.Listing 7.7 - txn.c - The `txn_gc_tx` will write to disk pages from transactions that are no longer referenced and free orphaned transactions.
-```
-include::./code/txn.c[tags=txn_gc_tx]
-```
-<1> A transaction can be freed once all the _existing_ transactions in the system at the time of its closure has been closed. 
-<2> The `default_read_tx` is always the oldest transaction, we start scanning unused transaction from it. If there are any transactions
-which are based on the `default_read_tx`, it means that they are reading directly from the file, and we have to wait for them to be 
-closed as well.
-<3> An unused transaction is one whose `usages` is zeroed. We iterate through the transactions list in their creation order to find the 
-    newest transaction that has zero `usages` _and_ all its predecessors also have zero `usages`.
-<4> We create a single hash table with all the unique pages from all the transactions that has no usages. A page that appears in multiple
-    transactions will only have only it latest version in the hash table. 
-<5> Actually write to disk the modified pages from all past unobserved transactions. Doing it in this manner means that there is no active 
-    transaction that is going to look at those pages on disk, so it is safe to do so while other transactions are running.
-<6> Schedule the actual `free`-ing of the transaction.
-<7> Try to cleanup completed transactions that we couldn't clear before.
+It is the job of `txn_gc()` to run through the active an inactive transactions and decide what we can write to the disk and what we can 
+free from memory. Let's look at the code in <<txn_gc>> and then we'll discuss how it works in depth.
 
 That is a _lot_ of behavior to go through, but I managed to break it down nicely to separate functions, which makes things easier. 
-The `txn_gc_tx` starts by scanning from the oldest transaction (always `default_read_tx`) and move forward by following the `next_tx` links.
-
+The `txn_gc()` starts by scanning from the oldest transaction (always `default_read_tx`) and move forward by following the `next_tx` links.
 The aim of this search is to find the _newest_ transaction that has zero `usages`. Such a transaction is ready to be sent to disk. There are no other
 viable transactions that can look at the pages that were modified by these transactions. We can safely send them to disk, then.
 
@@ -281,76 +317,61 @@ It is _very_ common for multiple transactions to modify the same set of pages. I
 in many transactions. That means that the pages that were modified by consecutive transactions will have multiple copies in memory. That is 
 what MVCC is all about, after all. We don't want to write the data to disk in transaction order, we'll need to overwrite some pages many times
 so the first thing we do is scan through the transactions list and find all the unique pages, favoring the latest version of each of them.
-That is the responsibility of `txn_merge_unique_pages`, shown in Listing 7.8.
+That is the responsibility of `txn_merge_unique_pages()`, shown in <<txn_merge_unique_pages>>.
 
-[source]
-.Listing 7.8 - txn.c - The `txn_merge_unique_pages` create a hash table of all modified pages, with the latest version of each page.
-```
-include::./code/txn.c[tags=txn_merge_unique_pages]
-```
+The `txn_merge_unique_pages()` function in <<txn_merge_unique_pages>> starts from the newest transaction that is known to have zero `usages` and goes backward,
+trying to find pages modified by the transactions that weren't modified by prior writes. That helps us avoid overwriting popular pages, such as metadata pages, over and over again. 
 
-The `txn_merge_unique_pages` function in Listing 7.8 starts from the newest transaction that is known to have zero `usages` and goes backward,
-trying to find pages modified by the transactions that weren't modified by prior writes. That helps us avoid overwriting popular pages,
-such as metadata pages, over and over again. 
-
-Note that we are actually re-using the hash table that is attached to the `txn_state_t` of the newest eligible transaction. That simplify
+Note that we are actually re-using the hash table that is attached to the `txn_state_t` of the last unused transaction. That simplify
 the amount of code that needs to be written. It is safe to change this `txn_state_t`, since we have just proven that no one else is looking 
-at it. 
-
-Next we have `txn_write_state_to_disk`, shown on Listing 7.9.
+at it. Next we have `txn_write_state_to_disk()`, shown on <<txn_write_state_to_disk>>
 
 [source]
-.Listing 7.9 - txn.c - The `txn_write_state_to_disk` writes the modified pages to the data file
+[[txn_merge_unique_pages]]
+.`txn.c` - The `txn_merge_unique_pages()` updates the last unused transaction with the latest version of the pages in all unused transactions
+----
+include::./code/txn.c[tags=txn_merge_unique_pages]
+----
+
+There isn't much to say about the code in <<txn_write_state_to_disk>>. It should be familiar to you, it used to reside in `txn_commit()` and did the same work
+there. The only thing to notice here is that we are going to be running this on a `txn_state_t` that contains pages from multiple transactions.
+The input of `txn_write_state_to_disk()` is the result computed by `txn_merge_unique_pages()`.
+
+[source]
+[[txn_write_state_to_disk]]
+.`txn.c` - The `txn_write_state_to_disk()` writes the modified pages to the data file
 ```
 include::./code/txn.c[tags=txn_write_state_to_disk]
 ```
-
-There isn't much to say about the code in Listing 7.9. It should be familiar to you, it used to reside in `txn_commit` and did the same work
-there. The only thing to notice here is that we are going to be running this on a `txn_state_t` that contains pages from multiple transactions.
-The input of `txn_write_state_to_disk` is the result computed by `txn_merge_unique_pages`.
-
-Thus far, the implementation has been fairly straightforward. There is one caveat that we have to handle, though. How (and when) are we going to `free` 
+Thus far, the implementation has been fairly straightforward. There is one caveat that we have to handle, though. How (and when) are we going to `free()` 
 the memory for those transactions? 
 
-=== The transactions' memory management concerns
+=== Memory management concerns
 
-Take a look at Figure 16, which shows transactions 4 - 8. Of those, transactions 4 and 5 have no usages, transactions 6 and 7 have some usages
+Take a look at <<tx-graph>>, which shows transactions 4 - 8. Of those, transactions 4 and 5 have no usages, transactions 6 and 7 have some usages
 and transaction 8 is the current write transaction. You can also see the references in the transaction list. 
 Even though we have `prev_tx` and `next_tx`, I was careful not to call it a doubly linked list, because it isn't, really. 
 
-There are actually two _separate_ lists in play here. Sometimes they are the same, but sometimes, like in Figure 16, they are not.
-
-.The structure of references between transactions which allows us to write them to disk and `free` them from memory.
-image::{img-src}/fig16.png[]
+There are actually two _separate_ lists in play here. Sometimes they are the same, but sometimes, like in <<tx-graph>>, they are not.
 
 The `default_read_tx`, which is using the `next_tx` to hold a list of transactions in creation order. This is used to find the newest 
 transaction that has no usages and to decide what pages we can write to the disk. Once a transaction has been written to the disk, 
 we register that in the `transactions_to_free` field and we'll check when we can actually `free` those transactions.
 
-On Figure 16, you can see the path from `default_read_tx` to `Transaction {hash}4` and onward using the `next_tx` links. There is also
+On <<tx-graph>>, you can see the path from `default_read_tx` to `Transaction {hash}4` and onward using the `next_tx` links. There is also
 a reference from `transactions_to_free` to `Transaction {hash}4`. However, we cannot proceed further along that list because we have the 
 `can_free_after_tx_id` set to 6, and that transaction is still active.
 
+[[tx-graph]]
+.The structure of references between transactions which allows us to write them to disk and `free` them from memory.
+image::tx-graph.png[]
+
 The other way, using the `prev_tx` is used by the transactions themselves to find the newest copy of a page. Another use for that chain
 is to follow back from an unused transaction to all the previous transactions so Gavran can gather all the modified pages in a set of 
-transactions with zero `usages`. In Figure 16, that means going from `Transaction {hash}5` back to `Transactions {hash}4` and writing 
+transactions with zero `usages`. In <<tx-graph>>, that means going from `Transaction {hash}5` back to `Transaction {hash}4` and writing 
 the pages from both transactions at once.
 
-.What about uncommitted transactions?
-****
-In Figure 16, we have an uncommitted transaction, `Transaction {hash}8`. You can see that it is connected to the previous transactions
-via `prev_tx` to `Transaction {hash}7`. That is done so `Transaction {hash}8` can get the latest version of pages modified by 
-`Transaction {hash}7` or earlier. 
-
-However, `Transaction {hash}8` has no transaction that points _to_ it. The `next_tx` field of `Transaction {hash}7` is set to null.
-Only after the commit of `Transaction {hash}8` will Gavran wire the `next_tx` and make `Transaction {hash}8` part of the transaction
-list. 
-
-That make it much easier to handle rollbacks of transactions, we can simply `free` the transaction and any pages it modified, and 
-nothing else needs to be done.
-****
-
-If we'll call `txn_gc_tx` on the state in Figure 16, we'll find that the newest transaction we can work with is `Transaction {hash}5`. 
+If we'll call `txn_gc_tx` on the state in <<tx-graph>>, we'll find that the newest transaction we can work with is `Transaction {hash}5`. 
 All other transactions still have non zero `usages`, after all. We can see that in terms of active transactions, we have 
 `Transaction {hash}6` and `Transaction {hash}5`, and `Transaction {hash}8` is a write transaction that hasn't been committed yet.
 
@@ -365,50 +386,72 @@ The code in `txn_try_reset_tx_chain` is there to handle what happens when there 
 we reset the whole system back to its initial state. Finally, in `txn_free_registered_transactions` we run over the list of 
 `transactions_to_free` and free them if we can. 
 
+.What about uncommitted transactions?
+****
+In <<tx-graph>>, we have an uncommitted transaction, `Transaction {hash}8`. You can see that it is connected to the previous transactions
+via `prev_tx` to `Transaction {hash}7`. That is done so `Transaction {hash}8` can get the latest version of pages modified by 
+`Transaction {hash}7` or earlier. 
+
+However, `Transaction {hash}8` has no transaction that points _to_ it. The `next_tx` field of `Transaction {hash}7` is set to null.
+Only after the commit of `Transaction {hash}8` will Gavran wire the `next_tx` and make `Transaction {hash}8` part of the transaction
+list. 
+
+That make it much easier to handle rollbacks of transactions, we can simply `free` the transaction and any pages it modified, and 
+nothing else needs to be done.
+****
+
 A transaction will be freed by `txn_free_registered_transactions` if the following conditions are true:
 
 * It's `usages` is zero.
 * The `oldest_active_tx` is higher than the transaction's `can_free_after_tx_id` value.
 * It is the first transaction in the list.
 
-The last one is important. Consider Figure 16 and what will happen if we'll close all the `usages` of `Transaction {hash}7`, at which 
+The last one is important. Consider <<tx-graph>> and what will happen if we'll close all the `usages` of `Transaction {hash}7`, at which 
 point the `can_free_after_tx_id` will be set to 8. `Transaction {hash}6`, however, is still in use, and by the time it is closed, it 
 will be get `can_free_after_tx_id` value of 10. 
 
 Because we process the transactions `free`-s in creation order, we'll not be able to `free` `Transaction {hash}7` until `Transaction {hash}6`
 is also eligible for `free`. That behavior removes a huge amount of complexity from the code. 
 
-With that explanation behind us, let's look at Listing 7.10, which shows the actual code to implement this behavior.
+With that explanation behind us, let's look at <<txn_free_registered_transactions>>, which shows the code that implements this behavior.
 
 [source]
-.Listing 7.10 - txn.c - Implementing (careful) freeing of transaction, only when they are no longer visible to any code. 
-```
+[[txn_free_registered_transactions]]
+.`txn.c` - Implementing (careful) freeing of transaction, only when they are no longer visible to any code. 
+----
 include::./code/txn.c[tags=txn_free_registered_transactions]
+----
 
-include::./code/txn.c[tags=txn_try_reset_tx_chain]
-```
-
-In Listing 7.10, take a close look at `txn_free_registered_transactions`. When we free a transaction, we first update the
-references for of the `transactions_to_free` and `default_read_tx` to the next item. We'll also free any transaction that we can
-free. It is possible for multiple transactions to be `free`-ed at once when we have an old transaction that is closed after newer
+In <<txn_free_registered_transactions>>, after we verified that we can free a transaction, we first update the
+references for of the `transactions_to_free` and `default_read_tx\->next_tx` to the next item. We'll also free any transaction that we can
+free. It is possible for multiple transactions to be `free()`-ed at once when we have an old transaction that is closed after newer
 transaction has already been completed.
 
-With those out of the way, we are left with the actual freeing of transactions, which is shown in Listing 7.11.
+A note about setting `default_read_tx\->next_tx`, we are doing something strange here, we are traversing the `transactions_to_free` list but
+update `default_read_tx\->next_tx`. Why are we doing this? Compared to `transaction_to_free`, we may skip ahead in `default_read_tx\->next_tx`
+but we know that this is always right to do. The value of `default_read_tx\->next_tx` after this is run is set to the latest valid transaction
+in the system, regardless of where the lists of `default_read_tx\->next_tx` and `transaction_to_free` were at the beginning of the call.
 
-[source]
-.Listing 7.11 - txn.c - Actually doing the work to free a single transaction
-```
-include::./code/txn.c[tags=free_tx]
-```
+In `txn_free_registered_transactions()` we also make sure that the rest of the state of `default_read_tx` is up to date, in particular the `global_state`.
+This doesn't mean much right now, but it will come handy down the line.
 
-The behavior around `txn_gc_tx` is complex, enough that I think that it would be a bad idea to move forward before we covered this piece of code with
-a good set of tests. This is a good time to stop then and write some units tests. We'll get to that in a second. I want to look at what we have achieved
-and what remains to be done first.
+With that out of the way, we are left with the actual freeing of transactions, which is shown in <<txn_free_single_tx_state>>.
 
-We now have pretty much figured out how to implement Atomicity and Isolation piece of ACID. We have a single write / concurrent reader system where readers use 
-_snapshot isolation_ model for consistency. Once a read transaction is opened, the world is frozen, as far as the transaction is concerned. At the same
+The behavior around `txn_gc()` is complex, enough that I think that it would be a bad idea to move forward before we covered this piece of code with
+a good set of tests. We'll get to the test writing in a second. I want to look at what we have achieved and what remains to be done first.
+
+
+We now have pretty much figured out how to implement Atomicity and Isolation piece of ACID. We have a single write / concurrent readers system where readers use 
+_snapshot isolation_ model for consistency. Once a read transaction is opened, its world is frozen, as far as the transaction is concerned. At the same
 time, we may create and commit write transactions and not have to do any coordination. There is a hurdle that we need to go through. Managing exactly when
 we can write the data to disk and at what point we can actually free the memory is not trivial.
+
+[source]
+[[txn_free_single_tx_state]]
+.`txn.c` - Actually doing the work to free a single transaction
+```
+include::./code/txn.c[tags=txn_free_single_tx_state]
+```
 
 .The downside of MVCC
 ****
@@ -416,7 +459,7 @@ Using a system with MVCC is easy. You don't need to worry about locks or content
 isolation without really having to do much work at all. However...
 
 The design we have here has a weakness that must be considered. Gavran is only able to write to the data file (and discard the Copy on Write pages) when there
-are no more read transactions that reference those pages. That means that if you have a read transaction active, it is going to block Gavran from writing
+are no more read transactions that reference those pages. That means that while you have a read transaction active, it is going to block Gavran from writing
 to the disk anything that was written after that read transaction was opened.
 
 In other words, if you have a long lived read transaction, you are going to stall the process of writing to disk. In practice, in embedded databases there
@@ -429,17 +472,21 @@ It takes both issues to cause the problem to manifest, and the combination is qu
 is also present with other databases implementing MVCC.
 ****
 
-What we _don't_ have yet is the durability story. We are doing buffered I/O, which means that it is entirely possible for a power failure to cause us to
+What we _don't_ have yet is the durability story. If we commit the transaction but have a read transaction active, nothing will be written to the disk and
+we'll end up with missing data. Even if we _wrote_ to the disk, however, we are doing buffered I/O, which means that it is entirely possible for a power failure to cause us to
 lose data or corrupt the data file. There is a good path forward from where we are now to get to durable system, which we'll explore in the next chapter.
 And now, let's get to unit testing...
 
 === Unit tests
 
-Some of the tests here are fairly involved, I'm setting up quite a scenario in order to test the various interactions of transactions opening and closing
-in various ways. They have been _incredibly_ helpful in fleshing out the right behavior for Gavran.
+Some of the tests in <<test_07>> are fairly involved, I'm setting up quite a scenario in order to test the various interactions of transactions opening and closing
+in various ways. They have been _incredibly_ helpful in fleshing out the right behavior for Gavran. I would urge you to take a closer look at the 
+`interleaved transactions` test, which show some complex interactions between multiple read and write transactions. The state shown in <<tx-graph>>
+is actually the state of the `interleaved transactions` test, midway through.
 
-[source,python]
-.Listing 7.12 - Unit testing isolation between transactions
+[source]
+[[test_07]]
+.`test.c` - Unit testing isolation between transactions
 ----
-include::../pyapi/tests07.py[]
+include::./code/test.c[tags=tests07]
 ----

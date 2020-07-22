@@ -274,11 +274,11 @@ resources. Otherwise, everything gets cleaned up. The `try_defer` calls are guar
 
 [source]
 [[db_validate_options]]
-.`db..c` - Validating the database's options and default options initialization
+.`db.c` - Validating the database's options and default options initialization
 ----
-include::./code/db..c[tags=db_validate_options]
+include::./code/db.c[tags=db_validate_options]
 
-include::./code/db..c[tags=db_initialize_default_options]
+include::./code/db.c[tags=db_initialize_default_options]
 ----
 
 In the next chapter, we are going to focus on `db_init()` and do a lot of work there, but for now, I want to focus on transactions.
@@ -315,9 +315,9 @@ pages in the transaction and be able to access them quickly.  Listing 4.7 has th
 
 [source]
 [[txn_create]]
-.`txn..c` - Creating a transaction
+.`txn.c` - Creating a transaction
 ----
-include::./code/txn..c[tags=txn_create]
+include::./code/txn.c[tags=txn_create]
 ----
 
 <<txn_create>> shows the setup of a new transaction, but it probably wouldn't make sense without looking at the most common actions that we'll have in a transaction `txn_raw_get_page()` 
@@ -328,9 +328,9 @@ need to check if this transaction has a modified copy of the page in question an
 
 [source]
 [[txn_raw_get_page]]
-.`txn..c` - Get a page in the scope of the transaction, either locally modified copy or directly from the data file.
+.`txn.c` - Get a page in the scope of the transaction, either locally modified copy or directly from the data file.
 ----
-include::./code/txn..c[tags=txn_raw_get_page]
+include::./code/txn.c[tags=txn_raw_get_page]
 ----
 
 .A note about multi threading
@@ -353,9 +353,9 @@ like, before any modifications. This will become very important when the times c
 
 [source]
 [[txn_raw_modify_page]]
-.`txn..c` - Implementing Copy on Write in the transaction for page modifications.
+.`txn.c` - Implementing Copy on Write in the transaction for page modifications.
 ----
-include::./code/txn..c[tags=txn_raw_modify_page]
+include::./code/txn.c[tags=txn_raw_modify_page]
 ----
 
 It is important to note that calling `txn_raw_get_page()`, `txn_raw_modify_page()` and then `txn_raw_get_page()` on the same page is something
@@ -531,11 +531,11 @@ without calling `txn_commit()`.
 
 [source]
 [[txn_commit]]
-.`txn..c` - Implementing commit transaction by writing modified pages to disk and closing it by freeing the memory of the transaction
+.`txn.c` - Implementing commit transaction by writing modified pages to disk and closing it by freeing the memory of the transaction
 ----
-include::./code/txn..c[tags=txn_commit]
+include::./code/txn.c[tags=txn_commit]
 
-include::./code/txn..c[tags=txn_close]
+include::./code/txn.c[tags=txn_close]
 ----
 
 A more sophisticated system will allow us to reuse the allocated memory from one transaction to the next, but I'm reserving those kind of behavior for the
