@@ -14,11 +14,12 @@ result_t hash_put_new(pages_hash_table_t **table_p, page_t *page);
 bool hash_lookup(pages_hash_table_t *table, page_t *page);
 bool hash_get_next(pages_hash_table_t *table, size_t *state,
                    page_t **page);
-result_t hash_try_add(pages_hash_table_t **table_p,
-                      uint64_t page_num);
 result_t hash_new(size_t initial_number_of_elements,
                   pages_hash_table_t **table);
 // end::pages_hash_table_t[]
+
+implementation_detail void txn_free_single_tx_state(
+    txn_state_t *state);
 
 implementation_detail result_t db_validate_options(
     db_options_t *user_options, db_options_t *default_options);
@@ -64,3 +65,12 @@ implementation_detail bool bitmap_search(
 implementation_detail bool bitmap_is_acceptable_match(
     bitmap_search_state_t *search);
 // end::bitmap_search[]
+
+// tag::wal_api[]
+result_t wal_open_and_recover(db_t *db);
+result_t wal_append(txn_state_t *tx);
+bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id);
+result_t wal_checkpoint(db_state_t *db, uint64_t tx_id);
+result_t wal_close(db_state_t *db);
+enable_defer(wal_close);
+// end::wal_api[]

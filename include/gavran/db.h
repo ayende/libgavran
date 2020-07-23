@@ -151,20 +151,19 @@ typedef struct db_options {
 
 // end::database_page_validation_options[]
 
+// tag::wal_data_structs[]
 typedef struct wal_file_state {
   file_handle_t *handle;
-  span_t map;
+  span_t span;
   uint64_t last_write_pos;
-  // <1>
   uint64_t last_tx_id;
 } wal_file_state_t;
 
 typedef struct wal_state {
-  // <2>
   size_t current_append_file_index;
-  // <3>
   wal_file_state_t files[2];
 } wal_state_t;
+// end::wal_data_structs[]
 
 // tag::db_state_t[]
 typedef struct db_global_state {

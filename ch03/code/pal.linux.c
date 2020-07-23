@@ -218,7 +218,7 @@ result_t pal_enable_writes(span_t *s) {
 
 void defer_pal_disable_writes(cancel_defer_t *cd) {
   if (cd->cancelled && *cd->cancelled) return;
-  span_t *s = *cd->target;
+  span_t *s = cd->target;
   if (mprotect(s->address, s->size, PROT_READ) == -1) {
     errors_push(errno,
                 msg("Unable to modify the memory protection flags"));
@@ -239,15 +239,15 @@ result_t pal_fsync(file_handle_t *handle) {
 // tag::pal_map_defer[]
 void defer_pal_close_file(cancel_defer_t *cd) {
   if (cd->cancelled && *cd->cancelled) return;
-  if (!verify(pal_close_file(*cd->target))) {
+  if (verify(pal_close_file(*(void **)cd->target))) {
     errors_push(EINVAL, msg("Failure to close file during defer"));
   }
 }
 
 void defer_pal_unmap(cancel_defer_t *cd) {
   if (cd->cancelled && *cd->cancelled) return;
-  span_t *ctx = *cd->target;
-  if (!verify(pal_unmap(ctx))) {
+  span_t *ctx = cd->target;
+  if (verify(pal_unmap(ctx))) {
     errors_push(EINVAL, msg("Failure to close file during defer"),
                 with(ctx->address, "%p"));
   }

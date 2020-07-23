@@ -5,24 +5,27 @@ _host_ of potential issues. The most obvious one is power loss. If we pull the p
 lose data. 
 
 For that matter, we only write data to disk after all existing transactions are no longer looking at it. If we have a long running transaction, that may
-prevent us from writing to the disk for a _while_, significantly increasing the risk of data lose. Listing 8.1 shows an example of losing data.
+prevent us from writing to the disk for a _while_, significantly increasing the risk of data lose. <<data_loss>> shows an example of losing data.
 
 [source]
-.Listing 8.1 - main.c - Losing committed writes because of a process crash
+[[data_loss]]
+.`test.c` - Losing committed writes because of a rude abort
 ```
-include::./code/main.c[tags=data_loss]
+include::./code/test.c[tags=data_loss]
 ```
 <1> Opening a read transaction which will prevent us from writing to disk.
-<2> Committing a write transaction
-<3> Crashing the process before the data actually hits the disk
+<2> Crete write transaction, write to a page and *commit* the transaction.
+<3> Simulate a crash byt simply closing all the resources of the database rudely.
+<4> Open the database again and try to read the committed data.
 
-If you'll run the code in Listing 8.1 multiple times, you'll see that the value the read transaction see never change. The changes never made it to disk.
+If you'll run the code in <<data_loss>> you'll see that after we open the database the second time, the committed data was lost. The changes never made it to disk.
 There are valid reasons why you'll want to have a storage engine with this behavior. Performance is usually the cited concern, and for some systems, that
-is an appropriate choice. Not for Gavran, I want it to be _transactional_, which means full durability.
+is an appropriate choice. Not for Gavran, I want it to be _transactional_, which means full durability. If a transaction commit was successful, it needs to be 
+there through anything short of actual hardware failure that corrupted the data on disk. 
 
 .It doesn't end with a `write()`
 ****
-In Listing 8.1, the issue is that we aren't writing to the disk. If we _were_ to write to the disk, however, it would only mask the problem. Writing to the
+In <<data_loss>>, the issue is that we aren't writing to the disk. If we _were_ to write to the disk, however, it would only mask the problem. Writing to the
 disk is anything but easy, if you care about durability. We talked about this a bit in Chapter 3, when we had to jump through hoops to get the file creation
 to persist regardless of what is going on.
 
@@ -34,6 +37,8 @@ https://danluu.com/deconstruct-files/[Files are fraught with peril] and http://d
 quite nicely. I also referred to the https://www.usenix.org/system/files/conference/osdi14/osdi14-paper-pillai.pdf[All File Systems Are Not Created Equal]
 paper (also called ALICE paper) in Chapter 3. In the paper, a whole bunch of applications (including multiple database engines) were tested and 
 almost all of them had some issues around properly writing to disk. We clearly need more than a simple `write()` to help us.
+
+We'll be testing Gavran with https://github.com/madthanu/alice[ALICE tracing] later in this book.
 ****
 
 We know that calling `write()` won't be sufficient, but before we can start on fixing this, we need to first understand where we'll be writing _to_. We
@@ -56,96 +61,120 @@ a commit marker and start from there. An additional downside is that the databas
 The idea of a WAL is that we'll write what we _intend_ to do, so if we crash, we can can replay our actions and end up in the same situation as we 
 were before the crash.
 
-We'll start working on the WAL by looking at the interface it exposes, shown in Listing 8.2
+We'll start working on the WAL by looking at the interface it exposes, shown in <<wal_api>>.
 
 [source]
-.Listing 8.2 - impl.h - The internal API for the WAL in Gavran
+[[wal_api]]
+.`gavran/internal.h` - The internal API for the WAL in Gavran
 ```
-include::./code/impl.h[tags=wal_api]
-
-include::./code/impl.h[tags=database_state]
+include::../includes/gavran/internal.h[tags=wal_api]
 ```
-<1> The `wal_state` field was added to the database's state
 
-There are three functions that we expose for the rest of the system. The `wal_open_and_recover` function is called from `handle_newly_opened_database`, 
-to run over the WAL and apply any changes from committed transactions. The `wal_append` is called from `txn_commit`, that is what ensures that the data is durable. 
-And `wal_checkpoint` is called from `txn_write_state_to_disk` to tell the WAL that the transactions up to the specified `tx_id` have been safely stored in the disk 
+The roles of these functions are:
+
+* The `wal_open_and_recover()` function is called from `db_init()`, to run over the WAL and apply any changes from committed transactions. 
+* The `wal_append()` is called from `txn_commit()`, that is what ensures that the data is durable. 
+* And `wal_checkpoint()` (and `wal_will_checkpoint()`) is called from `txn_write_state_to_disk()` to tell the WAL that the transactions up to the specified `tx_id` have been safely stored in the disk 
 and can be cleared from the WAL.
+* And `wal_close()` is called from `db_close()` to safely shut down the WAL (note that is explicitly not required for things to continue working).
 
-We'll start looking at the WAL logic from the modifications to the data structures to support it, showing in Listing 8.3.
-
-[source]
-.Listing 8.3 - wal.c - Internal structures used to manage the WAL logic
-```
-include::./code/wal.c[tags=structs]
-```
-
-The `wal_state_t` is used to manage the overall WAL state, it is an in memory structure only, held by the `db_state_t`. The `wal_tx_t` structure, on the other 
-hand, is a _persistent_ value that will be stored in the WAL file. It represents a single transaction that was written to the WAL. And the `wal_tx_page_t`
-structure holds information about a single page modified in that transaction. Those can all be considered as the _metadata_ of the transaction in the WAL.
-Let's see how we are using this in the WAL, Listing 8.4 shows the `wal_append` function, which persists the transaction's operations.
+We'll start looking at the WAL logic from the data structures that are here to support it, shown in <<wal_data_structs>>.
 
 [source]
-.Listing 8.4 - wal.c - Writing a transaction to the WAL
+[[wal_data_structs]]
+.`gavran/db.h` - In memory structures used to manage the WAL behavior while the database is running
+```
+include::../includes/gavran/db.h[tags=wal_data_structs]
+```
+
+The `wal_state_t` is used to manage the overall WAL state, it is an in memory structure only, held by the `db_state_t`. This is used to manage the WAL interactions
+while we are running the database. In addition to the in memory data, there is also _persistent_ data that is written to the WAL itself. Those are shown in <<wal_txn_t>>.
+Note that in the case of both <<wal_txn_t>> and <<wal_data_structs>>, we are showing the _end_ result. In this chapter we are going to work with some of the data in these
+structs, and we'll complete the WAL work in the next chapter. 
+
+[source]
+[[wal_txn_t]]
+.`wal.c` - Persistent structures used to store transactions data to disk
+```
+include::./code/wal.c[tags=wal_txn_t]
+```
+
+The `wal_txn_t` represents a single transaction that was written to the WAL. And the `wal_tx_page_t` structure holds information about a single page modified in that transaction. 
+Those can all be considered as the _metadata_ of the transaction in the WAL. Let's see how we are using this in the WAL, <<wal_append>> shows the `wal_append()` function, which persists
+the transaction's operations.
+
+[source]
+[[wal_append]]
+.`wal.c` - Appending the transaction's data to the WAL
 ```
 include::./code/wal.c[tags=wal_append]
 ```
-<1> We iterate through the modified pages in the transactions and set their metadata in the transaction and their address in the buffers.
-<2> Compute the required size for the transaction, we also need an array of `wal_tx_page_t` to hold the metadata about the writes.
-    We use size in pages because we allocate via `palmem_allocate_pages` because memory alignment will become important shortly.
-<3> It is important that the write will align on 4KB boundary, our pages are already 8KB and aligned on 4KB, so we need to make that the transaction buffer aligns.
-    We do that by using `palmem_allocate_pages` to get the memory. 
-<4> In addition to the transaction buffer, we also allocate `palfs_io_buffer`, to do the actual vectored write operation.
-<5> Calling `palfs_vectored_write_file` to actually write to disk and persist the data.
 
-There is a _lot_ going on in `wal_append`, but what it _does_ is take all the modified pages in the transaction and write them to the WAL, so we can replay
-them at a later stage if needed.
-We are currently doing normal buffered writes, but we'll switch soon to direct I/O, which has far more stringent alignment and size requirements.
-This is why we compute the size of the transaction buffer and then round up to 4KB. That is the usual block size in modern hardware. 
+The `wal_append()` function isn't actually doing much. It ask `wal_prepare_txn_buffer()` to do the work, then it writes the data to the `cur_file` using `pal_write_file()`. There is 
+some book keeping to manage where the next write will go to, but that is about it. For now, I'm ignoring things like `current_append_file_index` and WAL file management, these will 
+be explained in the next chapter. What is important right now is to understand that we gather all the data from the transaction and write it to disk. Later on we can use this information
+to recover on startup, repeating any committed transaction.
 
-The `wal_tx_t` holds some metadata about the transaction, such as the `tx_id`, the number of modified pages, etc. We then have an array of `wal_tx_page_t`,
-which are used to hold the metadata about the modified pages. The page number, the location of the page in the transaction buffer and its size. 
-That is called the transaction header, which is aligned to 4KB in size. Next, we have the copies of the pages modified by the transaction.
-
-The actual write to the file is done using the `palfs_vectored_write_file` call, which is new. I wanted to show some more advanced features of 
-using files and it fit the current problem very well. Listing 8.5 shows the implementation, I'll discuss what it means afterward.
+This ability to replay transaction by writing the modifications they made to the disk is a _really_ important property of the WAL. It means that we can mostly be free from considerations
+of what changes happened, what is the _meaning_ of them, etc. We are dealing with the raw pages and look at the data as binary changes that we can operate on.
+The interesting work in appending to the WAL is happening in `wal_prepare_txn_buffer()`, which is shown in <<wal_prepare_txn_buffer>>.
 
 [source]
-.Listing 8.4 - fs.c - Using `pwritev` to write a vector of values to the WAL file
+[[wal_prepare_txn_buffer]]
+.`wal.c` - Preparing the buffer to write to the WAL
 ```
-include::./code/fs.c[tags=palfs_vectored_write_file]
+include::./code/wal.c[tags=wal_prepare_txn_buffer]
 ```
-<1> Compute the total size of the write
-<2> Performing the actual write to disk from multiple buffers to a single location on disk
-<3> Error handling, the `pwritev` may write _less_ than requested, so we may need to retry
 
-We are taking advantage here of the `pwritev` system call. That call can take an array of buffers and write them all to a single location on
-disk. This is very convenient for our purposes, since we need to write many pages, which are located in a non consecutive location to the 
-file and we can do that in one system call.  
-As you can see, we are abusing the fact that `struct pal_io_buffer` and `struct iovec` have the same structure to freely cast between 
-them. I'm not going to keep this code as it is for long, so I'm allowing myself to perform such abuse.
+The purpose of `wal_prepare_txn_buffer()` is to prepare the buffer, and it is well named, because the _real_ work is done in `wal_setup_transaction_data()` while `wal_prepare_txn_buffer()` 
+will just... prepare the buffer. The first thing that happens is that we compute the size of the buffer. In addition to `wal_txn_t`, we also have an array of `wal_tx_page_t` that will hold
+the metadata of the transaction, followed by the actual pages we need to write. 
+Notice that we use `mem_alloc_page_aligned()` to allocate the memory. As a reminder, the term "page" in this context means OS memory page, which is 4KB in 
+size, not the internal pages we have in Gavran. Using page aligned memory is not really important at this point, but will become crucial later, when we start issuing direct I/O operations. 
 
-.What about cross platform usage?
+We record the transaction number and the number of pages and then call to `wal_setup_transaction_data()` to move the data to the prepared buffer. Note that we pass it the buffer _after_ the
+`tx_header_size` and that the `tx_header_size` is page aligned so the buffer that is sent to `wal_setup_transaction_data()` will also be page aligned. Afterward, we record the size used as well
+as the `page_aligned_tx_used`. Our job done, we can return to `wal_append()`, which will write the data to disk directly. Let's dig into what is going on when we setup the WAL transaction
+data, you can see what is going on in <<wal_setup_transaction_data>>.
+
+[source]
+[[wal_setup_transaction_data]]
+.`wal.c` - Copying the data from the transaction `modified_pages` to the WAL transaction buffer
+```
+include::./code/wal.c[tags=wal_setup_transaction_data]
+```
+
+In `wal_setup_transaction_data()` we are simply going to iterate over the `modified_pages` in the transaction and copy them to the buffer that was setup for us. We also update the `pages` 
+array on the `wal_txn_t` with the offset of the page from the beginning of the transaction, the page number and the number of pages written. 
+
+.Using `pwritev()` instead of `write()`?
 ****
-We won't be using `pwritev` for long, but I wanted to touch on cross platform compatibility with advanced API. We won't
-be using `pwritev` for other reasons, but it is perfect for many scenarios. On Windows, on the other hand, you have `WriteFileGather` which
-allows you to pass an array of pages. Slightly more complex, but works fairly well. 
+In `wal_append()` we are writing from many memory locations (all the modified pages) to a single location on disk. That is a feature tailored made
+for the `pwritev()` call, which allows us to coalesce multiple buffers into a single write. It would allow us to save the single buffer allocation and
+the cost associated with copying the memory to a single buffer.
+
+There are a few reasons why we _want_ to have a single buffer for the transaction, we'll look at them in depth in the next chapter, for now, I want to
+focus on the implications of using `pwritev()` in a storage engine like Gavran.
+
+In particular, I wanted to touch on cross platform compatibility with advanced API. For many database operations, `pwritev()` is the right tool for the job. 
+On Windows, on the other hand, you have `WriteFileGather` which allows you to pass an array of pages. Slightly more complex, but works fairly well. 
 
 For the most part, you can assume that most operating systems will have similar API at the file system level. They all have to work with the
-same constraints, after all. 
+same constraints, after all. MacOS, however, doesn't seem to have this API, it has `writev()`, though. 
 
 That said, `WriteFileGather` is available from 2003 and `pwritev` exists only from 2009. The `writev` system call, on the other hand, goes 
 to about 2001 or so. As a database developer, I love to use API that has been around for a decade or two. It means that most of the bugs
 have been shaken out.
 ****
 
-We wrote the transaction to the WAL file, but what did we actually write? Figure 17 shows the structure of a single transaction in the WAL.
+We wrote the transaction to the WAL file, but what did we actually write? <<wal_tx_structure>> shows the structure of a single transaction in the WAL.
 
+[[wal_tx_structure]]
 .The structure of a single transaction inside the WAL
-image::{img-src}/fig17.png[]
+image::wal_tx_structure.png[]
 
 The purpose of the WAL is to make sure that committed transactions aren't lost. In other databases, it is also responsible for rollback uncommitted 
-transactions, but Gavran is using a different model and doesn't have to worry about that. We can no reconstruct committed transactions by looking 
+transactions, but Gavran is using a different model and doesn't have to worry about that. We can now reconstruct committed transactions by looking 
 at the WAL for the pages that they modified.
 
 .A note on error handling
@@ -169,20 +198,23 @@ It is an involved system, requiring Redo and Undo logs and a fairly complex danc
 before.
 
 If you'll notice, we aren't doing anything so complicated. We record the pages in the WAL and can apply them in place to recover committed transactions.
-The entire recovery code fits inside a single page and there is no need for an Undo step, because uncommitted changes never hit the WAL.
+The entire recovery code fits inside a single page and there is no need for an Undo step, because uncommitted changes never hit the WAL. This is one of
+the advantages of having an embedded system, we don't have to cater to the latency inherit to most networked database where transactions may span many 
+seconds or even minutes and hours.
 ****
 
-In Listing 8.1 we have a scenario where a read transaction prevents us from writing to the data file, and then we crash by calling `exit()`. Now that
-we have `wal_append`, we have written the changes in the committed write transaction to disk. The next step is to see how we can recover from such a
-scenario. Take a look at Listing 8.6, where we explore the `wal_open_and_recover`.
+In <<data_loss>> we have a scenario where a read transaction prevents us from writing to the data file, and then we simulate a crash rudely aborting
+the database and transaction. Now that we have `wal_append()`, we have written the changes in the committed write transaction to disk. The next step is 
+to see how we can recover from such a scenario. Take a look at <<wal_open_and_recover>>, where we explore the `wal_open_and_recover()`.
 
 [source]
-.Listing 8.6 - wal.c - Opening the WAL and calling `wal_recover` on startup
+[[wal_open_and_recover]]
+.`wal.c` - Opening the WAL and calling `wal_recover()` on startup
 ```
 include::./code/wal.c[tags=wal_open_and_recover]
 ```
 
-The `wal_open_and_recover` function is called as the very first step in `handle_newly_opened_database`. There is a bit of code there, but most of it
+The `wal_open_and_recover()` function is called as the very first step in `handle_newly_opened_database`. There is a bit of code there, but most of it
 is setting up the WAL filename, opening the file and the memory map, etc. You can see that we added a database option for `wal_size`, which will 
 control the size of the WAL file. The real fun happens in `wal_recover`, shown in Listing 8.7, where we do the actual recover.
 

@@ -57,7 +57,7 @@ uint32_t errors_get_oom_flag(void);
 // tag::defer[]
 // <1>
 typedef struct cancel_defer {
-  void** target;
+  void* target;
   size_t* cancelled;
 } cancel_defer_t;
 
@@ -83,7 +83,7 @@ typedef struct cancel_defer {
     if (cd->cancelled && *cd->cancelled) return;          \
     if (func(convert(cd->target)) == failcode) {          \
       errors_push(EINVAL, msg("Failure on " #func),       \
-                  with(convert(*cd->target), format));    \
+                  with(convert(cd->target), format));     \
     }                                                     \
   }                                                       \
   void enable_semicolon_after_macro_##__LINE__(void)
@@ -93,7 +93,7 @@ typedef struct cancel_defer {
 // tag::defer_free[]
 static inline void defer_free(cancel_defer_t* cd) {
   if (cd->cancelled && *cd->cancelled) return;
-  free(*cd->target);
+  free(*(void**)cd->target);
 }
 // end::defer_free[]
 

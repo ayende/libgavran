@@ -62,12 +62,6 @@ static result_t db_init_file_structure(db_t *db) {
   ensure(db_init_file_header(db, &tx));
   ensure(db_init_free_space_bitmap(&tx));
 
-  page_t page = {.page_num = 0};
-  ensure(txn_raw_get_page(&tx, &page));
-  page_metadata_t *entry = page.address;
-  memcpy(&db->state->global_state.header, &entry->file_header,
-         sizeof(file_header_t));
-
   ensure(txn_commit(&tx));
   return success();
 }

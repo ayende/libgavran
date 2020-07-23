@@ -33,7 +33,6 @@ static result_t mvcc(const char* path) {
   defer(txn_close, wtx);
   uint64_t page_num;
   ensure(allocate_and_write_in_page(&wtx, &page_num));
-
   // <2>
   txn_t rtx;
   ensure(txn_create(&db, TX_READ, &rtx));

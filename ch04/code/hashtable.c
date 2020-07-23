@@ -69,13 +69,6 @@ bool hash_get_next(pages_hash_table_t *table, size_t *state,
 }
 // end::hash_get_next[]
 
-result_t hash_try_add(pages_hash_table_t **table_p,
-                      uint64_t page_num) {
-  page_t cur = {.page_num = page_num, .address = (void *)-1};
-  if (hash_lookup(*table_p, &cur)) return success();
-  return hash_put_new(table_p, &cur);
-}
-
 // tag::hash_new_and_lookup[]
 result_t hash_new(size_t initial_number_of_elements,
                   pages_hash_table_t **table) {
