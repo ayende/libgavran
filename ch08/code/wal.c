@@ -61,13 +61,12 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   size_t tx_header_size =
       TO_PAGES(sizeof(wal_txn_t) + pages * sizeof(wal_txn_page_t)) *
       PAGE_SIZE;
-  uint64_t required_pages = tx_header_size + pages;
+  uint64_t total_size = tx_header_size + pages * PAGE_SIZE;
   size_t cancel_defer = 0;
   wal_txn_t *wt;
-  ensure(mem_alloc_page_aligned((void *)&wt,
-                                required_pages * PAGE_SIZE));
+  ensure(mem_alloc_page_aligned((void *)&wt, total_size));
   try_defer(free, wt, cancel_defer);
-  memset(wt, 0, required_pages * PAGE_SIZE);
+  memset(wt, 0, total_size);
   wt->number_of_modified_pages = pages;
   wt->tx_id = tx->global_state.header.last_tx_id;
   void *end = wal_setup_transaction_data(
@@ -181,15 +180,14 @@ static result_t wal_next_valid_transaction(
 // end::wal_next_valid_transaction[]
 
 // tag::wal_recover_tx[]
-static result_t free_hash_table_and_contents(cancel_defer_t *cd) {
-  if (cd->cancelled && *cd->cancelled) return success();
+static result_t free_hash_table_and_contents(
+    pages_hash_table_t **pages) {
   size_t iter_state = 0;
-  pages_hash_table_t *pages = cd->target;
   page_t *p;
-  while (hash_get_next(pages, &iter_state, &p)) {
+  while (hash_get_next(*pages, &iter_state, &p)) {
     free(p->address);
   }
-  free(pages);
+  free(*pages);
   return success();
 }
 enable_defer(free_hash_table_and_contents);
@@ -209,8 +207,11 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
     page_t final = {.page_num = tx->pages[i].page_num,
                     .number_of_pages = tx->pages[i].number_of_pages};
     ensure(mem_alloc_page_aligned((void *)&final.address, size));
+    size_t done = 0;
+    try_defer(free, final.address, done);
     memcpy(final.address, ((char *)tx) + tx->pages[i].offset, size);
     ensure(hash_put_new(&pages, &final));
+    done = 1;
     input += size;
   }
   size_t iter_state = 0;
