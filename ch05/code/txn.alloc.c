@@ -26,7 +26,7 @@ static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
 result_t txn_allocate_page(txn_t *tx, page_t *page,
                            page_metadata_t **metadata,
                            uint64_t nearby_hint) {
-  (void)metadata;  // unused as for right now
+  *metadata = 0;  // unused as for right now
   file_header_t *header = &tx->state->global_state.header;
   uint64_t start = header->free_space_bitmap_start;
 

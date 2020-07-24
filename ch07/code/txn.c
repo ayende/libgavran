@@ -109,7 +109,8 @@ result_t txn_commit(txn_t *tx) {
 // end::txn_commit[]
 
 // tag::txn_free_single_tx_state[]
-static void txn_free_single_tx_state(txn_state_t *state) {
+implementation_detail void txn_free_single_tx_state(
+    txn_state_t *state) {
   size_t iter_state = 0;
   page_t *p;
   while (hash_get_next(state->modified_pages, &iter_state, &p)) {

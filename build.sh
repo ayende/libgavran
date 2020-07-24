@@ -14,8 +14,7 @@ do
 
     make -f ../../makefile clean
     make -f ../../makefile
-
-    ./test.sh
+    valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 --exit-on-first-error=yes   ./build/gavran    
 
     pwd
     cd $CUR

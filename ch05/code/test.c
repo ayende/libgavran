@@ -110,9 +110,12 @@ describe(allocation_tests) {
     defer(txn_close, tx);
     page_t p = {.number_of_pages = 1};
     assert(txn_allocate_page(&tx, &p, &metadata, 0));
-    metadata->overflow.page_flags = page_flags_overflow;
-    metadata->overflow.number_of_pages = 1;
-    metadata->overflow.size_of_value = 8000;
+    if (metadata) {
+      // not relevant for this chapter, will be in others
+      metadata->overflow.page_flags = page_flags_overflow;
+      metadata->overflow.number_of_pages = 1;
+      metadata->overflow.size_of_value = 8000;
+    }
 
     uint64_t page_num = p.page_num;
 

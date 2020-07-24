@@ -30,6 +30,8 @@ static result_t db_init_free_space_bitmap(txn_t *tx) {
   page_metadata_t *entry = page.address;
   uint64_t free_space_start = 1;
   entry->file_header.free_space_bitmap_start = free_space_start;
+  tx->state->db->global_state.header.free_space_bitmap_start =
+      free_space_start;
 
   uint64_t pages =
       ROUND_UP(entry->file_header.number_of_pages, BITS_IN_PAGE);
