@@ -22,7 +22,7 @@ enum wal_txn_flags {
 };
 
 typedef struct wal_txn {
-  uint8_t tx_hash_sodium[32];
+  uint8_t hash_blake2b[32];
   uint64_t tx_id;
   uint64_t page_aligned_tx_size;
   uint64_t tx_size;
@@ -73,7 +73,6 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
       tx, wt, ((char *)wt) + tx_header_size);
   wt->tx_size = (uint64_t)((char *)end - (char *)wt);
   wt->page_aligned_tx_size = TO_PAGES(wt->tx_size) * PAGE_SIZE;
-  memset(end, 0, wt->page_aligned_tx_size - wt->tx_size);
   *txn_buffer = wt;
   cancel_defer = 1;
   return success();
@@ -88,8 +87,7 @@ result_t wal_append(txn_state_t *tx) {
 
   wal_state_t *wal = &tx->db->wal_state;
 
-  wal_file_state_t *cur_file =
-      &wal->files[wal->current_append_file_index];
+  wal_file_state_t *cur_file = &wal->files[0];
   ensure(pal_write_file(cur_file->handle, cur_file->last_write_pos,
                         (char *)txn_buffer,
                         txn_buffer->page_aligned_tx_size));

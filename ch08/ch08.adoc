@@ -15,7 +15,7 @@ include::./code/test.c[tags=data_loss]
 ```
 <1> Opening a read transaction which will prevent us from writing to disk.
 <2> Crete write transaction, write to a page and *commit* the transaction.
-<3> Simulate a crash byt simply closing all the resources of the database rudely.
+<3> Simulate a crash by simply closing all the resources of the database rudely.
 <4> Open the database again and try to read the committed data.
 
 If you'll run the code in <<data_loss>> you'll see that after we open the database the second time, the committed data was lost. The changes never made it to disk.
@@ -75,8 +75,9 @@ The roles of these functions are:
 * The `wal_open_and_recover()` function is called from `db_init()`, to run over the WAL and apply any changes from committed transactions. 
 * The `wal_append()` is called from `txn_commit()`, that is what ensures that the data is durable. 
 * And `wal_checkpoint()` (and `wal_will_checkpoint()`) is called from `txn_write_state_to_disk()` to tell the WAL that the transactions up to the specified `tx_id` have been safely stored in the disk 
-and can be cleared from the WAL.
-* And `wal_close()` is called from `db_close()` to safely shut down the WAL (note that is explicitly not required for things to continue working).
+  and can be cleared from the WAL.
+* And `wal_close()` is called from `db_close()` to safely shut down the WAL (note that is explicitly not required for things to continue working). The whole _point_ of the WAL
+  is to ensure that a crash / failure will not cause us to lose data that was previously committed.
 
 We'll start looking at the WAL logic from the data structures that are here to support it, shown in <<wal_data_structs>>.
 
@@ -112,9 +113,19 @@ include::./code/wal.c[tags=wal_append]
 ```
 
 The `wal_append()` function isn't actually doing much. It ask `wal_prepare_txn_buffer()` to do the work, then it writes the data to the `cur_file` using `pal_write_file()`. There is 
-some book keeping to manage where the next write will go to, but that is about it. For now, I'm ignoring things like `current_append_file_index` and WAL file management, these will 
-be explained in the next chapter. What is important right now is to understand that we gather all the data from the transaction and write it to disk. Later on we can use this information
-to recover on startup, repeating any committed transaction.
+some bookkeeping to manage where the next write will go to, but that is about it. For now, I'm ignoring things like `files` being an array with two values and WAL file management in
+general, these will be explained in the next chapter. What is important right now is to understand that we gather all the data from the transaction and write it to disk. Later on we 
+can use this information to recover on startup, repeating any committed transaction.
+
+.Gavran is using a "blind" WAL model
+====
+There are many ways to structure a WAL, but I have chosen to use a WAL model that sits _very_ low in the stack. The WAL we use has _no_ idea about what kind of data is stored or how
+to manipulate persistent data structure. The only thing that the WAL does is store the _raw binary_ page data. Aside from understanding the concept of pages (page number and the number
+of pages), the WAL was have is unaware of anything built on top it.
+
+That means that we can add more features to Gavran without considering the impact on the WAL. Other features can be built on top of the WAL as well, log shipping and incremental 
+backups can both be built on top of this infrastructure.
+====
 
 This ability to replay transaction by writing the modifications they made to the disk is a _really_ important property of the WAL. It means that we can mostly be free from considerations
 of what changes happened, what is the _meaning_ of them, etc. We are dealing with the raw pages and look at the data as binary changes that we can operate on.
@@ -135,7 +146,7 @@ size, not the internal pages we have in Gavran. Using page aligned memory is not
 
 We record the transaction number and the number of pages and then call to `wal_setup_transaction_data()` to move the data to the prepared buffer. Note that we pass it the buffer _after_ the
 `tx_header_size` and that the `tx_header_size` is page aligned so the buffer that is sent to `wal_setup_transaction_data()` will also be page aligned. Afterward, we record the size used as well
-as the `page_aligned_tx_used`. Our job done, we can return to `wal_append()`, which will write the data to disk directly. Let's dig into what is going on when we setup the WAL transaction
+as the `page_aligned_tx_size`. Our job done, we can return to `wal_append()`, which will write the data to disk directly. Let's dig into what is going on when we setup the WAL transaction
 data, you can see what is going on in <<wal_setup_transaction_data>>.
 
 [source]
@@ -280,14 +291,14 @@ Can we shout hurray now? Not quite yet, I'm afraid. We need to also consider a f
 
 * When we recover, we'll run through the entire WAL. If a page has been modified multiple times, we'll write to it multiple times.
 * There is no mechanism to trim the size of the log, as it currently stands, transactions will grow the log without any bound.
-* In other words, the transactions a database has, the more expensive it is to restart it. That is... not a good position to be in. 
+* In other words, the more transactions a database has, the more expensive it is to restart it. That is... not a good position to be in. 
 
 The answer for that is to let the WAL know when we are saving the pages to the database. This is typically called a checkpoint.
 
 === Checkpoints and WAL trimming
 
 A checkpoint notify the WAL that the data file has properly persisted (and made durable) the data in the WAL up to a certain point. That allows the WAL to trim itself 
-from transactions that are known to be in the data file already. That is the role of the `wal_checkpoint` function, which is called from `txn_write_state_to_disk()`. When called, it 
+from transactions that are known to be in the data file already. That is the role of the `wal_checkpoint()` function, which is called from `txn_write_state_to_disk()`. When called, it 
 will check to see if the transaction that was saved to the data file is the last transaction in effect, which will allow us to reset the WAL location. 
 
 Before we get to the impact of checkpoints on the WAL, let's see what this means for the data file itself. <<txn_write_state_to_disk>> shows the changes to `txn_write_state_to_disk()`
@@ -386,7 +397,7 @@ to get the same behavior.
 Enabling those flags impose certain alignment requirements on the writes you can make. All you operations must be 4KB aligned. This is because using these
 flags, you are using DMA (Direct Memory Transfer), so the write needs to be page aligned. The `O_DSYNC` or `FILE_FLAG_WRITE_THROUGH` will tell the system
 to send a FUA (Force Unit Access) flag to the disk. This tells the disk that it needs to put the data on persistent medium. That applies to a particular
-write and saves us from flushing caches. Note that you need _both_ flags for the desired behavior, either one of them on their own will not get you the 
+write and saves us from flushing caches. Note that you need _both_ flags for the desired behavior, either one of them on its own will not get you the 
 right result. There are scenarios where using one of those flags independently is good, but not for our needs.
 
 The issue of durable writes is _complex_ and there are a lot of material about it. 
@@ -443,16 +454,121 @@ The `xxHash64` produce an 8 bytes (64 bits) value while the `Blake2B` produce a 
 
 A cryptographic hash has a number of https://en.wikipedia.org/wiki/Cryptographic_hash_function[required properties], which boil down to what you think
 is your threat vector. If you are concerned about the missing data or disk corruption, you can probably suffice with CRC or something similar, although
-CRC is actually _slower_ than `xxHash64`. The `xxHash64` in a fast, in the order of 10GB / sec and gives good indication that the data was modified. 
+CRC is actually _slower_ than `xxHash64`. The `xxHash64` is a fast algorithm, in the order of 10GB / sec and gives good indication that the data was modified. 
 The `BLAKE2b` function is also fast, but only in the company of other cryptographic hashes. It gets to 0.95 GB / sec, significantly slower that `xxHash64`. 
 The advantage is that you can safely assume that no one is going to be _able_ to manufacture collisions for your data. 
 
-Given that CRC was used for this purpose for a long time, and that `BLAKE2b` is actually _faster_ than CRC, I'm just going to use `BLAKE2b`.
-I'll defer implementing hashing to the next chapter, however.
+I'm just going to use `BLAKE2b` for now, unless I get a benchmark that change my mind. The fact that we are going to be doing durable writes to disk means that
+the cost of I/O is likely _many_ times higher than the hashing cost, after all. I'll defer implementing hashing to the next chapter, however.
 ****
 
 A good tool to use is `strace`, which can tell you what system call are generated by a process. That is very useful when trying to understand what
-your code is _actually_ doing, rather than what you _think_ it is doing. 
+your code is _actually_ doing, rather than what you _think_ it is doing. Looking into how Gavran is dealing with the disk can be quite interesting. 
+Running one the `"closing db with no active txs requires no recovery"` test shown in <<test_08>> with 
+`strace -e trace=mmap,openat,open,close,munmap,pwrite64,fsync,fdatasync,ftruncate`
+gives us the following shown in <<strace_output_db_open>> and <<strace_output_tx>>. 
+
+Just the act of opening the database requires quite a bit of work, as you can see in <<strace_output_db_open>>.
+
+[source]
+[[strace_output_db_open]]
+.The `strace` showing the system calls when opening a database for the first time
+```
+openat(AT_FDCWD, "/tmp/db/try", O_RDWR|O_CREAT|O_CLOEXEC, 0600) = 3
+close(3)                                = 0
+openat(AT_FDCWD, "/tmp/db/try", O_RDWR|O_CREAT|O_CLOEXEC, 0600) = 3
+openat(AT_FDCWD, "/tmp/db", O_RDONLY)   = 4
+fsync(4)                                = 0
+close(4)                                = 0
+ftruncate(3, 4194304)                   = 0
+openat(AT_FDCWD, "/tmp/db", O_RDONLY)   = 4
+fsync(4)                                = 0
+close(4)                                = 0
+mmap(NULL, 4194304, PROT_READ, MAP_SHARED, 3, 0) = 0x7f2b42ee0000
+openat(AT_FDCWD, "/tmp/db/try-a.wal", 
+                  O_RDWR|O_CREAT|O_CLOEXEC, 0600) = 4
+close(4)                                = 0
+openat(AT_FDCWD, "/tmp/db/try-a.wal", 
+                  O_RDWR|O_CREAT|O_DSYNC|O_DIRECT|O_CLOEXEC, 0600) = 4
+openat(AT_FDCWD, "/tmp/db", O_RDONLY)   = 5
+fsync(5)                                = 0
+close(5)                                = 0
+ftruncate(4, 131072)                    = 0
+openat(AT_FDCWD, "/tmp/db", O_RDONLY)   = 5
+fsync(5)                                = 0
+close(5)                                = 0
+mmap(NULL, 131072, PROT_READ, MAP_SHARED, 4, 0) = 0x7f2b44cb0000
+munmap(0x7f2b44cb0000, 131072)          = 0
+```
+
+You can see in <<strace_output_db_open>> that we are opening and closing the data file and the WAL a few times. This happens becuase `pal_create_file()` will
+call to `pal_ensure_path()` which will try to create the file to verify that it is possible for us to so, then call `fsync()` on the parent directory
+if the file didn't previous exist. We will also call `fsync()` after we set the size of the files using `ftruncate()`. Technically speaking, we could have done
+all of the work and then call `fsync()` on the directory once, but given how rare this even is (opening a new database), it isn't worth it.
+
+You can also see in <<strace_output_db_open>> that we are opening the WAL with `O_DSYNC|O_DIRECT` and that we `mmap()` it and then `unmap()` it. This is when
+we run recovery on the empty database. On <<strace_output_tx>> you can see how a transaction looks like, in terms of system calls. 
+
+[source]
+[[strace_output_tx]]
+.The `strace` showing the system calls for a single transaction
+```
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 0) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "\3\0\0\0\0\0\0\0\0\0"..., 8192, 8192) = 8192
+```
+
+There isn't much in <<strace_output_tx>>, because from the operating system perspective, we aren't doing much. There is one write to the WAL (fd: 4), the first
+call on <<strace_output_tx>>. This is a durable write because the WAL was opened with `O_DSYNC|O_DIRECT`. Then there are two writes to the data file (fd: 3) to 
+pages 0 and 1, writing the actual data to the relevant pages. The transaction in <<strace_output_tx>> is writing to the data file because there are no other 
+active transactions to prevent it. This is also the transaction that happens in `db_init_file_structure()`. 
+
+On <<strace_2nd_txs>> we can see the system calls as a result of two separate transactions, modifying page 3. The second transaction will write beyond the 50%
+mark on the WAL, so it is reset. 
+
+[source]
+[[strace_2nd_txs]]
+.The `strace` output from the calls two calls to `write_to_page()` and the resetting of the WAL
+```
+// <1>
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 24576) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "Hi there\0\0"..., 8192, 24576) = 8192
+// <2>
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 49152) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "2nd Try!\0\0"..., 8192, 24576) = 8192
+// <3>
+fdatasync(3)                            = 0
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\\0\0"..., 8192, 0) = 8192
+```
+<1> The system calls from the `write_to_page("Hi There")` call.
+<2> The system calls from the `write_to_page("2nd Try!")` call.
+<3> Resetting of the WAL file.
+
+Finally, we can see how we close the database and reopen it in <<strace_close_reopen>>. You can see that there are no writes made to the data file
+as part of the database recovery on startup, because we reset the WAL on <<strace_2nd_txs>> and there is no need of that.
+
+[source]
+[[strace_close_reopen]]
+.The `strace` output from closing and reopening the database with no transactions in the WAL
+```
+munmap(0x7f2b42ee0000, 4194304)         = 0
+close(3)                                = 0
+close(4)                                = 0
+openat(AT_FDCWD, "/tmp/db/try", O_RDWR|O_CREAT|O_CLOEXEC, 0600) = 3
+mmap(NULL, 4194304, PROT_READ, MAP_SHARED, 3, 0) = 0x7f2b42ee0000
+openat(AT_FDCWD, "/tmp/db/try-a.wal", 
+              O_RDWR|O_CREAT|O_DSYNC|O_DIRECT|O_CLOEXEC, 0600) = 4
+mmap(NULL, 131072, PROT_READ, MAP_SHARED, 4, 0) = 0x7f2b44cb0000
+munmap(0x7f2b44cb0000, 131072)          = 0
+munmap(0x7f2b42ee0000, 4194304)         = 0
+close(3)                                = 0
+close(4)                                = 0
+```
+
+You might want to run `strace` on other tests and try to figure out what is going on in Gavran just from the system calls. That can be very helpful,
+because it gives you a very different perspective of the way things work. 
 
 === Unit Tests
 
