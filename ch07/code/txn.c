@@ -143,9 +143,7 @@ static void txn_free_registered_transactions(db_state_t *state) {
 // end::txn_free_registered_transactions[]
 
 // tag::txn_write_state_to_disk[]
-static result_t txn_write_state_to_disk(txn_state_t *s,
-                                        bool can_checkpoint) {
-  (void)can_checkpoint;  // currently unused
+static result_t txn_write_state_to_disk(txn_state_t *s) {
   size_t iter_state = 0;
   page_t *current;
   while (hash_get_next(s->modified_pages, &iter_state, &current)) {
@@ -204,7 +202,7 @@ static result_t txn_gc(txn_state_t *state) {
   }
   // <5>
   ensure(txn_merge_unique_pages(latest_unused));
-  ensure(txn_write_state_to_disk(latest_unused, /*checkpoint*/ true));
+  ensure(txn_write_state_to_disk(latest_unused));
   txn_free_registered_transactions(db);
   return success();
 }
