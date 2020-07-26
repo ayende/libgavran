@@ -74,17 +74,21 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
   }
   // end::txn_raw_modify_page[]
 
-  page_t original = {.page_num = page->page_num};
-  ensure(txn_raw_get_page(tx, &original));
-  if (!page->number_of_pages) page->number_of_pages = 1;
   size_t done = 0;
+  if (!page->number_of_pages) page->number_of_pages = 1;
   ensure(mem_alloc_page_aligned(&page->address,
                                 PAGE_SIZE * page->number_of_pages));
   try_defer(free, page->address, done);
-
-  memcpy(page->address, original.address,
-         (PAGE_SIZE * page->number_of_pages));
-  page->previous = original.address;
+  page_t original = {.page_num = page->page_num};
+  ensure(txn_raw_get_page(tx, &original));
+  if (original.number_of_pages == page->number_of_pages) {
+    memcpy(page->address, original.address,
+           (PAGE_SIZE * page->number_of_pages));
+    page->previous = original.address;
+  } else {  // mismatch in size means that we consider to be new only
+    memset(page->address, 0, (PAGE_SIZE * page->number_of_pages));
+    page->previous = 0;
+  }
   ensure(hash_put_new(&tx->state->modified_pages, page),
          msg("Failed to allocate entry"));
   done = 1;

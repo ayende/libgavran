@@ -1,7 +1,7 @@
 == Improving the Write Ahead Log
 
 In the pervious chapter, we built a Write Ahead Log and made sure that it is written to the disk in a durable manner. We implemented recovery on startup as well
-as a checkpoint, clearing the WAL when we know that old transactions are safely stored in the data file. The implementation we have in the previous chapter
+as a checkpoint process, clearing the WAL when we know that old transactions are safely stored in the data file. The implementation we have in the previous chapter
 _works_, but it was meant primarily to provide you with the _concept_ of the Write Ahead Log and how it perform its role.
 
 There is a _lot_ that is still missing from the implementation and I intend to make this chapter a journey into completing those holes in the WAL.
@@ -32,12 +32,12 @@ they need in order to run. Gavran has slightly different requirements, however:
 
 These assumptions are actually _weaker_ than those made by SQLite, if you'll note. There is no assumption of atomic writes on a sector or a particular order imposed on 
 the write order to the disk. To my knowledge, all the disks that you are likely to encounter will behave according to these assumptions. The only exceptions of some
-cheap consumer disks that don't implement `fsync()` or FUA (Flush Unit Access, what `O_DIRECT | O_DSYNC` is translated into) properly.
+cheap consumer disks that don't implement `fsync()` or FUA (Force Unit Access, what `O_DIRECT | O_DSYNC` is translated into) properly.
 ****
 
-Right now? We'll very likely copy empty or random pages into the data file, causing data corruption. This is because we aren't verifying the _integrity_ of the 
+Right now, if we have a failed write, it is very likely copy empty or random pages into the data file, causing data corruption. This is because we aren't verifying the _integrity_ of the 
 transactions. In order to handle that, we'll need to compute a hash of the transaction before writing it and validate it during recovery. In the previous chapter
-I mentioned that the choice I have are between `xxHash64` (a non cryptographic fast hash) and `BLAKE2b` (a cryptographic hash). The `xxHash64` is much faster, but
+I mentioned that the choices I have are between `xxHash64` (a non cryptographic fast hash) and `BLAKE2b` (a cryptographic hash). The `xxHash64` is much faster, but
 I'm going to use `Blake2B` for now. 
 
 [TIP]
@@ -137,9 +137,8 @@ We start scanning the WAL after the last valid transaction one page at a time. T
 we find something that looks like a transaction, we will see if it is valid. A valid transaction that is lower than the `last_tx_id` on the database is fine, we a
 already have this data in the data file. That can happen after the WAL has been reset. You can see the full details in <<wal_validate_after_end_of_transactions>>.
 
-If the transaction is valid and come _after_ the last known transaction, we found an error and need to fail the recovery. Note that if we found a valid transaction
-we can skip the whole range of the transaction. A valid transaction that is older than the most recent transaction means that the WAL was reset, and we can skip
-checking the rest of the file. That is a concern because we want to reduce the startup time as much as possible.
+If the transaction is valid and come _after_ the last known transaction, we found an error and need to fail the recovery. If we found data that we can't validate
+we need to go over the rest of the WAL file one page at a time, trying to see if there is a transaction there. 
 
 [source]
 [[wal_validate_after_end_of_transactions]]
@@ -148,10 +147,12 @@ checking the rest of the file. That is a concern because we want to reduce the s
 include::./code/wal.c[tags=wal_validate_after_end_of_transactions]
 ```
 
-If we _didn't_ find such a transaction, we'll move to the next page and the cycle repeats to the end of the WAL. The point in `wal_validate_after_end_of_transaction()`
-is that we'll run through the WAL and any corruption will cause us to skip the transaction. We'll then scan for more valid transactions and if there are any, we can
-detect that there was an error. Note that a corruption on the _last_ transaction isn't something that we can detect. There is no way to separate that from a transaction
-that wasn't committed properly to the disk and we'll have to consider that as rolled back.
+The point in `wal_validate_after_end_of_transaction()` is that we'll run through the WAL and any corruption will cause us to skip the transaction. We'll then scan for 
+more valid transactions and if there are any, we can detect that there was an error. Note that a corruption on the _last_ transaction isn't something that we can detect. 
+There is no way to separate that from a transaction that wasn't committed properly to the disk and we'll have to consider that as rolled back.
+
+Startup time of the database matters, and we'll usually find the next valid transaction (with an old transaction id) in the WAL. When we get to that point, we know that we
+are good and that we don't need to scan the rest of the WAL. 
 
 In <<wal_validate_after_end_of_transactions>> we are using a few utility functions, you can see them in <<wal_range>>.
 
@@ -174,7 +175,7 @@ question, how can we remember the transaction id if we reset the WAL and perform
 .Do we have to worry about overflowing `tx_id`?
 ====
 The `tx_id` is a `uint64_t` value, its maximum value is `18,446,744,073,709,551,616`. If we run 100,000 transactions per second, it will take us over 
-_5 millions_ years to get _near_ the top values of `uint64_t`. For all intents and purposes, that is big enough range that can consider it infinite.
+_5.8 million_ years to get _near_ the top values of `uint64_t`. For all intents and purposes, that is big enough range that can consider it infinite.
 ====
 
 There are two ways we can handle that. When we reset the WAL, instead of writing a page of zeroes, we can write an empty transaction that will hold the last 
@@ -185,7 +186,7 @@ the behavior in <<txn_commit_09>>.
 [[txn_commit_09]]
 .`txn.c` - Saving the transaction id on commit in the file header
 ```
-include::./code/08_txn.c[tags=txn_commit]
+include::../ch08/code/txn.c[tags=txn_commit]
 ```
 <1> New code, storing the transaction id in the file's header.
 
@@ -246,7 +247,6 @@ _significantly_, but require us to modify the page for each transaction.
 
 There are many binary diff algorithms, VCDiff and XDelta both come to mind as general purpose binary diff systems. I looked into them to manage the diffs we'll
 write to the WAL, but they are _generic_ algorithms. They do a lot more than what I need, and they come with baggage that I don't really want to deal with. 
-Let's take a look at the code in Listing 9.6, which shows how we can compute the difference between versions of a page. 
 
 I have a _lot_ of advantages when writing a diff function like that:
 
@@ -255,7 +255,9 @@ I have a _lot_ of advantages when writing a diff function like that:
 * Most of the data changes will be 8 bytes aligned and I don't need byte level granularity.
 
 When we call `txn_raw_modify_page()`, we do a Copy on Write from the previous instance of the page. If we keep track of that page, we can easily do the diff. 
-The `previous` field in `page_t` is set  `original.address` in `txn_raw_modify_page()` for this exact purpose.
+The `previous` field in `page_t` is set  `original.address` in `txn_raw_modify_page()` for this exact purpose. There is one caveat to the `previous` usage, if
+we allocate a page that is in memory with a different size. This is an edge case that we treat as if we had no previous value. This can happen if we allocate
+a page, freed it and then reused the space for an allocation of a different size.
 We'll need to change the implementation of `wal_setup_transaction_data()`, where we copy the actual pages from the transaction to the WAL. You can see what
 needs to be done in <<wal_setup_transaction_data_09>>.
 
@@ -314,8 +316,12 @@ each different range costs us the size of `wal_page_diff_t`, which is 8 bytes in
 If we see that there are a lot of differences in the file, the diffed output will exceed the size of the page and we'll just write the page as is to
 the WAL. That means that we can predict what is the maximum amount of memory that we need to utilize in advance. 
 
-[TIP[
-.I'm saying page, but I mean page_s_
+Note that if we have _no_ previous value it means that the previous version of this page is actually either a partial page (a large allocation that was 
+broken into multiple pieces) or merged pages (multiple small allocations that were merged). These tend to be rare, so we aren't going to try to optimize
+for them. We'll just threat these as impossible to diff and copy them as is to the output buffer. 
+
+[TIP]
+.I'm saying page, but I mean pages, plural
 ====
 I'm using the term page to talk about `wal_page_diff_t`, but it will operate on multiple pages just as well. If we have a value that is big enough to
 use multiple pages, we'll treat it as a single long page, and not as a series of consecutive pages. 
@@ -348,6 +354,9 @@ It is the _result_ of the diff application on the data we copied from the disk t
 There is negligible cost of opening a read transaction, as we previously saw, and that allows us to get the data from the disk easily. Even here, we use
 the Copy on Write technique to avoid writing directly to the disk. We first read the data, then we modify it using `wal_apply_diff` and then we register
 the modified buffer in the `pages` hash table. In `wal_recover_tx()` we'll write all those buffers to the disk after all pages have been processed.
+
+The fact that we are writing to the data file on each transaction means that we don't have to deal with the in memory pages mapping that we usually have 
+to deal with when using transactions. During recovery, there can _be_ no other work in the database, so we are free to write to the data file immediately.
 
 .Not syncing the database changes after recovery allows reasonable startup times with slow I/O. 
 ****
@@ -383,14 +392,14 @@ in <<wal_apply_diff>>.
 include::./code/wal.c[tags=wal_apply_diff]
 ----
 
-The code in <<wal_apply_diff> is _really_ simple. Run over the data set and either zero the memory or copy from the buffer. I'm really proud of how simple the code ended 
+The code in <<wal_apply_diff>> is _really_ simple. Run over the `input` and either zero the memory or copy from the buffer. I'm really proud of how simple the code ended 
 up being. This is interesting because both `wal_apply_diff()` and `wal_diff_page()` together fits in a couple of pages. Admittedly, `wal_diff_page()` is pretty dense, but
 what they bring to the table is pretty important.
 
 [IMPORTANT]
 .The diff is idempotent
 ====
-The diff format Gavran uses has almost no requirements from the underlying system. As long as we apply the diffs in order, we can start from any state of the page from the
+The diff format Gavran uses has almost no requirements from the underlying system. As long as we apply the diffs in order, we can start from any state of the page since the
 last checkpoint and we'll get to the right value in the end. This is also the basis of Gavran's requirement that the underlying storage can store either the previous version
 of a write or the current one, but no random data. In practice, I know of no storage system that violate this requirement, as that is a pretty low bar to manage.
 ====
@@ -404,13 +413,13 @@ During the recovery process, Gavran will run over the WAL and apply each transac
 consider a scenario where we have a page with the following values (each 8 bytes in size, aligned on 8 bytes, to match the diff format): `[0,0,0,0]`. We have a sequence 
 of transactions with the following modifications to this page:
 
-7. `[7,0,7,0]` - the diff is `7 . . 7`
-8. `[7,8,7,8]` - the diff is `. 8 . 8`
-9. `[9,8,7,8]` - The diff is `9 . . .`
-10. `[9,10,10,8]` - The diff is `. 10 10 .`
+* Tx no. 7 - `[7,0,7,0]` - the diff is `7 . . 7`
+* Tx no. 8 - `[7,8,7,8]` - the diff is `. 8 . 8`
+* Tx no. 9 - `[9,8,7,8]` - The diff is `9 . . .`
+* Tx no. 10 - `[9,10,10,8]` - The diff is `. 10 10 .`
 
 At the start of the recovery, the state of the page in question is `[9,8,7,8]`. We start running through the recovery process and we apply transaction no. 7. The result will
-be: `[7, 8, 7, 8]`. Note that this is an _invalid_ result. There have been no transaction that resulted in this value in the page. If we'll run the entire WAL on the page,
+be: `[7, 8, 7, 8]`. Note that this is an _invalid_ result. There was no transaction that had this value in the page. If we'll run the entire WAL on the page,
 on the other hand, we'll get to the final result, but any values that we have in the middle are suspect and shouldn't be used.
 
 We are writing the changes to the data file during the recovery process using buffered I/O and read it back on the next transaction to apply further diffs. We could probably
@@ -439,7 +448,7 @@ _designed_ to be compressed, that is why I didn't try to squeeze it too much in 
 remove duplication. If we have writes that are big enough to benefit significantly from compression, it is _very_ likely that we'll have duplication
 and get good compression ratio.
 
-The typical algorithms used for data compression are Lz4, Snappy and Zstd. Snappy is optimized for speed over compression ratio, but LZ4 and Zstd 
+The typical algorithms used for data compression in databases are Lz4, Snappy and Zstd. Snappy is optimized for speed over compression ratio, but LZ4 and Zstd 
 are both better in compression ratio _and_ speed these days. Snappy's main advantage is decompression speed, but that isn't a major consideration for
 me. I assume that we'll rarely, if ever, need to actually recover from the WAL during normal operations.
 
@@ -492,13 +501,13 @@ buffer to the transaction's buffer. The result of this function is the new end o
 .Memory allocation costs
 ====
 We are allocating a buffer for the transaction and another buffer for the compression. In general, for high performance work, we need to police our allocations
-because it memory allocation and de-allocations are a common cause for performance issues. I'm going to write the simplest code that I can write right now and
+because memory allocation and de-allocations are a common cause for performance issues. I'm going to write the simplest code that I can write right now and
 then use the benchmarks to guide me on how to fix this.
 ====
 
 The `wal_compress_transaction()` marks the transaction as compressed if it was able to reduce the size of the input. That will be relevant when we
-need to recover from the transaction. This is done in the `wal_validate_transaction()` which we looked at earlier in this chapter using the
-`wal_decompress_transaction()` function. The details are shown in `wal_decompress_transaction()`. It is important to note that we decompress the data _after_
+need to recover from the transaction. This is done in the `wal_validate_transaction()` function shown earlier in <<wal_validate_transaction>> using the
+`wal_decompress_transaction()` function. The details are shown in <<wal_decompress_transaction>>. It is important to note that we decompress the data _after_
 we validate the hash on the transaction buffer.
 
 [source]
@@ -525,12 +534,26 @@ _always_ a good idea, but in this case, they have a big impact.
 === Unit tests
 
 Testing features such as compression, page diffing or verifying transaction are hard to write. We are not testing the functionality of the system, but 
-the _manner_ in which it acts. As you can see in the tests, that means that I have to rely on testing by inference.
+the _manner_ in which it acts. As you can see in the tests, that means that I have to rely on testing by inference. I'm afraid that the tests are starting to get a 
+bit long in this case. 
 
+There is some amount of non trivial setup that we have to go through in order to properly test some scenarios, and C isn't the nicest language
+to express that. Nevertheless, the tests has been absolutely invaluable in figuring out where stuff breaks or does something that I didn't expect. I'm running all 
+the tests with `valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 --exit-on-first-error=yes`, which means that aside from testing
+functionality, I'm also testing that we don't step on any memory that we don't own.
 
-[source,python]
-.Listing 9.13 - Unit test transaction verification and WAL compression
+You can see the tests in <<tests09>>. Note that there are some tricks that I had to employ here. Testing of WAL truncation or corruption was actually hard, because of
+WAL diffing and compression, we write 8KB per transaction to the WAL but the actual transaction data is only on the start of that. Most of the rest is zeroed. I was
+very confused for a while when I cut the file size of the WAL in half and the recovery proceeded normally. That was because we extend the size of the WAL file when we
+open it to the specified `wal_size`. That means that the new data is zero extended. Because the last portion of the transaction was already zeroed, it passed validation
+and was properly recovered.
+
+I'm using writes with random data (cannot be compressed) in order to get reasonable size of the WAL so I can properly write bad data in meaningful places and truncate
+the WAL to get the right errors. 
+
+[source]
+[[test_09]]
+.`test.c` - Unit testing complex interactions with the WAL
 ----
-include::../pyapi/tests09.py[]
+include::./code/test.c[tags=tests09]
 ----
-

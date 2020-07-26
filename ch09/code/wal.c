@@ -64,6 +64,10 @@ static void *wal_apply_diff(void *input, void *input_end,
 static void *wal_diff_page(uint64_t *restrict origin,
                            uint64_t *restrict modified, size_t size,
                            void *output) {
+  if (!origin) {  // no previous definition
+    memcpy(output, modified, size * sizeof(uint64_t));
+    return output + (size * sizeof(uint64_t));
+  }
   void *current = output;
   void *end = output + size * sizeof(uint64_t);
   for (size_t i = 0; i < size; i++) {
@@ -164,7 +168,8 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   // <1>
   size_t tx_header_size =
       sizeof(wal_txn_t) + pages * sizeof(wal_txn_page_t);
-  uint64_t total_size = tx_header_size + pages * PAGE_SIZE;
+  uint64_t total_size =
+      (TO_PAGES(tx_header_size) + pages) * PAGE_SIZE;
   size_t cancel_defer = 0;
   wal_txn_t *wt;
   ensure(mem_alloc_page_aligned((void *)&wt, total_size));
@@ -291,39 +296,39 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
                                          wal_txn_t **txn_p);
 
 // tag::wal_validate_after_end_of_transactions[]
+static result_t wal_ensure_last_tx_id_is_set(
+    wal_recovery_operation_t *s) {
+  if (s->last_recovered_tx_id) return success();
+  txn_t rtx;  // nothing from WAL, load the db's last_tx_id
+  ensure(txn_create(s->db, TX_READ, &rtx));
+  defer(txn_close, rtx);
+  page_t page = {.page_num = 0};  // maybe new db, have to use raw API
+  ensure(txn_raw_get_page(&rtx, &page));
+  page_metadata_t *metadata = page.address;
+  s->last_recovered_tx_id = metadata->file_header.last_tx_id;
+  return success();
+}
 static result_t wal_validate_after_end_of_transactions(
     wal_recovery_operation_t *s) {
-  if (s->last_recovered_tx_id == 0) {
-    txn_t rtx;  // nothing from WAL, load the db's last_tx_id
-    ensure(txn_create(s->db, TX_READ, &rtx));
-    defer(txn_close, rtx);
-    page_t page = {.page_num = 0};
-    // using txn_raw_get_page because we may be on new db
-    ensure(txn_raw_get_page(&rtx, &page));
-    page_metadata_t *metadata = page.address;
-    s->last_recovered_tx_id = metadata->file_header.last_tx_id;
-  }
+  ensure(wal_ensure_last_tx_id_is_set(s));
   while (true) {
-    void *current, *end;
-    ensure(wal_get_next_range(s, &current, &end));
-    if (!current) break;
+    void *cur, *end;
+    ensure(wal_get_next_range(s, &cur, &end));
+    if (!cur) break;
     wal_txn_t *tx;
-    if (!wal_validate_transaction(&s->files[0], current, end, &tx) ||
+    if (verify(
+            wal_validate_transaction(&s->files[0], cur, end, &tx)) ||
         !tx) {
-      // <3>
+      errors_clear();  // errors are expected here
       wal_increment_next_range_start(s, PAGE_SIZE);
       continue;
     }
     if (s->last_recovered_tx_id > tx->tx_id) {
-      // this is a valid old tx, we had a WAL reset and can stop
-      break;
+      break;  // valid old tx, we had a WAL reset and can stop
     }
-    ssize_t corrupted_pos = current - s->files[0].state->span.address;
-    wal_txn_t *corrupted_tx = current;
-    failed(ENODATA,
-           msg("Found valid transaction after rejecting (smaller) "
-               "invalid "
-               "transaction. WAL is probably corrupted"),
+    ssize_t corrupted_pos = cur - s->files[0].state->span.address;
+    wal_txn_t *corrupted_tx = cur;
+    failed(ENODATA, msg("Valid TX after invalid TX"),
            with(corrupted_pos, "%zd"), with(tx->tx_id, "%lu"),
            with(corrupted_tx->tx_id, "%lu"),
            with(s->db->state->global_state.header.last_tx_id, "%lu"));

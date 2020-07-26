@@ -86,6 +86,145 @@ describe(diff_and_compression) {
     assert(assert_no_content("/tmp/db/try"));
   }
 
+  it("can recover pages of different size, small to large") {
+    uint64_t page;
+
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 1};
+        page_metadata_t* metadata;
+        assert(txn_allocate_page(&wtx, &p, &metadata, 0));
+        page = p.page_num;
+        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.size_of_value = PAGE_SIZE;
+        metadata->overflow.number_of_pages = 1;
+        memset(p.address, 'a', PAGE_SIZE);
+        assert(txn_commit(&wtx));
+      }
+
+      txn_t rtx;  // will be abandoned
+      assert(txn_create(&db, TX_READ, &rtx));
+
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 1, .page_num = page};
+        assert(txn_free_page(&wtx, &p));
+        assert(txn_commit(&wtx));
+      }
+
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 2};
+        page_metadata_t* metadata;
+        assert(txn_allocate_page(&wtx, &p, &metadata, 0));
+        assert(p.page_num == page);
+        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.number_of_pages = 2;
+        metadata->overflow.size_of_value = PAGE_SIZE * 2;
+        memset(p.address, 'b', PAGE_SIZE);
+        memset(p.address + PAGE_SIZE, 'c', PAGE_SIZE);
+        assert(txn_commit(&wtx));
+      }
+    }
+
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+
+      txn_t rtx;
+      assert(txn_create(&db, TX_READ, &rtx));
+      page_t p = {.page_num = page};
+      assert(txn_get_page(&rtx, &p));
+      assert(p.number_of_pages == 2);
+      for (size_t i = 0; i < PAGE_SIZE; i++) {
+        assert(*((char*)p.address + i) == 'b');
+      }
+      for (size_t i = 0; i < PAGE_SIZE; i++) {
+        assert(*((char*)p.address + i + PAGE_SIZE) == 'c');
+      }
+    }
+  }
+
+  it("can recover pages of different size, large to small") {
+    uint64_t page;
+
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 3};
+        page_metadata_t* metadata;
+        assert(txn_allocate_page(&wtx, &p, &metadata, 0));
+        page = p.page_num;
+        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.size_of_value = PAGE_SIZE;
+        metadata->overflow.number_of_pages = 3;
+        memset(p.address, 'a', PAGE_SIZE * 3);
+        assert(txn_commit(&wtx));
+      }
+
+      txn_t rtx;  // will be abandoned
+      assert(txn_create(&db, TX_READ, &rtx));
+
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 3, .page_num = page};
+        assert(txn_free_page(&wtx, &p));
+        assert(txn_commit(&wtx));
+      }
+
+      {
+        txn_t wtx;
+        assert(txn_create(&db, TX_WRITE, &wtx));
+        defer(txn_close, wtx);
+        page_t p = {.number_of_pages = 1};
+        page_metadata_t* metadata;
+        assert(txn_allocate_page(&wtx, &p, &metadata, 0));
+        assert(p.page_num == page);
+        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.number_of_pages = 1;
+        metadata->overflow.size_of_value = PAGE_SIZE;
+        memset(p.address, 'b', PAGE_SIZE);
+        assert(txn_commit(&wtx));
+      }
+    }
+
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+
+      txn_t rtx;
+      assert(txn_create(&db, TX_READ, &rtx));
+      page_t p = {.page_num = page};
+      assert(txn_get_page(&rtx, &p));
+      assert(p.number_of_pages == 1);
+      for (size_t i = 0; i < PAGE_SIZE; i++) {
+        assert(*((char*)p.address + i) == 'b');
+      }
+    }
+  }
   it("will compress transactions") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
