@@ -542,7 +542,7 @@ to express that. Nevertheless, the tests has been absolutely invaluable in figur
 the tests with `valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 --exit-on-first-error=yes`, which means that aside from testing
 functionality, I'm also testing that we don't step on any memory that we don't own.
 
-You can see the tests in <<tests09>>. Note that there are some tricks that I had to employ here. Testing of WAL truncation or corruption was actually hard, because of
+You can see the tests in <<test_09>>. Note that there are some tricks that I had to employ here. Testing of WAL truncation or corruption was actually hard, because of
 WAL diffing and compression, we write 8KB per transaction to the WAL but the actual transaction data is only on the start of that. Most of the rest is zeroed. I was
 very confused for a while when I cut the file size of the WAL in half and the recovery proceeded normally. That was because we extend the size of the WAL file when we
 open it to the specified `wal_size`. That means that the new data is zero extended. Because the last portion of the transaction was already zeroed, it passed validation
