@@ -97,6 +97,7 @@ result_t txn_commit(txn_t *tx) {
 
   // no modification, no work to do
   if (!tx->state->modified_pages->count) return success();
+  // <1>
   page_metadata_t *header;
   ensure(txn_modify_metadata(tx, 0, &header));
   header->file_header.last_tx_id =

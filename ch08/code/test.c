@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sodium.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -19,13 +20,14 @@ static void rude_shutdown_db(db_t* db) {
 }
 
 // tag::data_loss[]
-static result_t write_to_page(db_t* db, const char* msg) {
+static result_t write_to_page(db_t* db, const void* msg,
+                              size_t size) {
   txn_t wtx;
   ensure(txn_create(db, TX_WRITE, &wtx));
   defer(txn_close, wtx);
   page_t page = {.page_num = 3};
   ensure(txn_raw_modify_page(&wtx, &page));
-  strcpy(page.address, msg);
+  memcpy(page.address, msg, size);
   ensure(txn_commit(&wtx));
   return success();
 }
@@ -38,7 +40,7 @@ static result_t data_loss(const char* path) {
   txn_t rtx;
   ensure(txn_create(&db, TX_READ, &rtx));
   // <2>
-  ensure(write_to_page(&db, "Hello Gavran"));
+  ensure(write_to_page(&db, "Hello Gavran", strlen("Hello Gavran")));
 
   // <3>
   rude_shutdown_db(&db);
@@ -68,7 +70,8 @@ describe(durability_tests) {
     assert(db_create("/tmp/db/try", &options, &db));
     txn_t rtx;
     assert(txn_create(&db, TX_READ, &rtx));
-    assert(write_to_page(&db, "Hello Gavran"));
+    assert(
+        write_to_page(&db, "Hello Gavran", strlen("Hello Gavran")));
     assert(db_close(&db));
 
     // let's mmap the data file and check it all
@@ -92,7 +95,8 @@ describe(durability_tests) {
     assert(db_create("/tmp/db/try", &options, &db));
     txn_t rtx;
     assert(txn_create(&db, TX_READ, &rtx));
-    assert(write_to_page(&db, "Hello Gavran"));
+    assert(
+        write_to_page(&db, "Hello Gavran", strlen("Hello Gavran")));
     assert(db_close(&db));
 
     assert(db_create("/tmp/db/try", &options, &db));
@@ -110,8 +114,12 @@ describe(durability_tests) {
     db_options_t options = {.minimum_size = 4 * 1024 * 1024,
                             .wal_size = 128 * 1024};
     assert(db_create("/tmp/db/try", &options, &db));
-    assert(write_to_page(&db, "Hi there"));  // need to write multiple
-    assert(write_to_page(&db, "2nd Try!"));  // times to hit 50% WAL
+    // need to write multiple times to hit 50% WAL
+    for (size_t i = 0; i < 4; i++) {
+      char rand[PAGE_SIZE];
+      randombytes_buf(rand, PAGE_SIZE);
+      assert(write_to_page(&db, rand, PAGE_SIZE));
+    }
     assert(db.state->wal_state.files[0].last_write_pos == 0);
     assert(db_close(&db));
 

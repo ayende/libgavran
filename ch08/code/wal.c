@@ -45,8 +45,8 @@ static void *wal_setup_transaction_data(txn_state_t *tx,
     size_t size = wt->pages[index].number_of_pages * PAGE_SIZE;
     memcpy(output, entry->address, size);
     void *end = output + size;
-    wt->pages[index].offset = (uint64_t)(output - (void *)wt);
     wt->pages[index].flags = wal_txn_page_flags_none;
+    wt->pages[index].offset = (uint64_t)(output - (void *)wt);
     output = end;
     index++;
   }
@@ -176,6 +176,27 @@ static result_t wal_next_valid_transaction(
 }
 // end::wal_next_valid_transaction[]
 
+// tag::wal_recover_page[]
+static result_t wal_recover_page(db_t *db, pages_hash_table_t **pages,
+                                 wal_txn_page_t *page, void *end,
+                                 const void *src, void **input) {
+  (void)db;
+  (void)end;
+  size_t size = page->number_of_pages * PAGE_SIZE;
+  page_t final = {.page_num = page->page_num,
+                  .number_of_pages = page->number_of_pages};
+  ensure(mem_alloc_page_aligned((void *)&final.address, size));
+  size_t done = 0;
+  try_defer(free, final.address, done);
+  memcpy(final.address, src + page->offset, size);
+  ensure(hash_put_new(pages, &final));
+  done = 1;
+  *input += size;
+
+  return success();
+}
+// end::wal_recover_page[]
+
 // tag::wal_recover_tx[]
 static result_t free_hash_table_and_contents(
     pages_hash_table_t **pages) {
@@ -198,18 +219,12 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
                                     tx->number_of_modified_pages / 2),
                   &pages));
   defer(free_hash_table_and_contents, pages);
-
   for (size_t i = 0; i < tx->number_of_modified_pages; i++) {
-    size_t size = tx->pages[i].number_of_pages * PAGE_SIZE;
-    page_t final = {.page_num = tx->pages[i].page_num,
-                    .number_of_pages = tx->pages[i].number_of_pages};
-    ensure(mem_alloc_page_aligned((void *)&final.address, size));
-    size_t done = 0;
-    try_defer(free, final.address, done);
-    memcpy(final.address, ((char *)tx) + tx->pages[i].offset, size);
-    ensure(hash_put_new(&pages, &final));
-    done = 1;
-    input += size;
+    size_t end_offset = i + 1 < tx->number_of_modified_pages
+                            ? tx->pages[i + 1].offset
+                            : tx->tx_size;
+    ensure(wal_recover_page(db, &pages, tx->pages + i,
+                            ((void *)tx) + end_offset, tx, &input));
   }
   size_t iter_state = 0;
   page_t *p;
@@ -342,12 +357,8 @@ result_t wal_close(db_state_t *db) {
 // tag::wal_will_checkpoint[]
 bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id) {
   if (!db) return false;
-
-  bool full = db->wal_state.files[0].last_write_pos >
-              db->options.wal_size / 2;
   bool at_end = tx_id >= db->wal_state.files[0].last_tx_id;
-
-  return full && at_end;
+  return at_end;
 }
 // end::wal_will_checkpoint[]
 

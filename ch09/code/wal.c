@@ -2,6 +2,7 @@
 #include <gavran/internal.h>
 #include <sodium.h>
 #include <string.h>
+#include <zstd.h>
 
 // tag::wal_txn_t[]
 enum wal_txn_page_flags {
@@ -34,20 +35,95 @@ typedef struct wal_txn {
 } wal_txn_t;
 // end::wal_txn_t[]
 
+// tag::wal_page_diff[]
+typedef struct wal_page_diff {
+  uint32_t offset;
+  int32_t length;  // negative means zero filled
+} wal_page_diff_t;
+// end::wal_page_diff[]
+
+// tag::wal_apply_diff[]
+static void *wal_apply_diff(void *input, void *input_end,
+                            page_t *page) {
+  wal_page_diff_t diff;
+  while (input < input_end) {
+    memcpy(&diff, input, sizeof(wal_page_diff_t));
+    input += sizeof(wal_page_diff_t);
+    if (diff.length < 0) {
+      memset(page->address + diff.offset, 0, (size_t)(-diff.length));
+    } else {
+      memcpy(page->address + diff.offset, input, (size_t)diff.length);
+      input += diff.length;
+    }
+  }
+  return input;
+}
+// end::wal_apply_diff[]
+
+// tag::wal_diff_page[]
+static void *wal_diff_page(uint64_t *restrict origin,
+                           uint64_t *restrict modified, size_t size,
+                           void *output) {
+  void *current = output;
+  void *end = output + size * sizeof(uint64_t);
+  for (size_t i = 0; i < size; i++) {
+    if (origin[i] == modified[i]) {
+      continue;
+    }
+    bool zeroes = true;
+    size_t diff_start = i;
+    for (; i < size && (i - diff_start) < (1024 * 1024); i++) {
+      zeroes &= modified[i] == 0;  // single diff size limited to 8MB
+      if (origin[i] == modified[i]) {
+        if (zeroes)
+          continue;  // we'll try to extend zero filled ranges
+        break;
+      }
+    }
+    if (i == size) i--;  // reached the end of the buffer, go back
+    void *required_write = current + sizeof(wal_page_diff_t);
+    wal_page_diff_t diff = {
+        .offset = (uint32_t)(diff_start * sizeof(uint64_t)),
+        .length = (int32_t)((i - diff_start) * sizeof(uint64_t))};
+    if (zeroes) {
+      diff.length = -diff.length;  // indicates zero fill
+    } else {
+      required_write += diff.length;
+    }
+    if (required_write >= end) {
+      memcpy(output, modified, size * sizeof(uint64_t));
+      return end;
+    }
+    memcpy(current, &diff, sizeof(wal_page_diff_t));
+    current += sizeof(wal_page_diff_t);
+    if (diff.length > 0) {
+      memcpy(current, modified + diff_start, (size_t)diff.length);
+      current += diff.length;
+    }
+  }
+
+  return current;
+}
+// end::wal_diff_page[]
+
 // tag::wal_setup_transaction_data[]
 static void *wal_setup_transaction_data(txn_state_t *tx,
                                         wal_txn_t *wt, void *output) {
   size_t iter_state = 0;
   page_t *entry;
   size_t index = 0;
+
   while (hash_get_next(tx->modified_pages, &iter_state, &entry)) {
     wt->pages[index].number_of_pages = entry->number_of_pages;
     wt->pages[index].page_num = entry->page_num;
     size_t size = wt->pages[index].number_of_pages * PAGE_SIZE;
-    memcpy(output, entry->address, size);
-    void *end = output + size;
+    // <1>
+    void *end = wal_diff_page(entry->previous, entry->address,
+                              size / sizeof(uint64_t), output);
+    wt->pages[index].flags = (size == (size_t)(end - output))
+                                 ? wal_txn_page_flags_none
+                                 : wal_txn_page_flags_diff;
     wt->pages[index].offset = (uint64_t)(output - (void *)wt);
-    wt->pages[index].flags = wal_txn_page_flags_none;
     output = end;
     index++;
   }
@@ -55,13 +131,39 @@ static void *wal_setup_transaction_data(txn_state_t *tx,
 }
 // end::wal_setup_transaction_data[]
 
+// tag::wal_compress_transaction[]
+static void *wal_compress_transaction(wal_txn_t *wt, void *start,
+                                      void *end) {
+  size_t input_size = (size_t)(end - start);
+  size_t required_size = ZSTD_compressBound(input_size);
+  void *buffer;
+  if (verify(mem_alloc(&buffer, required_size))) {
+    // no memory, we'll skip compression
+    errors_clear();  // recoverable, so can clear it
+    return end;
+  }
+  defer(free, buffer);
+
+  size_t res =
+      ZSTD_compress(buffer, required_size, start, input_size, 0);
+  if (ZSTD_isError(res) || res >= input_size) {
+    // * we got an error, let's just return uncompressed
+    // * compressed bigger than input? skip it
+    return end;
+  }
+  wt->flags = wal_txn_flags_compressed;
+  memcpy(start, buffer, res);
+  return start + res;
+}
+// end::wal_compress_transaction[]
+
 // tag::wal_prepare_txn_buffer[]
 static result_t wal_prepare_txn_buffer(txn_state_t *tx,
                                        wal_txn_t **txn_buffer) {
   uint64_t pages = tx->modified_pages->count;
+  // <1>
   size_t tx_header_size =
-      TO_PAGES(sizeof(wal_txn_t) + pages * sizeof(wal_txn_page_t)) *
-      PAGE_SIZE;
+      sizeof(wal_txn_t) + pages * sizeof(wal_txn_page_t);
   uint64_t total_size = tx_header_size + pages * PAGE_SIZE;
   size_t cancel_defer = 0;
   wal_txn_t *wt;
@@ -72,8 +174,16 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   wt->tx_id = tx->global_state.header.last_tx_id;
   void *end = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
+  // <2>
+  end = wal_compress_transaction(wt, (char *)wt + sizeof(wal_txn_t),
+                                 end);
+  // <3>
   wt->tx_size = (uint64_t)((char *)end - (char *)wt);
   wt->page_aligned_tx_size = TO_PAGES(wt->tx_size) * PAGE_SIZE;
+  // <4>
+  memset(((void *)wt) + wt->tx_size, 0,
+         wt->page_aligned_tx_size - wt->tx_size);
+
   *txn_buffer = wt;
   cancel_defer = 1;
   return success();
@@ -176,9 +286,23 @@ static void wal_increment_next_range_start(
 }
 // end::wal_range[]
 
+static result_t wal_validate_transaction(file_recovery_info_t *file,
+                                         void *start, void *end,
+                                         wal_txn_t **txn_p);
+
 // tag::wal_validate_after_end_of_transactions[]
 static result_t wal_validate_after_end_of_transactions(
     wal_recovery_operation_t *s) {
+  if (s->last_recovered_tx_id == 0) {
+    txn_t rtx;  // nothing from WAL, load the db's last_tx_id
+    ensure(txn_create(s->db, TX_READ, &rtx));
+    defer(txn_close, rtx);
+    page_t page = {.page_num = 0};
+    // using txn_raw_get_page because we may be on new db
+    ensure(txn_raw_get_page(&rtx, &page));
+    page_metadata_t *metadata = page.address;
+    s->last_recovered_tx_id = metadata->file_header.last_tx_id;
+  }
   while (true) {
     void *current, *end;
     ensure(wal_get_next_range(s, &current, &end));
@@ -208,18 +332,53 @@ static result_t wal_validate_after_end_of_transactions(
 }
 // end::wal_validate_after_end_of_transactions[]
 
+// tag::wal_decompress_transaction[]
+static result_t wal_decompress_transaction(file_recovery_info_t *file,
+                                           wal_txn_t *in,
+                                           wal_txn_t **txp) {
+  // <1>
+  if (in->flags == wal_txn_flags_none) {
+    *txp = in;
+    return success();
+  }
+  // <2>
+  size_t required_size =
+      ZSTD_getDecompressedSize((void *)in + sizeof(wal_txn_t),
+                               in->tx_size - sizeof(wal_txn_t)) +
+      sizeof(wal_txn_t);
+  if (required_size > file->size) {
+    ensure(mem_realloc(&file->buffer, required_size));
+    file->size = required_size;
+  }
+  // <3>
+  size_t res = ZSTD_decompress(file->buffer + sizeof(wal_txn_t),
+                               required_size - sizeof(wal_txn_t),
+                               (void *)in + sizeof(wal_txn_t),
+                               in->tx_size - sizeof(wal_txn_t));
+  if (ZSTD_isError(res)) {
+    const char *zstd_error = ZSTD_getErrorName(res);
+    failed(ENODATA, msg("Failed to decompress transaction"),
+           with(in->tx_id, "%lu"), with(zstd_error, "%s"));
+  }
+  // <4>
+  memcpy(file->buffer, in, sizeof(wal_txn_t));
+  *txp = file->buffer;
+  (*txp)->tx_size = file->used = res + sizeof(wal_txn_t);
+  return success();
+}
+// end::wal_decompress_transaction[]
+
 // tag::wal_validate_transaction[]
 static result_t wal_validate_transaction(file_recovery_info_t *file,
                                          void *start, void *end,
-                                         wal_txn_t **tx_p) {
-  (void)file;
-  *tx_p = 0;
+                                         wal_txn_t **txn_p) {
+  *txn_p = 0;
   wal_txn_t *tx = start;
   if (!tx->tx_id || tx->page_aligned_tx_size + start > end) {
-    *tx_p = 0;
+    *txn_p = 0;
     return success();
   }
-  char hash[crypto_generichash_BYTES];
+  uint8_t hash[crypto_generichash_BYTES];
   const size_t size = crypto_generichash_BYTES;
   ensure(!crypto_generichash(hash, size, (uint8_t *)tx + size,
                              tx->page_aligned_tx_size - size, 0, 0),
@@ -227,11 +386,11 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
          with(tx->tx_id, "%lu"));
 
   if (memcmp(hash, tx->hash_blake2b, size) != 0) {
-    *tx_p = 0;  // not a match on the hash, failed
+    *txn_p = 0;  // not a match on the hash, failed
     return success();
   }
   // we got a valid hash, can go forward with this
-  *tx_p = tx;
+  ensure(wal_decompress_transaction(file, tx, txn_p));
   return success();
 }
 // end::wal_validate_transaction[]
@@ -253,6 +412,37 @@ static result_t wal_next_valid_transaction(
   return success();
 }
 // end::wal_next_valid_transaction[]
+
+// tag::wal_recover_page[]
+static result_t wal_recover_page(db_t *db, pages_hash_table_t **pages,
+                                 wal_txn_page_t *page, void *end,
+                                 const void *src, void **input) {
+  size_t size = page->number_of_pages * PAGE_SIZE;
+  page_t final = {.page_num = page->page_num,
+                  .number_of_pages = page->number_of_pages};
+  ensure(mem_alloc_page_aligned((void *)&final.address, size));
+  size_t done = 0;
+  try_defer(free, final.address, done);
+  if (page->flags == wal_txn_page_flags_diff) {
+    txn_t tx;
+    ensure(txn_create(db, TX_READ, &tx));
+    page_t before = {.page_num = page->page_num,
+                     .number_of_pages = page->number_of_pages};
+    ensure(pages_get(&tx, &before));
+    memcpy(final.address, before.address,
+           page->number_of_pages * PAGE_SIZE);
+    *input = wal_apply_diff(*input, end, &final);
+  } else {
+    memcpy(final.address, src + page->offset, size);
+    *input += size;
+  }
+
+  ensure(hash_put_new(pages, &final));
+  done = 1;
+
+  return success();
+}
+// end::wal_recover_page[]
 
 // tag::wal_recover_tx[]
 static result_t free_hash_table_and_contents(
@@ -276,18 +466,12 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
                                     tx->number_of_modified_pages / 2),
                   &pages));
   defer(free_hash_table_and_contents, pages);
-
   for (size_t i = 0; i < tx->number_of_modified_pages; i++) {
-    size_t size = tx->pages[i].number_of_pages * PAGE_SIZE;
-    page_t final = {.page_num = tx->pages[i].page_num,
-                    .number_of_pages = tx->pages[i].number_of_pages};
-    ensure(mem_alloc_page_aligned((void *)&final.address, size));
-    size_t done = 0;
-    try_defer(free, final.address, done);
-    memcpy(final.address, ((char *)tx) + tx->pages[i].offset, size);
-    ensure(hash_put_new(&pages, &final));
-    done = 1;
-    input += size;
+    size_t end_offset = i + 1 < tx->number_of_modified_pages
+                            ? tx->pages[i + 1].offset
+                            : tx->tx_size;
+    ensure(wal_recover_page(db, &pages, tx->pages + i,
+                            ((void *)tx) + end_offset, tx, &input));
   }
   size_t iter_state = 0;
   page_t *p;
@@ -345,6 +529,8 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   pages_hash_table_t *recovered_pages;
   ensure(hash_new(16, &recovered_pages));
   defer(free, recovered_pages);
+  defer(free, recovery_state.files[0].buffer);
+  defer(free, recovery_state.files[1].buffer);
 
   while (true) {
     wal_txn_t *tx;

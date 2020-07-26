@@ -11,7 +11,6 @@ static result_t hash_expand_table(pages_hash_table_t **state_ptr) {
   ensure(mem_calloc((void *)&new_state, new_size));
   size_t done = 0;
   try_defer(free, new_state, done);
-  memcpy(new_state, state, sizeof(pages_hash_table_t));
   new_state->number_of_buckets = new_number_of_entries;
   size_t iter_state = 0;
   page_t *p;

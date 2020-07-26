@@ -247,15 +247,37 @@ process.
 ```
 include::./code/wal.c[tags=wal_recover]
 ```
-
 In `wal_recover`, we scan through the WAL file using the `wal_next_valid_transaction()` function, which we'll see shortly. Then recover the transaction
-using `wal_recover_tx()`. Once we are done running through the valid transactions, we can complete the recovery and validate the recovered pages. For
-the purpose of validating the recovered pages, we use the `recovered_pages` hash table we pass to `wal_recover_tx()`. 
+using `wal_recover_tx()`. You can see the details of `wal_recover_tx()` in <<wal_recover_tx>>. 
+Whereas `wal_recover()` runs through all the transactions in the WAL, `wal_recover_tx()` is concerned with recovering a single transaction. The function runs
+over the `pages` in the transaction and write each one of them to the data file. 
 
-The idea is that in `wal_recover_tx()`
-we'll run through all the transactions in the WAL and use the `recovered_pages` as a hash _set_ for all the page numbers that were modified in all the transactions.
-In this case, we aren't interested in the pages' values, only the page numbers. We use the `recovered_pages` to validate that the pages we recovered are valid
-and that there are no issues with them. Let's look how we get the next valid transaction in <<wal_next_valid_transaction>>.
+[source]
+[[wal_recover_tx]]
+.`wal.c` -  Recovering a single transaction from the WAL
+```
+include::./code/wal.c[tags=wal_recover_tx]
+```
+
+In <<wal_recover_tx>> you can see that `wal_recover_tx()` is using a hash table to keep track of the modified `pages`. For each page in the transaction `wal_recover_tx()`
+will call to `wal_recover_page()` to actually put the value from the WAL into the `pages` hash table. After we run through the entire transaction in the WAL, we'll write
+all those pages to the data file using `pal_write_file()`. The idea is that we'll only write to the data file _after_ we finished processing the whole transaction. This 
+gives us the chance to run additional validations during the transaction recovery. <<wal_recover_page>> shows how we manage a single page recovery using `wal_recover_page()`.
+
+[source]
+[[wal_recover_page]]
+.`wal.c` -  Recover a single page from the WAL to the `pages` hash table
+```
+include::./code/wal.c[tags=wal_recover_page]
+```
+
+We are passing more data to `wal_recover_page()` than we currently need. In particular, we are passing the end of the current page's buffer to the function. It isn't used
+right now, but will be of great help in the next chpater. 
+
+Once we are done running through the valid transactions, we can complete the recovery and validate the recovered pages. For the purpose of validating the recovered pages, we use 
+the `recovered_pages` hash table we pass to `wal_recover_tx()`.  The idea behind  the `recovered_pages` is that we'll use it as a hash _set_ for all the page 
+numbers that were modified in all the transactions. In this case, we aren't interested in the pages' values, only the page numbers. We use the `recovered_pages`
+to validate that the pages we recovered are valid and that there are no issues with them. Let's look how we get the next valid transaction in <<wal_next_valid_transaction>>.
 
 [source]
 [[wal_next_valid_transaction]]
@@ -330,12 +352,11 @@ include::./code/wal.c[tags=wal_will_checkpoint]
 ```
 
 If we call `fsync()` too often, we put a lot of load on the I/O and can hurt our performance. If we don't call it often enough, on restart, we'll have to go over all the transactions that we
-aren't _sure_ were properly persisted to durable media. That may increase the startup time of the database. In `wal_will_checkpoint()` we use a simple rule, we will allow a checkpoint once over
-half of the WAL is full. The size of the WAL is controlled by the user and they can use that to set the interval for `fsync()` calls. 
+aren't _sure_ were properly persisted to durable media. That may increase the startup time of the database. 
 
-That isn't the only limit to checkpoints, however. A checkpoint is only meaningful if the transaction in `txn_write_state_to_disk()` is the latest transaction in the WAL. Let's dig into this issue.
-The `txn_write_state_to_disk()` is going to run on a transaction that is guaranteed to have no one looking at it. In practice, that means that we can run a checkpoint whenever the WAL is over half
-full and there are no active transactions at all. Why is that required?
+In `wal_will_checkpoint()` we use a simple rule, a checkpoint is only meaningful if the transaction in `txn_write_state_to_disk()` is the latest transaction in the WAL. Let's dig into this issue.
+The `txn_write_state_to_disk()` is going to run on a transaction that is guaranteed to have no one looking at it. In practice, that means that we can run a checkpoint whenever there are no active 
+transactions at all. Why is that required?
 
 If the transaction that was just written to disk is the same as the most recent one it means that the entire WAL file has been made redundant. Let's see how we actually handle the checkpoint process
 in <<wal_checkpoint>>.
@@ -513,38 +534,44 @@ we run recovery on the empty database. On <<strace_output_tx>> you can see how a
 [[strace_output_tx]]
 .The `strace` showing the system calls for a single transaction
 ```
-pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 0) = 24576
-pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
-pwrite64(3, "\3\0\0\0\0\0\0\0\0\0"..., 8192, 8192) = 8192
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 24576, 0) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "\3\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 8192) = 8192
+fdatasync(3)                            = 0
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
 ```
 
 There isn't much in <<strace_output_tx>>, because from the operating system perspective, we aren't doing much. There is one write to the WAL (fd: 4), the first
 call on <<strace_output_tx>>. This is a durable write because the WAL was opened with `O_DSYNC|O_DIRECT`. Then there are two writes to the data file (fd: 3) to 
 pages 0 and 1, writing the actual data to the relevant pages. The transaction in <<strace_output_tx>> is writing to the data file because there are no other 
-active transactions to prevent it. This is also the transaction that happens in `db_init_file_structure()`. 
+active transactions to prevent it. This is also the transaction that happens in `db_init_file_structure()`. Finally, you can see that we flush the data to disk
+and then reset the WAL by writing a page full of zeros at the start.
 
-On <<strace_2nd_txs>> we can see the system calls as a result of two separate transactions, modifying page 3. The second transaction will write beyond the 50%
-mark on the WAL, so it is reset. 
+On <<strace_2nd_txs>> we can see the system calls as a result of two separate transactions, modifying page 3. 
 
 [source]
 [[strace_2nd_txs]]
 .The `strace` output from the calls two calls to `write_to_page()` and the resetting of the WAL
 ```
 // <1>
-pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 24576) = 24576
-pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
-pwrite64(3, "Hi there\0\0"..., 8192, 24576) = 8192
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\00\0\0\0\0"..., 24576, 0) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\00\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "Hi there\0\0\0\0\0\00"..., 8192, 24576) = 8192
 // <2>
-pwrite64(4, "\0\0\0\0\0\0\0\0\0\0"..., 24576, 49152) = 24576
-pwrite64(3, "\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
-pwrite64(3, "2nd Try!\0\0"..., 8192, 24576) = 8192
-// <3>
 fdatasync(3)                            = 0
-pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\\0\0"..., 8192, 0) = 8192
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+// <3>
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 24576, 0) = 24576
+pwrite64(3, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
+pwrite64(3, "2nd Try!\0\0\0\0\0\0"..., 8192, 24576) = 8192
+// <4>
+fdatasync(3)                            = 0
+pwrite64(4, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 8192, 0) = 8192
 ```
 <1> The system calls from the `write_to_page("Hi There")` call.
-<2> The system calls from the `write_to_page("2nd Try!")` call.
-<3> Resetting of the WAL file.
+<2> Resetting the WAL
+<3> The system calls from the `write_to_page("2nd Try!")` call.
+<4> Resetting of the WAL file.
 
 Finally, we can see how we close the database and reopen it in <<strace_close_reopen>>. You can see that there are no writes made to the data file
 as part of the database recovery on startup, because we reset the WAL on <<strace_2nd_txs>> and there is no need of that.
