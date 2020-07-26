@@ -1,7 +1,7 @@
 == Improving the Write Ahead Log
 
-In the pervious chapter, we build a Write Ahead Log and made sure that it is written to the disk in a durable manner. We implemented recovery on startup as well
-as checkpoint-ing, the trimming of the WAL when we know that all the data in it is safely stored in the data file. The implementation we have in the previous chapter
+In the pervious chapter, we built a Write Ahead Log and made sure that it is written to the disk in a durable manner. We implemented recovery on startup as well
+as a checkpoint, clearing the WAL when we know that old transactions are safely stored in the data file. The implementation we have in the previous chapter
 _works_, but it was meant primarily to provide you with the _concept_ of the Write Ahead Log and how it perform its role.
 
 There is a _lot_ that is still missing from the implementation and I intend to make this chapter a journey into completing those holes in the WAL.
@@ -10,129 +10,95 @@ There is a _lot_ that is still missing from the implementation and I intend to m
 
 A transaction is considered committed if it was written to the WAL successfully. On startup, we'll recover any change that were made in this transaction and ensure
 that we have no data loss. What will happen if the write to the WAL ended prematurely? Let's say that we have a transaction that modified 10 pages, in our current
-implementation, we'll need 88KB in the log to record the transaction. If we crashed midway through the way, and only the first 40KB made it into the WAL, what will
-happen?
+implementation, we'll need 88KB in the log to record the transaction (8KB for the transaction header, which is page aligned and then 80KB for the modified pages). 
+If we crashed midway through the way, and only the first 40KB made it into the WAL, what will happen?
+
+.What guarantees we require from the hardware?
+****
+The SQLite project has https://www.sqlite.org/atomiccommit.html[excellent documentation] on their assumptions of what will be the minimum behavior of the hardware
+they need in order to run. Gavran has slightly different requirements, however:
+
+* We assume that a write to the disk on page boundary will only impact the page or pages that it is touching. In other words, a write to a page cannot have any
+  effect on the data on another page. 
+* We assume that a write to the disk is non atomic and may fail midway, including when we are using `O_DIRECT | O_DSYNC` or any equivalent. Such failures, however,
+  are constrained in their behavior. After a failed write, each byte in the page that was written to will be either:
+** The value of that byte _before_ the write.
+** The value of that byte _after_ the write. 
+** There is no requirement that a range of bytes will change in an atomic manner, each byte may be set to its previous or new value and Gavran will operate correctly.
+* In particular, we assume that a write to a page doesn't have to modify all the bytes, but any byte in the page must be either the old value or the new value. There
+  is no scenario where the bytes on the page are zeroed or set to random values because of a failed write.
+* A _successful_ write to the disk with `O_DIRECT | O_DSYNC` will ensure that the data is stored in a persistent medium, resilient to power failures.
+* A _successful_ call to `fsync()` will ensure that all the writes made to the file reside in a persistent medium, resilient to power failures.
+
+These assumptions are actually _weaker_ than those made by SQLite, if you'll note. There is no assumption of atomic writes on a sector or a particular order imposed on 
+the write order to the disk. To my knowledge, all the disks that you are likely to encounter will behave according to these assumptions. The only exceptions of some
+cheap consumer disks that don't implement `fsync()` or FUA (Flush Unit Access, what `O_DIRECT | O_DSYNC` is translated into) properly.
+****
 
 Right now? We'll very likely copy empty or random pages into the data file, causing data corruption. This is because we aren't verifying the _integrity_ of the 
 transactions. In order to handle that, we'll need to compute a hash of the transaction before writing it and validate it during recovery. In the previous chapter
-I mentioned that the choice I have are between `xxHash64` (a non cryptographic fast hash) and `Blake2B` (a cryptographic hash). The `xxHash64` is much faster, but
+I mentioned that the choice I have are between `xxHash64` (a non cryptographic fast hash) and `BLAKE2b` (a cryptographic hash). The `xxHash64` is much faster, but
 I'm going to use `Blake2B` for now. 
 
 [TIP]
-.Why `Blake2B` over `xxHash64`?
+.Why `BLAKE2b` over `xxHash64`?
 ====
-Either one will serve us well. The `Blake2B` requires 32 bytes compared to 8 bytes for `xxHash64`, but I'm not concerned about the size. We have plenty of space
-in the transaction header. So why `Blake2B`? I could argue about safety, but I have no threat model that require me to handle attackers that can modify the data
+Either one will serve us well. The `BLAKE2b` requires 32 bytes compared to 8 bytes for `xxHash64`, but I'm not concerned about the size. We have plenty of space
+in the transaction header. So why `BLAKE2b`? I could argue about safety, but I have no threat model that require me to handle attackers that can modify the data
 on disk.
 
 We are trying to protect ourselves either from partial writes or corruption on disk. Either option will be detected just as well by `xxHash64`. The answer is 
-simple, until I have a performance trace that says that `Blake2B` is causing performance issues, it is easier for me to just use it rather than `xxHash64`. 
-The `libsodium` package, which I used to get the `Blake2B` implementation is easy to setup and consume. For `xxHash64` I had to include some headers and modify
-the build process. 
-
-I'm going to show the code for both, but unless the perf argument is a killer, we'll use `Blake2B`. I don't expect to even notice the hashing performance, mind you.
+simple, until I have a performance trace that says that `BLAKE2b` is causing performance issues, it is easier for me to just use it rather than `xxHash64`. 
+The `libsodium` package, which I used to get the `BLAKE2b` implementation is easy to setup and consume. For `xxHash64` I had to include some headers and modify
+the build process. We are also going to need `libsodium` anyway in chapter 11, so we might as well use it now.
 ====
 
-The first step along the way to verifying the transaction integrity is to add hashing in the `wal_append`. I've added a call to `wal_hash_transaction` immediately
-after the call to `wal_setup_transaction_for_file`. Listing 9.1 shows the implementation for `Blake2B`.
+The first step along the way to verifying the transaction integrity is to add hashing in the `wal_append`. You can the changes required in <<wal_append_09>>.
 
 [source]
-.Listing 9.1 - wal.c - Implementing `Blake2B` hashing of the transaction
-----
-include::./code/wal.c[tags=wal_tx_t]
+[[wal_append_09]]
+.`wal.c` - Hashing the transaction's data using `crypto_generichash()` (which uses `BLAKE2b`).
+```
+include::./code/wal.c[tags=wal_append]
+```
+<1> The new code, hashing the data in the transaction and using the `hash_blake2b` field at the beginning of the transaction to store it.
 
-static result_t wal_hash_transaction(wal_tx_t *wt,
-                                     struct palfs_io_buffer *io_buffers,
-                                     size_t required_pages, size_t index) {
-  crypto_generichash_state state;
-  ensure(!crypto_generichash_init(&state, 0, 0, crypto_generichash_BYTES),
-         msg("Failed to init hash"));
-  ensure(!crypto_generichash_update(
-             &state, (const uint8_t *)wt + crypto_generichash_BYTES,
-             (required_pages * PAGE_SIZE) - crypto_generichash_BYTES),
-         msg("Failed to hash tx data"));
+The `hash_blake2b` field is the first field in the `wal_txn_t` structure. This is done using the `crypto_generichash()` function from `libsodium` and will 
+run over the entire transaction buffer (sans the first 32 bytes, where the hash value is written to). 
 
-  for (size_t i = 1; i < index + 1; i++) {
-    ensure(!crypto_generichash_update(&state, io_buffers[i].address,
-                                      io_buffers[i].size),
-           msg("Failed to hash page data"), with(i, "%zu"));
-  }
+You can see that the actual amount of code we need to compute the hash is minimal, this is because the entire transaction is a single continuous buffer. You'll
+recall that avoided using the `pwritev()` in the previous chapter, even though it allows us to save on copying of the data. One of the reasons we skipped on the
+vectored writes is the simplicity for operations such as hashing of the transaction buffer. We could compute the hash on the separate pages, but it takes more code
+and is somewhat more complex. We'll see more reasons for why we want to use a single buffer shortly. 
 
-  ensure(!crypto_generichash_final(&state, (uint8_t *)wt->tx_hash_sodium,
-                                   crypto_generichash_BYTES),
-         msg("Unable to complete hash of transaction"));
-
-  return success();
-}
-----
-
-I've added a `tx_hash` to the `wal_tx_t` instead of the `magic` field. The code in `wal_hash_transaction` will first has the transaction header itself, aside from
-the prefix for the hash itself, then continue to run over all the pages modified in the transaction and update the hash with their contents. Finally, we get the 
-result and store it in the transaction header. 
-
-Validation of the transaction integrity is done by `wal_validate_transaction`, called from  in `wal_recover`, shown in Listing 9.2.
+Validation of the transaction integrity is done by `wal_validate_transaction()`, shown in <<wal_validate_transaction>>.
 
 [source]
-.Listing 9.2 - wal.c - Validating the transaction integrity
-----
+[[wal_validate_transaction]]
+.`wal.c` - Verifying the integrity of the transaction has as part of the database recovery
+```
 include::./code/wal.c[tags=wal_validate_transaction]
-----
+```
 
-Validating the transaction is easier than computing the initial hash. In the case of the transaction, all the buffers are in one location and consecutive. That 
-makes it simpler to work with. As you can see, if we fail to validate the hash, we consider this to be a broken transaction and abort the recovery process.
-That means that a partial write will be consider as noop and will have no effect, exactly as we want it to be.
+Validating the transaction is as easy as computing the initial hash. If we fail to validate the hash, we consider this to be a broken transaction and abort the recovery process.
+That means that a partial write will be consider as noop and will have no effect, exactly as we want it to be. If you'll recall, the fact that we reuse the file after we
+reset it means that we may read a valid transaction, only to have the next page come from the middle of a previous transaction. Now we can rest assured that such a case will
+not be an issue for us. We validate using a cryptographic hash function, so there is no chance to get a value that would accidentally validate as a valid transaction.
 
-For completion sake, Listing 9.3 shows the `xxHash64` implementation. Unsurprisingly, it is quite close to the `Blake2B` from the perspective of the calling code.
-
-[source]
-.Listing 9.3 - Verifying transaction integrity with `xxHash64`
-----
-static result_t
-wal_hash_transaction(wal_tx_t *wt, struct palfs_io_buffer *io_buffers,
-                              size_t required_pages, size_t index) {
-  XXH64_state_t *const state = XXH64_createState();
-  defer(free, state);
-  ensure(state, msg("Failed to init hash"));
-  XXH64_hash_t const seed = wt->tx_id;
-  ensure(XXH64_reset(state, seed) != XXH_ERROR, msg("reset hash failed"));
-
-  size_t tx_header_size = (required_pages * PAGE_SIZE) - sizeof(XXH64_hash_t);
-  ensure(XXH64_update(state, (char *)wt + sizeof(XXH64_hash_t),
-        tx_header_size) != XXH_ERROR, msg("Failed to hash tx state"));
-
-  for (size_t i = 1; i < index + 1; i++) {
-    ensure(XXH64_update(state, io_buffers[i].address, io_buffers[i].size) !=
-              XXH_ERROR, msg("Failed to hash page"), with(i, "%zu"));
-  }
-
-  wt->tx_hash = XXH64_digest(state);
-  return success();
-}
-
-static result_t wal_validate_transaction_hash(wal_tx_t *tx,
-                                                     bool *passed) {
-  XXH64_hash_t hash = XXH64((char *)tx + sizeof(XXH64_hash_t),
-                            tx->tx_size - sizeof(XXH64_hash_t), tx->tx_id);
-
-  *passed = hash == tx->tx_hash;
-  return success();
-}
-----
-
-In Listing 9.3, the `tx_hash` field is a `uint64_t` instead of a 32 bytes buffer, but aside from that, there is really nothing much that is different. 
-It was easier to integrate with `Blake2B` via `libsodium`, so I went with that. We'll have performance tests later and see if that matters.
+With those two modifications, we have proper validation of transaction written to the disk. That wasn't bad at _all_. 
 
 === Validating future transactions
 
 Now that we can verify the transaction integrity, we need to consider an interesting scenario. What happen if we fail to verify a transaction, but there
-are valid transactions _beyond_ that invalid transaction? Consider the scenario shown in Figure 18.
+are valid transactions _beyond_ that invalid transaction? Consider the scenario shown in <<wal-corruption>>.
 
+[[wal-corruption]]
 .Invalid transaction (tx 5) followed by a valid transaction (tx 6)
-image::{img-src}/fig18.png[]
+image::wal-corruption.png[]
 
-We have transaction 5, which has a bad hash value. Notice that its size (the surrounding rectangle) goes into the next transaction. In our current code,
+In <<wal-corruption>> we have transaction 5, which has a bad hash value. Notice that its size (the surrounding rectangle) goes into the next transaction. In our current code,
 we'll run through the WAL, find that transaction 5 cannot pass verification and stop. That is fine, if this was an uncommitted transaction. However, the
-situation in Figure 18 is not an uncommitted transaction, partially written to disk. It is a data corruption error in the middle of the WAL. It corrupted 
+situation in <<wal-corruption>> is not an uncommitted transaction, partially written to disk. It is a data corruption error in the middle of the WAL. It corrupted 
 transaction 5, but transaction 6 is still there.
 
 There isn't much that we can _do_ about such a scenario, mind. If we can't verify the hash, it is not possible to copy the pages and move on. We need to 
@@ -141,7 +107,7 @@ _report_ this scenario, however, and not allow the system to proceed and erase c
 [IMPORTANT]
 .Is failing recovery a viable options? It is the _only_ option!
 ====
-In a case such as Figure 18, we have three options. We can attempt to write the transaction pages to the disk and hope for the best. That is likely going
+In a case such as <<wal-corruption>>, we have three options. We can attempt to write the transaction pages to the disk and hope for the best. That is likely going
 to cause us data corruption and _strange_ errors down the line. Let's avoid that. We can abort the recovery process on the first transaction that failed
 to verify. 
 
@@ -151,23 +117,49 @@ also writing to the data file on an ongoing basis. It is entirely possible that 
 to the data file, while other haven't. That leads back to data corruption and... _challenging_ debugging sessions.
 
 If we detect such an issue and abort, we can at least have the user do something meaningful. Like restore from backup, which is probably the only safe option
-that is left, after we found that we have disk corruption at the WAL.
+that is left, after we found that we have disk corruption on the WAL.
 ====
 
-You can see the implementation of this check in Listing 9.4. The code there is the last thing that happens in the `wal_recover` function, to make sure that 
-after we found the latest viable option, there aren't any valid transactions that we might miss. 
+We verify that the WAL has no valid transactions in the end in `wal_next_valid_transaction()`, you can see the changes in <<wal_next_valid_transaction_09>>.
 
 [source]
-.Listing 9.4- wal.c - Validating that there aren't any _future_ valid transactions in the WAL after a bad one
-----
-include::./code/wal.c[tags=wal_recover_validate_after]
-----
+[[wal_next_valid_transaction_09]]
+.`wal.c` - After we get an invalid transaction, error if we have _valid_ transactions that we are going to have to skip
+```
+include::./code/wal.c[tags=wal_next_valid_transaction]
+```
+<1> The new code, call `wal_validate_after_end_of_transactions()` to ensure that there are no more valid transactions in the WAL.
 
 We start scanning the WAL after the last valid transaction one page at a time. Transactions are always on a page boundary, so that makes things easier for us. If 
 we find something that looks like a transaction, we will see if it is valid. A valid transaction that is lower than the `last_tx_id` on the database is fine, we a
-already have this data in the data file. That can happen after the WAL has been reset.
+already have this data in the data file. That can happen after the WAL has been reset. You can see the full details in <<wal_validate_after_end_of_transactions>>.
+
 If the transaction is valid and come _after_ the last known transaction, we found an error and need to fail the recovery. Note that if we found a valid transaction
-we can skip the whole range of the transaction. If we _didn't_ find such a transaction, we'll move to the next page and the cycle repeats to the end of the WAL.
+we can skip the whole range of the transaction. A valid transaction that is older than the most recent transaction means that the WAL was reset, and we can skip
+checking the rest of the file. That is a concern because we want to reduce the startup time as much as possible.
+
+[source]
+[[wal_validate_after_end_of_transactions]]
+.`wal.c` - Validating that no further transactions in the WAL are valid
+```
+include::./code/wal.c[tags=wal_validate_after_end_of_transactions]
+```
+
+If we _didn't_ find such a transaction, we'll move to the next page and the cycle repeats to the end of the WAL. The point in `wal_validate_after_end_of_transaction()`
+is that we'll run through the WAL and any corruption will cause us to skip the transaction. We'll then scan for more valid transactions and if there are any, we can
+detect that there was an error. Note that a corruption on the _last_ transaction isn't something that we can detect. There is no way to separate that from a transaction
+that wasn't committed properly to the disk and we'll have to consider that as rolled back.
+
+In <<wal_validate_after_end_of_transactions>> we are using a few utility functions, you can see them in <<wal_range>>.
+
+
+[source]
+[[wal_range]]
+.`wal.c` - Utility functions to make iterating over the WAL contents easier
+```
+include::./code/wal.c[tags=wal_range]
+```
+
 
 === Remembering the transaction id
 
