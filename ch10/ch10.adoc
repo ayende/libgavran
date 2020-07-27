@@ -199,7 +199,10 @@ paths and for the callers. You can see how they are being used in <<txn_commit_1
 ----
 include::./code/txn.c[tags=txn_commit]
 ----
-<1> The new code, when we successfully committed the transaction, we can free the rollback state immediately.
+<1> New code, when we update the mapping we work on after increasing the file size, we do that only on the local transaction. On commit, we publish this to 
+    the rest of the system. In this case, the `global_state` on the `default_read_tx` and the `db_state_t`. Note that this is safe to do even for running
+    transactions. The mapping overlap and you can access the same memory using both the old and new mapping to get the same values.
+<2> New code, when we successfully committed the transaction, we can free the rollback state immediately.
 
 <<txn_commit_10>> shows what happens when we successfully committed. We can immediately free all the memory around rollback callbacks. Since rollback is now
 no longer possible. There is still the issue with the `on_forget` callback. That is called from the `txn_free_single_tx_state()` function, showing in 
@@ -212,6 +215,27 @@ no longer possible. There is still the issue with the `on_forget` callback. That
 include::./code/txn.c[tags=txn_free_single_tx_state]
 ----
 <1> The new code, just before we free the transaction, call all the registered callbacks to ensure that the entire state is cleaned up.
+
+[CAUTION]
+.The identity function of a page is its `page_num`, nothing else!
+****
+Gavran makes the following promises with regards to pages and their memory. 
+
+* Once you accessed a page, you can continue to access the page using the same memory address for the duration of the transaction.
+* It is _invalid_ to store that pointer after the transaction has closed. 
+* Two calls to `txn_get_page()` may return _different_ pointers in the same transaction. 
+
+The last one is interesting, let's see how that can happen. We start a transaction and then call `txn_get_page(2) -> 0xF68000` for the duration
+of the transaction, we'll always be able to use `0xF68000` to get to the page. However, we allocate a new page and the data file grow, resulting
+in new mapping. We call `txn_get_page(2) -> 0xB8439000` and we get a _different_ pointer. This is because each one of the calls was served from
+a different mapping. 
+
+In this case, both `0xF68000` and `0xB8439000` are going to be _identical_ in content. They are pointing to the same physical memory location. 
+
+This isn't a problem in practice, because we observe the exact same thing when we use `txn_modify_page()`, because of Copy on Write, we get a 
+different memory from the one that we got from the `txn_get_page()` call. Note that inside a single transaction, all calls to `txn_modify_page()`
+will return the _same_ pointer. Indeed, `txn_modify_page()` will simply return the previous value when called on a page for the second time.
+****
 
 Finally, there is the `txn_close()` function, which we had to modify to take into account the new callbacks. As a reminder, when we close a transaction that
 hasn't been committed, this is considered a rollback, there is no explicit rollback mechanism in Gavran. You can see the changes we made to `txn_close()` in

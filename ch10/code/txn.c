@@ -110,6 +110,12 @@ result_t txn_commit(txn_t *tx) {
   tx->state->usages = 1;
 
   // <1>
+  // Update global references to the current span on commit
+  tx->state->db->default_read_tx->global_state.span =
+      tx->state->global_state.span;
+  tx->state->db->global_state.span = tx->state->global_state.span;
+
+  // <2>
   while (tx->state->on_rollback) {
     cleanup_callback_t *cur = tx->state->on_rollback;
     tx->state->on_rollback = cur->next;

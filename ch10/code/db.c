@@ -137,7 +137,7 @@ db_try_increase_file_size(txn_t *tx, uint64_t pages) {
          with(new_size, "%lu"), with(pages, "%lu"),
          with(tx->state->db->options.maximum_size, "%lu"));
   file_handle_t *handle = tx->state->db->handle;
-  ensure(pal_set_file_size(handle, 0, new_size));
+  ensure(pal_set_file_size(handle, new_size, UINT64_MAX));
   uint64_t from = tx->state->global_state.header.number_of_pages;
   uint64_t to = new_size / PAGE_SIZE;
   span_t new_map = {.size = new_size};
