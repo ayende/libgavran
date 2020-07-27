@@ -9,8 +9,7 @@
 #include <gavran/internal.h>
 #include <gavran/test.h>
 
-// tag::tests10[]
-
+// tag::tests11[]
 static result_t open_file_and_get_map(const char *path,
                                       file_handle_t **handle,
                                       span_t *map) {
@@ -129,6 +128,40 @@ describe(validation_and_encryption) {
     defer(db_close, db);
   }
 
+  it("can read encrypted data from old tx") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    randombytes_buf(options.encryption_key, 32);
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+
+    txn_t w;
+    assert(txn_create(&db, TX_WRITE, &w));
+    defer(txn_close, w);
+    page_t p = {.number_of_pages = 1};
+    page_metadata_t *metadata;
+    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    metadata->overflow.page_flags = page_flags_overflow;
+    metadata->overflow.number_of_pages = 1;
+    const char str[] = "Hello From Gavran";
+    strcpy(p.address, str);
+
+    txn_t leaked;
+    assert(txn_create(&db, TX_READ, &leaked));
+    defer(free, leaked.working_set);
+
+    assert(txn_commit(&w));
+    assert(txn_close(&w));
+    {
+      txn_t rtx;
+      assert(txn_create(&db, TX_READ, &rtx));
+      defer(txn_close, rtx);
+      page_t rp = {.page_num = p.page_num};
+      assert(txn_get_page(&rtx, &rp));
+      assert(strcmp(str, rp.address) == 0);
+    }
+  }
+
   it("on encrypted db, cannot find data on disk") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
@@ -203,4 +236,4 @@ describe(validation_and_encryption) {
     assert(c != 0, "Expected to find a match");
   }
 }
-// end::tests10[]
+// end::tests11[]

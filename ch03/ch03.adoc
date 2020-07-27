@@ -147,7 +147,9 @@ enough information to have a mostly correct gut feeling about how things work.
 If you want to understand how it works in more depth, I would recommend reading an excellent
 book on the topic: http://www.nobius.org/practical-file-system-design.pdf[Practical File System Design with the Be File System]. It is an old one (I read it the first
 time close to two decades ago) but it does an excellent job of covering a _lot_ of the details. At under 250 pages, it makes for an _excellent_ read for a very complex
-topic.
+topic. Another resource you might want to consider is https://blog.carlosgaldino.com/writing-a-file-system-from-scratch-in-rust.html[GotenksFS], a file system explicitly
+designed for learning purposes. There is also https://github.com/libfuse/libfuse[libfuse] which allows you to define file systems in user space, which can be really 
+interesting peek into how file systems really work.
 
 [NOTE]
 .What about fork support?

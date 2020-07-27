@@ -121,11 +121,9 @@ db_setup_page_validation(db_state_t *ptr) {
   if (ptr->options.page_validation == page_validation_once) {
     ptr->original_number_of_pages =
         ptr->global_state.header.number_of_pages;
-    ptr->first_read_bitmap = calloc(
-        ptr->global_state.header.number_of_pages * PAGE_SIZE / 64,
-        sizeof(uint64_t));
-    ensure(ptr->first_read_bitmap,
-           msg("Unable to allocate database's first read bitamp"));
+    ensure(mem_calloc(
+        (void *)&ptr->first_read_bitmap,
+        ptr->global_state.header.number_of_pages * PAGE_SIZE / 8));
   }
   return success();
 }

@@ -97,7 +97,7 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
   }
   db_state_t *db = tx->state->db;
   uint64_t *bitmap = db->first_read_bitmap;
-  // before the db init is completedo or extended during this run
+  // before the db init is completed or extended during this run
   if (!bitmap || page->page_num > db->original_number_of_pages ||
       // already checked
       (bitmap[page->page_num / 64] & (1UL << page->page_num % 64)))
@@ -225,12 +225,16 @@ static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
 result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
   page->address = 0;
-  if (hash_lookup(tx->state->modified_pages, page) ||
-      hash_lookup(tx->working_set, page))  //       <1>
+  // <1>
+  if (!(tx->state->flags & TX_COMMITED) &&
+      hash_lookup(tx->state->modified_pages, page))
     return success();
-  txn_state_t *prev = tx->state->prev_tx;
+  // <2>
+  if (hash_lookup(tx->working_set, page)) return success();
+  txn_state_t *prev = tx->state;
+  // <3>
   while (prev) {
-    if (hash_lookup(prev->modified_pages, page)) return success();
+    if (hash_lookup(prev->modified_pages, page)) break;
     prev = prev->prev_tx;
   }
 
@@ -240,7 +244,8 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   }
 
   if (tx->state->db->options.encrypted) {
-    ensure(txn_decrypt_page(tx, page));  //         <2>
+    // <4>
+    ensure(txn_decrypt_page(tx, page));
   } else {
     ensure(txn_ensure_page_is_valid(tx, page));
   }
