@@ -37,6 +37,8 @@ implementation_detail result_t db_validate_options(
     db_options_t *user_options, db_options_t *default_options) {
   if (user_options->minimum_size)
     default_options->minimum_size = user_options->minimum_size;
+  if (user_options->maximum_size)
+    default_options->maximum_size = user_options->maximum_size;
   if (user_options->wal_size)
     default_options->wal_size = user_options->wal_size;
 
@@ -45,6 +47,13 @@ implementation_detail result_t db_validate_options(
            msg("The minimum_size cannot be less than the minimum "
                "value of 128KB"),
            with(default_options->minimum_size, "%lu"));
+  }
+  if (default_options->minimum_size > default_options->maximum_size) {
+    failed(
+        EINVAL,
+        msg("The maximum_size cannot be less than the minimum_size"),
+        with(default_options->maximum_size, "%lu"),
+        with(default_options->minimum_size, "%lu"));
   }
 
   if (default_options->wal_size < 128 * 1024) {
@@ -63,6 +72,7 @@ implementation_detail void db_initialize_default_options(
     db_options_t *options) {
   memset(options, 0, sizeof(db_options_t));
   options->minimum_size = 1024 * 1024;
+  options->maximum_size = UINT64_MAX;
   options->wal_size = 256 * 1024;
 }
 // end::db_initialize_default_options[]

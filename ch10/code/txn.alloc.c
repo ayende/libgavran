@@ -2,193 +2,165 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "db.h"
-#include "errors.h"
-#include "impl.h"
-#include "platform.fs.h"
-#include "platform.mem.h"
+#include <gavran/db.h>
+#include <gavran/infrastructure.h>
+#include <gavran/internal.h>
 
-// tag::txn_free_page[]
-// <1>
-static result_t get_free_space_bitmap_word(txn_t *tx, uint64_t page_num,
-                                           uint64_t *word) {
+// tag::txn_free_space_mark_page[]
+static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
+                                         bool busy) {
   file_header_t *header = &tx->state->global_state.header;
   uint64_t start = header->free_space_bitmap_start;
 
-  uint64_t relevant_free_space_bitmap_page = start + page_num / BITS_IN_PAGE;
-
-  page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
-  ensure(txn_get_page(tx, &bitmap_page));
-  uint64_t *bitmap = bitmap_page.address;
-  *word = bitmap[(page_num % BITS_IN_PAGE) / 64];
-  return success();
-}
-
-// <2>
-static result_t mark_page_as_free(txn_t *tx, uint64_t page_num) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
-
-  uint64_t relevant_free_space_bitmap_page = start + page_num / BITS_IN_PAGE;
+  uint64_t relevant_free_space_bitmap_page =
+      start + page_num / BITS_IN_PAGE;
 
   page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
   ensure(txn_modify_page(tx, &bitmap_page));
-  clear_bit(bitmap_page.address, page_num % BITS_IN_PAGE);
+  bitmap_set(bitmap_page.address, page_num % BITS_IN_PAGE, busy);
+  return success();
+}
+// end::txn_free_space_mark_page[]
+
+result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
+  uint64_t bitmap_start =
+      tx->state->db->global_state.header.free_space_bitmap_start;
+  page_t bitmap_page = {.page_num = bitmap_start};
+  ensure(txn_get_page(tx, &bitmap_page));
+  *busy = bitmap_is_set(bitmap_page.address, page_num);
   return success();
 }
 
+// tag::txn_allocate_metadata_entry[]
+static result_t txn_allocate_metadata_entry(txn_t *tx,
+                                            uint64_t page_num,
+                                            page_metadata_t **entry) {
+  page_t meta_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
+  bool exists;
+  ensure(txn_is_page_busy(tx, meta_page.page_num, &exists));
+  ensure(txn_raw_modify_page(tx, &meta_page));
+  page_metadata_t *self = meta_page.address;
+  if (!exists) {
+    // first time, need to allocate it all
+    self->common.page_flags = page_flags_metadata;
+    ensure(txn_free_space_mark_page(tx, meta_page.page_num, true));
+  }
+  page_flags_t expected = meta_page.page_num ? page_flags_metadata
+                                             : page_flags_file_header;
+  ensure(self->common.page_flags == expected,
+         msg("Expected page to be metadata page, but wasn't"),
+         with(page_num, "%lu"), with(self->common.page_flags, "%x"));
+
+  page_metadata_t *metadata =
+      &self[page_num & ~PAGES_IN_METADATA_MASK];
+  ensure(!metadata->common.page_flags,
+         msg("Expected metadata entry to be empty, but was in use"),
+         with(page_num, "%lu"),
+         with(metadata->common.page_flags, "%x"));
+
+  memset(metadata, 0, sizeof(page_metadata_t));
+  *entry = metadata;
+  return success();
+}
+// end::txn_allocate_metadata_entry[]
+
+// tag::txn_allocate_page[]
+result_t txn_allocate_page(txn_t *tx, page_t *page,
+                           page_metadata_t **metadata,
+                           uint64_t nearby_hint) {
+  // end::txn_allocate_page[]
+
+  file_header_t *header = &tx->state->global_state.header;
+  uint64_t start = header->free_space_bitmap_start;
+
+  if (!page->number_of_pages) page->number_of_pages = 1;
+
+  page_t bitmap_page = {.page_num = start};
+  ensure(txn_get_page(tx, &bitmap_page));
+  bitmap_search_state_t search = {
+      .input = {
+          .bitmap = bitmap_page.address,
+          .bitmap_size = (bitmap_page.number_of_pages * PAGE_SIZE) /
+                         sizeof(uint64_t),
+          .space_required = page->number_of_pages,
+          .near_position = nearby_hint}};
+  if ((search.input.space_required & ~PAGES_IN_METADATA_MASK) == 0) {
+    // we must use one more in this cases, so the first page
+    // would "poke" into an existing range that has metadata pages
+    search.input.space_required++;
+  }
+  if (bitmap_search(&search)) {
+    page->page_num = search.output.found_position;
+    ensure(txn_raw_modify_page(tx, page));
+    memset(page->address, 0, PAGE_SIZE * page->number_of_pages);
+    for (size_t i = 0; i < page->number_of_pages; i++) {
+      ensure(txn_free_space_mark_page(
+          tx, search.output.found_position + i, true));
+    }
+    ensure(txn_allocate_metadata_entry(tx, page->page_num, metadata));
+    return success();
+  }
+  // tag::txn_allocate_page_end[]
+
+  if (flopped(db_try_increase_file_size(tx, page->number_of_pages))) {
+    failed(ENOSPC, msg("No more room left in the file to allocate"),
+           with(tx->state->db->handle->filename, "%s"));
+  }
+  return txn_allocate_page(tx, page, metadata, nearby_hint);
+}
+// end::txn_allocate_page_end[]
+
+// tag::txn_free_space_bitmap_metadata_range_is_free[]
+static result_t txn_free_space_bitmap_metadata_range_is_free(
+    txn_t *tx, uint64_t page_num, bool *is_free) {
+  file_header_t *header = &tx->state->global_state.header;
+  uint64_t start = header->free_space_bitmap_start;
+
+  uint64_t relevant_free_space_bitmap_page =
+      start + page_num / BITS_IN_PAGE;
+
+  page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
+  ensure(txn_raw_get_page(tx, &bitmap_page));
+  uint64_t *bitmap = bitmap_page.address;
+  size_t index = (page_num % BITS_IN_PAGE) / 64;
+  *is_free = bitmap[index] == 1 && bitmap[index + 1] == 0;
+  return success();
+}
+// end::txn_free_space_bitmap_metadata_range_is_free[]
+
+// tag::txn_free_page[]
 result_t txn_free_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
+  if ((page->number_of_pages & ~PAGES_IN_METADATA_MASK) == 0)
+    page->number_of_pages++;  // allocations on 128 pages boundary
+                              // have an extra page tacked on them
+
   ensure(txn_modify_page(tx, page));
-  uint64_t pages = page->overflow_size / PAGE_SIZE +
-                   (page->overflow_size % PAGE_SIZE ? 1 : 0);
+  memset(page->address, 0, PAGE_SIZE * page->number_of_pages);
 
-  // <3>
-  if ((pages & ~PAGES_IN_METADATA_MASK) == 0)
-    pages++; // allocations on 128 pages boundary have an extra page tacked on
-
-  // <4>
-  for (size_t i = 0; i < pages; i++) {
-    ensure(mark_page_as_free(tx, page->page_num + i));
-    // <5>
-    page_metadata_t *metadata;
-    ensure(txn_modify_metadata(tx, page->page_num + i, &metadata));
-    memset(metadata, 0, sizeof(page_metadata_t));
+  for (size_t i = 0; i < page->number_of_pages; i++) {
+    ensure(txn_free_space_mark_page(tx, page->page_num + i, false));
   }
 
-  // <6>
-  memset(page->address, 0, PAGE_SIZE * pages);
+  // <1>
+  uint64_t metadata_page_num =
+      page->page_num & PAGES_IN_METADATA_MASK;
+  if (metadata_page_num != page->page_num && page->page_num) {
+    // <2>
+    page_metadata_t *metadata;
+    ensure(txn_modify_metadata(tx, page->page_num, &metadata));
+    memset(metadata, 0, sizeof(page_metadata_t));
 
-  // <7>
-  uint64_t metadata_page_num = page->page_num & PAGES_IN_METADATA_MASK;
-  if (metadata_page_num != page->page_num) {
-    uint64_t free_space_bitmap_word;
-    ensure(get_free_space_bitmap_word(tx, metadata_page_num,
-                                      &free_space_bitmap_word));
-    if (free_space_bitmap_word == 1) {
-      ensure(get_free_space_bitmap_word(tx, metadata_page_num + 64,
-                                        &free_space_bitmap_word));
-      if (free_space_bitmap_word == 0) {
-        // we have a 1 MB range where the only busy page is the metadata itself?
-        // let's free that.
-        page_t metadata_page = {.page_num = metadata_page_num};
-        ensure(txn_free_page(tx, &metadata_page));
-      }
+    bool is_free;
+    ensure(txn_free_space_bitmap_metadata_range_is_free(
+        tx, metadata_page_num, &is_free));
+    if (is_free) {
+      page_t metadata_page = {.page_num = metadata_page_num};
+      ensure(txn_free_page(tx, &metadata_page));
     }
   }
 
   return success();
 }
 // end::txn_free_page[]
-
-// tag::txn_allocate_page[]
-static result_t mark_page_as_busy(txn_t *tx, uint64_t page_num) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
-
-  uint64_t relevant_free_space_bitmap_page = start + page_num / BITS_IN_PAGE;
-
-  page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
-  ensure(txn_modify_page(tx, &bitmap_page));
-  set_bit(bitmap_page.address, page_num % BITS_IN_PAGE);
-  return success();
-}
-
-// <1>
-result_t txn_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
-
-  uint64_t relevant_free_space_bitmap_page = start + page_num / BITS_IN_PAGE;
-
-  page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
-  ensure(txn_get_page(tx, &bitmap_page));
-  *busy = is_bit_set(bitmap_page.address, page_num % BITS_IN_PAGE);
-  return success();
-}
-
-// <2>
-static result_t allocate_metadata_entry(txn_t *tx, uint64_t page_num,
-                                        page_metadata_t **entry) {
-  page_t p = {.page_num = page_num & PAGES_IN_METADATA_MASK};
-
-  bool exists;
-  ensure(txn_page_busy(tx, p.page_num, &exists));
-
-  ensure(txn_modify_page(tx, &p));
-  page_metadata_t *self = p.address;
-  if (!exists) {
-    // <3>
-    // first time, need to allocate it all
-    self->type = page_metadata;
-    self->overflow_size = PAGE_SIZE;
-    ensure(mark_page_as_busy(tx, p.page_num));
-  }
-
-  ensure(self->type == page_metadata,
-         msg("Expected page to be metadata page, but wasn't"),
-         with(page_num, "%lu"), with(p.page_num, "%lu"),
-         with(self->type, "%x"));
-
-  size_t index = page_num & ~PAGES_IN_METADATA_MASK;
-  page_metadata_t *metadata = self + index;
-  ensure(!metadata->type,
-         msg("Expected metadata entry to be empty, but was in use"),
-         with(page_num, "%lu"), with(p.page_num, "%lu"), with(self->type, "%x"),
-         with(index, "%zu"));
-
-  memset(metadata, 0, sizeof(page_metadata_t));
-
-  *entry = metadata;
-
-  return success();
-}
-
-result_t txn_allocate_page(txn_t *tx, page_t *page, uint64_t nearby_hint) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
-
-  page_metadata_t *freespace_metadata;
-  ensure(txn_get_metadata(tx, start, &freespace_metadata));
-
-  if (!page->overflow_size)
-    page->overflow_size = PAGE_SIZE;
-
-  // <4>
-  uint32_t pages = page->overflow_size / PAGE_SIZE +
-                   (page->overflow_size % PAGE_SIZE ? 1 : 0);
-
-  page_t bitmap_page = {.page_num = start};
-  ensure(txn_get_page(tx, &bitmap_page));
-
-  bitmap_search_state_t search;
-  init_search(&search, bitmap_page.address,
-              freespace_metadata->overflow_size / sizeof(uint64_t), pages);
-  search.near_position = nearby_hint;
-
-  if (search_free_range_in_bitmap(&search)) {
-
-    page->page_num = search.found_position;
-    for (size_t i = 0; i < pages; i++) {
-      ensure(mark_page_as_busy(tx, search.found_position + i));
-    }
-
-    page_metadata_t *metadata;
-    ensure(allocate_metadata_entry(tx, page->page_num, &metadata));
-    metadata->overflow_size = page->overflow_size;
-
-    ensure(txn_modify_page(tx, page));
-    memset(page->address, 0, PAGE_SIZE * pages);
-
-    return success();
-  }
-
-  if (db_try_increase_file_size(tx, pages) && !errors_get_count()) {
-    return txn_allocate_page(tx, page, nearby_hint);
-  }
-
-  failed(ENOSPC, msg("No more room left in the file to allocate"),
-         with(palfs_get_filename(tx->state->db->handle), "%s"));
-}
-// end::txn_allocate_page[]

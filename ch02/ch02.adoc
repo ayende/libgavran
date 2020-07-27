@@ -231,8 +231,8 @@ error and then be able to provide more context to it. In the case of `ensure`, i
 being run. Note that for `ensure`, we also check if `errors_get_count()` is non zero. This is to handle a scenario where we had a `defer()` that run
 and _failed_ after the function itself was successful. We want to treat this as an error and fail as usual. 
 
-You can also use `verify()` to do a proper check if an operation was successful or not. This is used if you need to do some error handling on the operation,
-not just return to the caller. The `verify()` will ensure that we consider also deferral errors into account before agreeing that the operation was successful.
+You can also use `flopped()` to do a proper check if an operation was successful or not. This is used if you need to do some error handling on the operation,
+not just return to the caller. The `flopped()` will ensure that we consider also deferral errors into account before agreeing that the operation was successful.
 
 [NOTE]
 .The difference between `op_result_t*` and `result_t`

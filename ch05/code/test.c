@@ -94,7 +94,14 @@ describe(allocation_tests) {
       size_t count;
       int* codes = errors_get_codes(&count);
       assert(count > 0);
-      assert(ENOSPC == codes[0]);
+      bool found = false;
+      for (size_t i = 0; i < count; i++) {
+        if (codes[i] == ENOSPC) {
+          found = true;
+          break;
+        }
+      }
+      assert(found);
     }
   }
 

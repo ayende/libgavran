@@ -190,7 +190,7 @@ https://stackoverflow.com/questions/24477740/[StackOveflow] has an interesting s
 this differently, though. Errors during cleanup routines are already very hard to deal with. If we have to deal with them routinely that would be
 a pain. Instead, we are going to try to set things up so this doesn't matter.
 
-With `verify()` also validating the `errors_count()`, we know that even if the error happened in the `defer()` call, we'll detect and treat it just the same.
+With `flopped()` also validating the `errors_count()`, we know that even if the error happened in the `defer()` call, we'll detect and treat it just the same.
 ====
 
 What <<fsync_parent_directory>> does, essentially, is to `open()` the parent directory using `O_RDONLY` and then call `fsync()` on the returned file descriptor. This

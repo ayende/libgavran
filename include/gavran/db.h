@@ -186,11 +186,13 @@ typedef struct db_state {
 } db_state_t;
 // end::db_state_t[]
 
+// tag::cleanup_callback_t[]
 typedef struct cleanup_callback {
   void (*func)(void *state);
-  struct cleanup_act *next;
+  struct cleanup_callback *next;
   char state[];
 } cleanup_callback_t;
+// end::cleanup_callback_t[]
 
 // tag::txn_state_t[]
 typedef struct txn_state {
@@ -221,6 +223,11 @@ result_t txn_commit(txn_t *tx);
 result_t txn_raw_get_page(txn_t *tx, page_t *page);
 result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 // end::txn_api[]
+
+result_t txn_register_cleanup_action(cleanup_callback_t **head,
+                                     void (*action)(void *),
+                                     void *state_to_copy,
+                                     size_t size_of_state);
 
 result_t txn_get_page(txn_t *tx, page_t *page);
 result_t txn_modify_page(txn_t *tx, page_t *page);

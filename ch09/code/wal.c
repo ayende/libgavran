@@ -141,7 +141,7 @@ static void *wal_compress_transaction(wal_txn_t *wt, void *start,
   size_t input_size = (size_t)(end - start);
   size_t required_size = ZSTD_compressBound(input_size);
   void *buffer;
-  if (verify(mem_alloc(&buffer, required_size))) {
+  if (flopped(mem_alloc(&buffer, required_size))) {
     // no memory, we'll skip compression
     errors_clear();  // recoverable, so can clear it
     return end;
@@ -316,7 +316,7 @@ static result_t wal_validate_after_end_of_transactions(
     ensure(wal_get_next_range(s, &cur, &end));
     if (!cur) break;
     wal_txn_t *tx;
-    if (verify(
+    if (flopped(
             wal_validate_transaction(&s->files[0], cur, end, &tx)) ||
         !tx) {
       errors_clear();  // errors are expected here

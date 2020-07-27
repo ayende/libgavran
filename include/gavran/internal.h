@@ -31,6 +31,9 @@ implementation_detail result_t db_init(db_t *db);
 implementation_detail result_t
 db_initialize_default_read_tx(db_state_t *db_state);
 
+implementation_detail result_t
+db_try_increase_file_size(txn_t *tx, uint64_t pages);
+
 implementation_detail void db_initialize_default_options(
     db_options_t *options);
 

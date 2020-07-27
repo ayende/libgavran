@@ -11,10 +11,10 @@ typedef struct operation_result op_result_t;
 #define failed(CODE, ...)           \
   errors_push(CODE, ##__VA_ARGS__); \
   return failure_code()
-#define verify(CALL) (!(CALL) || errors_get_count())
+#define flopped(CALL) (!(CALL) || errors_get_count())
 #define ensure(CALL, ...)                            \
   do {                                               \
-    if (verify(CALL)) {                              \
+    if (flopped(CALL)) {                             \
       failed(EINVAL, msg(#CALL " "), ##__VA_ARGS__); \
     }                                                \
   } while (0)
