@@ -690,4 +690,3 @@ and it took very little code (add the field, and add a check on `db_try_increase
 include::../pyapi/tests10.py[]
 ----
 
-////

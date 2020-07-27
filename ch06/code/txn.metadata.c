@@ -9,7 +9,9 @@ static result_t get_metadata_entry(uint64_t page_num,
   page_flags_t expected = metadata_page->page_num
                               ? page_flags_metadata
                               : page_flags_file_header;
-  ensure(expected == entries->common.page_flags,
+  ensure(expected == entries->common.page_flags ||
+             // can happen from txn_allocate_page
+             page_flags_free == entries->common.page_flags,
          msg("Got invalid metadata page"), with(page_num, "%lu"));
 
   *metadata = &entries[page_num & ~PAGES_IN_METADATA_MASK];

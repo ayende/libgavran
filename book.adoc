@@ -75,17 +75,19 @@ include::./ch08/ch08.adoc[]
 :!listing-number: 
 include::./ch09/ch09.adoc[]
 
-////
-
 :figure-caption: Figure 10,
 :listing-caption: Listing 10,
 :!figure-number:
 :!listing-number:  
 include::./ch10/ch10.adoc[]
 ////
-
-:listing-caption: Listing 11, 
+:figure-caption: Figure 11,
+:listing-caption: Listing 11,
+:!figure-number:
+:!listing-number:  
 include::./ch11/ch11.adoc[]
+
+////
 
 :listing-caption: Listing 12, 
 include::./ch12/ch12.adoc[]

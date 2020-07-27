@@ -25,6 +25,9 @@ typedef struct file_header file_header_t;
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
+#define PAGE_METADATA_CRYPTO_HEADER_SIZE 32
+#define PAGE_METADATA_CRYPTO_NONCE_SIZE 16
+
 // tag::paging_api[]
 #define PAGE_SIZE 8192
 #define PAGE_ALIGNMENT 4096
@@ -45,17 +48,19 @@ result_t pages_get(txn_t *tx, page_t *p);
 result_t pages_write(db_state_t *db, page_t *p);
 // end::paging_api[]
 
+// tag::page_crypto_metadata_t[]
 typedef struct page_crypto_metadata {
   union {
     // <1>
     struct {
-      uint8_t nonce[crypto_aead_aes256gcm_NPUBBYTES];
-      uint8_t mac[crypto_aead_aes256gcm_ABYTES];
-    } aes_gcm;
+      uint8_t nonce[16];
+      uint8_t mac[16];
+    } aead;
     // <2>
-    uint8_t page_hash[crypto_generichash_BYTES];
+    uint8_t hash_blake2b[crypto_generichash_BYTES];
   };
 } page_crypto_metadata_t;
+// end::page_crypto_metadata_t[]
 
 typedef enum __attribute__((__packed__)) page_flags {
   page_flags_free = 0,
@@ -88,15 +93,16 @@ typedef struct file_header {
   uint8_t page_size_power_of_two;
   uint8_t magic[5];  // should be FILE_HEADER_MAGIC
   uint64_t number_of_pages;
-  uint64_t last_tx_id;
   uint64_t free_space_bitmap_start;
+  uint64_t last_tx_id;
 } file_header_t;
 // end::file_header[]
 
 // tag::page_metadata_t[]
 typedef struct page_metadata_common {
   page_flags_t page_flags;
-  char padding[31];
+  char padding[23];
+  uint64_t last_tx_id;
 } page_metadata_common_t;
 
 typedef struct page_metadata {
@@ -124,31 +130,31 @@ typedef struct pages_hash_table pages_hash_table_t;
 typedef struct db {
   db_state_t *state;
 } db_t;
-
+// tag::txn_t[]
 typedef struct txn {
   txn_state_t *state;
   pages_hash_table_t *working_set;
 } txn_t;
+// end::txn_t[]
 // end::tx_structs[]
 
 // tag::database_page_validation_options[]
-enum database_page_validation_options {
-  page_validation_none = 0,
-  page_validation_once = 1,
+typedef enum database_page_validation_options {
+  page_validation_once = 0,
+  page_validation_none = 1,
   page_validation_always = 2
-};
+} database_page_validation_options_t;
 
 typedef struct db_options {
   uint64_t minimum_size;
   uint64_t maximum_size;
   uint64_t wal_size;
-  uint8_t encryption_key[crypto_aead_aes256gcm_KEYBYTES];
+  uint8_t encryption_key[32];
   uint32_t encrypted;
-  enum database_page_validation_options page_validation;
+  database_page_validation_options_t page_validation;
   uint32_t avoid_mmap_io;
   uint32_t _padding;
 } db_options_t;
-
 // end::database_page_validation_options[]
 
 // tag::wal_data_structs[]
