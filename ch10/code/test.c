@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <gavran/db.h>
+#include <gavran/internal.h>
 #include <gavran/test.h>
 
 // tag::tests10[]
@@ -115,6 +116,55 @@ describe(size_growth) {
 
     uint64_t newest_size_a = db.state->wal_state.files[0].span.size;
     assert(new_size_a > newest_size_a);
+  }
+
+  it("can recover data fila changes that has been truncated") {
+    uint64_t page;
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 128 * 1024,
+                              .wal_size = 128 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+
+      txn_t leaked;
+      assert(txn_create(&db, TX_READ, &leaked));
+      assert(write_a_lot(&db));
+
+      txn_t wtx;
+      assert(txn_create(&db, TX_WRITE, &wtx));
+      page_metadata_t* metadata;
+      page_t p = {.number_of_pages = 1};
+      assert(txn_allocate_page(&wtx, &p, &metadata, 0));
+      metadata->overflow.page_flags = page_flags_overflow;
+      metadata->overflow.number_of_pages = 1;
+      strcpy(p.address, "Hello Gavran");
+      assert(txn_commit(&wtx));
+      page = p.page_num;
+    }
+    {
+      // truncate the file
+      file_handle_t* handle;
+      assert(pal_create_file("/tmp/db/try", &handle,
+                             pal_file_creation_flags_none));
+      defer(pal_close_file, handle);
+      assert(pal_set_file_size(handle, 0, 64 * 1024));
+      assert(handle->size == 64 * 1024);
+    }
+    {
+      db_t db;
+      db_options_t options = {.minimum_size = 128 * 1024,
+                              .wal_size = 128 * 1024};
+      assert(db_create("/tmp/db/try", &options, &db));
+      defer(db_close, db);
+
+      txn_t r;
+      assert(txn_create(&db, TX_READ, &r));
+      defer(txn_close, r);
+      page_t p = {.page_num = page};
+      assert(txn_get_page(&r, &p));
+      assert(strcmp("Hello Gavran", p.address) == 0);
+    }
   }
 }
 // end::tests10[]

@@ -531,6 +531,23 @@ static result_t free_hash_table_and_contents(
 }
 enable_defer(free_hash_table_and_contents);
 
+// tag::wal_ensure_data_file_size[]
+static result_t wal_ensure_data_file_size(db_t *db,
+                                          uint64_t min_pages) {
+  if (db->state->handle->size > min_pages * PAGE_SIZE) {
+    return success();
+  }
+  ensure(pal_set_file_size(db->state->handle, min_pages * PAGE_SIZE,
+                           UINT64_MAX));
+  span_t *map = &db->state->global_state.span;
+  ensure(pal_unmap(map));
+  map->size = db->state->handle->size;
+  ensure(pal_mmap(db->state->handle, 0, map));
+  db->state->default_read_tx->global_state.span = *map;
+  return success();
+}
+// end::wal_ensure_data_file_size[]
+
 static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
                                pages_hash_table_t **recovered_pages) {
   void *input = (void *)tx + sizeof(wal_txn_t) +
@@ -541,6 +558,9 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
                   &pages));
   defer(free_hash_table_and_contents, pages);
   for (size_t i = 0; i < tx->number_of_modified_pages; i++) {
+    ensure(wal_ensure_data_file_size(
+        db, tx->pages[i].page_num + tx->pages[i].number_of_pages));
+
     size_t end_offset = i + 1 < tx->number_of_modified_pages
                             ? tx->pages[i + 1].offset
                             : tx->tx_size;
@@ -564,7 +584,7 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
 
 // tag::wal_complete_recovery[]
 static result_t wal_complete_recovery(
-    struct wal_recovery_operation *state) {
+    wal_recovery_operation_t *state) {
   txn_t recovery_tx;
   ensure(txn_create(state->db, TX_READ, &recovery_tx));
   defer(txn_close, recovery_tx);
@@ -590,6 +610,9 @@ static result_t wal_complete_recovery(
       with(header->file_header.last_tx_id, "%lu"),
       with(state->last_recovered_tx_id, "%lu"));
 
+  ensure(wal_ensure_data_file_size(
+      state->db,
+      state->db->state->global_state.header.number_of_pages));
   state->db->state->default_read_tx->global_state =
       state->db->state->global_state;
   return success();

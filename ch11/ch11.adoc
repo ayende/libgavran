@@ -356,7 +356,7 @@ hashing, we first run through all the normal pages and then we go through the me
 
 [source]
 [[tx_finalize_page]]
-.`txn.c` -  Finalizing a page during `txn_commit`
+.`txn.c` -  Finalizing a page during `txn_commit()`
 ----
 include::./code/txn.c[tags=tx_finalize_page]
 ----
@@ -497,7 +497,7 @@ There is a very important change in the behavior of `txn_raw_get_page()` that I 
 in the transaction. That means that once `txn_commit()` is called, all the data in `modified_pages` is _encrypted_. That cause a problem for a read transaction. If you'll recall, a read
 transaction is based on the frozen snapshot of the previous write transaction. That means that with encrypted database, we can't just access the data directly from `modified_pages`. 
 
-That is why I changed `txn_raw_get_page()` to be look at the `modified_pages` only if the `TXN_COMMIT` flag isn't set. That applies only to a write transaction that is in progress, which
+That is why I changed `txn_raw_get_page()` to be look at the `modified_pages` only if the `TX_COMMIT` flag isn't set. That applies only to a write transaction that is in progress, which
 means that after the transaction has been committed, we'll not consider the `modified_pages` as an authoritative source for the pages after the transaction has been committed. Instead, we'll
 search past transactions for the data. The key here is that we start the search with the same transaction. In this case, we'll find the (encrypted) page in the `modified_pages` of the committed
 transaction, but we'll not use it as is, which is the case of the previous lookup in the transaction's `modified_pages`. We'll treat it as any other value, meaning that it will have to be 

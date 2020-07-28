@@ -48,7 +48,7 @@ Consider the following timeline of operations, which shows what we have now.
 3. Write tx modifies page 2
 4. Read tx reads page 2, see no changes (the data is held in buffer private to the write tx)
 5. Write tx commits & closed
-6. Read tx reads page 2, see the changes that happened because `txn_commit` wrote it.
+6. Read tx reads page 2, see the changes that happened because `txn_commit()` wrote it.
 
 That is the _current_ behavior of Gavran, and it is almost where we want it to be. The only change in behavior we need is that when the write transaction
 commits, already opened transactions will _not_ see the changes. How can we implement this? Well, the reason that they can see the changes is that 

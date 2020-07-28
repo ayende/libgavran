@@ -335,6 +335,35 @@ we start to implement multi threading support. And the fact that we are spending
 worry about these details at higher levels. We'll see how all of those play out in the next part of the book.
 ****
 
+There is still one failure mode that we haven't handled yet. Handling recovery of a file where the WAL contains pages that are beyond the end of the file. That
+can happen if we committed a transaction but failed to preserve the new size of the file. Technically, that isn't something that we should be concerned about. 
+When we increase the size of the file, we do so using `pal_set_file_size()`, which will do the appropriate `fsync()` dance with the parent directory to ensure
+that the size of the file is properly recorded. This happens _immediately_, not when the transaction commits, so if the transaction got to the WAL, we can be
+sure that the file size was already increased.
+
+There are several reasons why I want to handle this scenario:
+
+* We may want to defer the file size increase to the transaction commit (or maybe even when we write the modified pages to the data file).
+* Scenarios such as log shipping or incremental backups may cause us to get a WAL transaction that has pages beyond the end of the current file.
+
+To handle this scenario, I've added a call to `wal_ensure_data_file_size()` to the `wal_recover_tx()` function. You can see what this looks like in <<wal_ensure_data_file_size>>.
+
+[source]
+[[wal_ensure_data_file_size]]
+.`wal.c` - Increasing the size of the data file when applying recover
+----
+// in wal_recover_tx()
+ensure(wal_ensure_data_file_size(db, 
+    tx->pages[i].page_num + tx->pages[i].number_of_pages));
+
+include::./code/wal.c[tags=wal_ensure_data_file_size]
+----
+
+Just calling `wal_ensure_data_file_size()` from `wal_recover_tx()` isn't enough, however. The WAL contains only the _modified_ pages, we need to take into account the
+fact that when we increase the size of the data file we tend to do that in large chunks. We record the `number_of_pages` in the file in the file header, and I've added
+another call to `wal_ensure_data_file_size()` at the end of the complete recovery process, where we ensure that the file is large enough to fit all the pages we think
+we have.
+
 === Increasing the size of the WAL
 
 We spent a lot of time working on extending the size of the data file, but what about the size of the WAL? We currently define the size of the WAL on 
