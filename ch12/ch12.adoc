@@ -1,57 +1,59 @@
-== Supporting 32 bits and > 256 TB databases
+== Supporting 32 bits and databases larger than 256 TB
 
-Gavran is using memory mapped files for read I/O. In other words, it will map the entire data file by default and access the memory directly. 
-This strategy has a number of advantages, it is simple to implement, it has really good performance and it allows us to lean on the operating system page cache for a lot of really complex issues.
+Gavran is using memory mapped files to read data from the disk. In other words, it will map the entire data file by default and access the memory directly, letting the operating system
+page the data to memory without needing to manage the buffers explicitly. 
+This strategy has a number of advantages, it is simple to implement, it has _excellent_ performance and it allows us to lean on the operating system page cache for a lot of really complex issues.
 I mentioned before the https://queue.acm.org/detail.cfm?id=1814327[You're Doing It Wrong] article in favor on leaning heavily on the operating system for such tasks, because the OS has much 
 greater visibility into what is going on and literally decades of research into optimizing access patterns, write behind, etc. 
 
 I want to also point out to the https://www.sublimetext.com/blog/articles/use-mmap-with-care[Use mmap with care] post from Sublime, which shows some of the downsides of using memory mapped I/O. There are two
-such limitations that I want to talk about here. How to support databases that are greater than 2 GB on 32 bits and how to support databases that are larger than 256 TB.
+limitations of memory mapped I/O that I want to talk about here. How to support databases that are greater than 2 GB when running on 32 bits and how to support databases that are larger than 256 TB.
 Surprisingly, both issues actually boil down to the same problem. When we rely on the virtual memory for I/O, we have to live with its limitation. On 32 bits, the maximum virtual memory per process is
 2 GB (with special flags, you can get to 3GB). Given that the application probably needs some memory of its own, it is actually unlikely to be able to map a 1GB range in a 32 bits application.
-And while we _call_ it 64 bits address space, in practice, for both x86-64 and ARM64 use only 48 bits. That means that the maximum virtual memory for a process in a 64 bits machine is just 256TB.
+And while we _call_ it 64 bits address space, in practice, both x86-64 and ARM64 use only 48 bits. That means that the maximum virtual memory for a process in a 64 bits machine is just 256TB.
 
 Granted, you can't _get_ a 256TB disk. You can't even get such a disk on the cloud, at the time of writing, they max out at 16TB. Amusingly enough, you can get a machine with 24TB of _RAM_, but not 
 24TB of disk. In other words, this is mostly a theoretical limit, but it turns out that solving the problem for 32 bits also handle the 256TB issue. 
 
 [CAUTION]
-.What about the issue of mmap over network drive?
+.What about the issue of `mmap()` over network drive?
 ====
-In the Sublime post, they mention running into issue with mmap over files in a network drive. In particular, what happens when you `mmap`-ed a file, but the network goes away. Any load or save 
+In the Sublime post, they mention running into issue with `mmap()` over files in a network drive. In particular, what happens when you `mmap()` a file, but the network goes away. Any load or save 
 from the file is then going to be turned into a page fault. You can _handle_ that, using signals on Posix or SEH on Windows, but that is awkward and hard. Given common usage option for Gavran,
-I'm going to handle this by noting that: You should not be doing that.
+I'm going to handle this by noting: You should _not_ be doing that.
 
 That said, what I expect to happen from Gavran's perspective is to crash and restart, in which point we'll discover that we can't map the file because it inaccessible. It is _fine_ to crash,
 we are running a transactional system here and there can't be any data loss.
 ====
 
 One of the side affects of the work we have done in the previous chapter is that we can no longer just access the memory from the map at will. It may be encrypted, after all, so all accesses
-to the data file must go through the transaction. It turns out that this is a really important aspect for implementing 32 bits mode. Listing 12.1 shows the changes required to support 32 bits
-in Gavran at the deepest layer.
+to the data file must go through the transaction. It turns out that this is a really important aspect for implementing 32 bits mode. <<pages_get_32_bits>> shows the changes required to support 32 bits
+in Gavran at its lowest layer.
 
 [source]
-.Listing 12.1 - paging.c - Supporting 32 bits mode when reading a page from the disk
+[[pages_get_32_bits]]
+.`pages.c` - Supporting 32 bits mode when reading a page from the disk
 ----
-include::./code/paging.c[tags=pages_get]
+include::./code/pages.c[tags=pages_get]
 ----
 <1> If we aren't avoiding mmap I/O, we can just do some pointer arithmetic and be done with it.
 <2> Otherwise, we allocate memory for the page(s) that we want to read.
-<3> The we simply read it from the file. The `palfs_read_file` ends up being a `pread` call.
+<3> The we simply read it from the file. The `pal_read_file()` ends up being a `pread()` call.
 <4> We wire the newly read page to the transaction's `working_set`, just as we did before for encryption.
 
-That is mostly what is involved in supporting 32 bits mode, to be honest. You might have noticed that we have a new database option `avoid_mmap_io`, which instructs Gavran to avoid mapping
-the data file. Listing 12.2 is taken from the `db_create` function and show the new behavior.
+That is mostly what is involved in supporting 32 bits mode, to be honest. You might have noticed that we use the `avoid_mmap_io`  option, which instructs Gavran to avoid mapping
+the data file. When this is set, we'll _not_ call `pal_mmap()` on the data file in `db_create()`. The relevant snippet is shown in <<db_create_32_bits>>.
 
 [source]
-.Listing 12.2 - db.c - New behavior for 32 bits mode
+[[db_create_32_bits]]
+.`db.c` - Avoiding mapping the file when running in 32 bits mode
 ----
-if (!owned_options.avoid_mmap_io)
-  ensure(palfs_mmap(ptr->handle, 0, &ptr->global_state.mmap));
+include::../ch11/code/db.c[tags=db_create_32_bits]
 ----
 
-I'm not sure if I can really justify calling this new "behavior", to be honest. It is _not_ doing something. Instead, we rely on the `pages_get` at the bottom of the stack to do the right
-thing when we are configured to skip mmap I/O. The rest of the system, using the `working_set` table that we introduced for encryption already does the right thing. There were a couple of
-places where we still accessed the database file directly. For example, in `wal_complete_recovery`, but that was easily changed to just using a `txn_t` to handle that properly. 
+I'm not sure if I can really justify calling the code in <<db_create_32_bits>> a feature, to be honest. It is _not_ doing something. Instead, we rely on the `pages_get` at the bottom of 
+the stack to do the right thing when we are configured to skip mmap I/O. The rest of the system, using the `working_set` table that we introduced for encryption already does the right thing.
+We are always accessing the file via a transaction, so the rest of our code isn't even aware that something interesting has changed.
 
 [TIP]
 .Building on top of your own abstractions
@@ -60,28 +62,22 @@ One of the best things that happen in a project's life is when you can build the
 in Gavran, and it is really exciting.
 ====
 
-Listing 12.3 shows how we read the data from disk in `palfs_read_file`. 
-
-[source]
-.Listing 12.3 - fs.c - Reading a page from the disk
------
-include::./code/fs.c[tags=palfs_read_file]
------
-
-This is pretty boring code, reading from the file using `pread` and making sure to handle partial read. Note that we are considering a partial read to be an error, not a valid state. The rest 
-of the changes are mostly minor fixes. For example, in `txn_create`, we need to initialize the `working_set` if we are using encryption _or_ avoiding mmap I/O, that sort of thing.
+The rest of the changes are mostly minor fixes. For example, in `txn_create`, we need to initialize the `working_set` if we are using encryption _or_ avoiding mmap I/O, that sort of thing.
 
 === Combining encryption and 32 bits mode
 
 Combination of features is usually a real pain, the problem comes from having to deal with intersection of features and their mutual affects on one another. 
 We built the 32 bits mode implementation on top of the foundations we created for encryption. What happens if we try to handle both of them
-together? It turns out that this indeed cause a problem, but it was simple to fix this, see Listing 12.4.
+together? It turns out that this indeed cause a problem, but it was simple to fix this, see <<txn_decrypt_page_12>>.
 
 [source]
-.Listing 12.4 - txn.c - Supporting encryption and 32 bits at the same time
+[[txn_decrypt_page_12]]
+.`txn.c` - Supporting encryption and 32 bits at the same time
 -----
 include::./code/txn.c[tags=txn_decrypt_page]
 -----
+<1> New code here, we check if the `working_set` already contains the page, that means that it is an encrypted version of the page, so we can switch the decrypted version and release
+the previous buffer.
 
 After we decrypt a page into the `buffer`, we check to see if the page is already inside the `working_set`, this can only happen if we are in 32 bits mode with encryption. We first looked
 for the page in the `working_set` but didn't find it, so we called `pages_get` which read it from the disk and put it in the `working_set`, we then decrypted the page and finally we'll 
@@ -96,7 +92,7 @@ I could answer that there are still wide market for 32 bits and will be for a wh
 for example, is a great reason why we want to support it.
 
 The real reason I wanted to implement this feature is that it is a good way to show how we can take the approach we set out with (memory mapped I/O) and turn it on its head but 
-do so with very little code an effort. That means that we can also apply the same thing in other ways. We need to modify `pages_get` and `pages_write`, which are the lowest level
+do so with very little code an effort. That means that we can also apply the same thing in other ways. We need to modify `pages_get()` and `pages_write()`, which are the lowest level
 I/O subsystem that we have, and we can implement Gavran on top of anything. 
 
 Consider how you'll modify Gavran to run directly on top of a block device, for example...
@@ -106,50 +102,42 @@ And we are done, we are able to use both encryption and 32 bits together with no
 
 === Using the WAL in 32 bits mode
 
-The last item that remains to be done is to handle recover in 32 bits mode. In `wal_recover_tx`, we rely on the fact that we can use mmap I/O to apply changes to the data file directly.
-Obviously that cannot work if we are running in 32 bits mode. 
+The last item that remains to be done is to handle recover in 32 bits mode. We already saw the code in `wal_recover_tx()` in previous chapters, but I wanted to call out the design
+of this function and how it allows us to work with 32 bits with ease. 
 
-In order to handle this properly, we have to go a bit out of way to manage things nicely. Take a look at listing 12.5, where we implemented support for 32 bits mode recovery.
-
-[source]
-.Listing 12.5 - wal.c - Recovering from the WAL in 32 bits mode
------
-include::./code/wal.c[tags=wal_recover]
------
-
-Instead of accessing the database directly, we are going to be using a `recovery_tx` to handle this. We still call `palfs_enable_writes` on the memory map during normal operations,
-which means that even though this is meant to be a read transaction, we are able to modify the data directly on the map. The idea is that if we aren't running in 32 bits mode, we can
-use the transaction to get the page pointer and modify it directly. 
-
-On the other hand, if we _are_ using 32 bits mode, what will happen? We aren't modify the data on disk, we are getting a _copy_ of the data that was read from disk using `pages_get`,
-after all. After we apply all the changes from a single `wal_tx_t`, we'll write the changes back to the file using `palfs_write_file` in 32 bits mode. 
+Instead of accessing the database directly, we are using a `recovery_tx` to handle reading from the file. If we are running in 32 bits mode, we'll read the data into a buffer we
+allocate, if we are running in normal mode, we just get a pointer to the mapped memory.
+After we apply all the changes from a single `wal_tx_t` to the in memory copy, we'll write the changes back to the file using `pal_write_file`.
 I find this quite elegant, to tell you the truth.
 
 There is one caveat with this, however. We need to consider what will happen when we are using _encryption_. Because we are calling to `pages_get`, we don't do any validation of
-the hashes or decryption of the pages, we deal with the raw data from disk, and everything works as it should.
+the hashes or decryption of the pages, we deal with the raw data from disk, and everything works as it should. The WAL works with raw binary data, so we don't care.
+
+Note that during _recovery_, we are going to be using `mmap()` the _WAL files_. The WAL files are likely to be small, so that isn't expected to be a problem. 
 
 === Choosing the right design
 
 This has been a short chapter, but we got through quite a bit. We are now able to use Gavran without relying on a memory map. In fact, we can now port Gavran to a system that doesn't 
-even support `mmap`. Pretty much all we need is `read`, `write` and `fsync` system calls, the rest is handled by Gavran directly. 
+even support `mmap()`. Pretty much all we need is `read()`, `write()` and `fsync()` system calls, the rest is handled by Gavran directly. 
 This means that we can use Gavran on 32 bits with databases whose size exceed 4 GB as well as being able to run it on files whose size is larger than 256TB. 
 
 I want to discuss this design for a bit, because while it does the job, I don't think it is ideal. We are going to have a _lot_ of system calls in such a system, and those tend to be
 expensive. There are a few ways that we can do better in this case. We are also doubling the amount of RAM that we use, although it may not be obvious. We are now using anonymous 
 memory to hold the pages data as well as the file system cache. 
-When we were using memory mapped I/O, there was only a single copy of the data in memory, not we have two. 
+When we were using memory mapped I/O, there was only a single copy of the data in memory, now we have two. 
 
 Another option to implement this feature would be to implement a cache on top of memory mapped I/O. We can define a size of 512 KB and map that as a single unit. Then we can provide
 pages from that location without having to do a system call or to map too much. There are issues with this kind of system, especially when we are talking about multi threaded 
 systems. For example, what happens if we have a value that is 5 pages in size, which is positioned on a 512 KB boundary, we need to be careful that we map this properly.
 All of this is doable, but I decided to go with the simplest solution that work. 
 
-I don't have a lot of interest in optimizing the 32 bits mode at this time, the usual mode is where I'm going to focus. 
+I don't have a lot of interest in optimizing the 32 bits mode at this time, the usual mode when we can map the whole file at a single unit is where I'm going to focus. 
 
 ==== Unit tests
 
 [source]
-.Listing 12.6 - test.c - Testing that we can use 32 bits in Gavran
+[[tests12]]
+.`test.c` - Testing that we can use 32 bits in Gavran
 -----
-include::./code/test.c[tags=mode_32_bits]
+include::./code/test.c[tags=tests12]
 -----

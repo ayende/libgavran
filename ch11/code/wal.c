@@ -500,6 +500,7 @@ static result_t wal_recover_page(db_t *db, pages_hash_table_t **pages,
   if (page->flags == wal_txn_page_flags_diff) {
     txn_t tx;
     ensure(txn_create(db, TX_READ, &tx));
+    defer(txn_close, tx);
     page_t before = {.page_num = page->page_num,
                      .number_of_pages = page->number_of_pages};
     ensure(pages_get(&tx, &before));
@@ -542,7 +543,9 @@ static result_t wal_ensure_data_file_size(db_t *db,
   span_t *map = &db->state->global_state.span;
   ensure(pal_unmap(map));
   map->size = db->state->handle->size;
-  ensure(pal_mmap(db->state->handle, 0, map));
+  if (!db->state->options.avoid_mmap_io) {
+    ensure(pal_mmap(db->state->handle, 0, map));
+  }
   db->state->default_read_tx->global_state.span = *map;
   return success();
 }

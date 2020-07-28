@@ -19,10 +19,12 @@ result_t db_create(const char *path, db_options_t *options,
   ensure(pal_set_file_size(db->state->handle,
                            owned_options.minimum_size, UINT64_MAX));
   db->state->global_state.span.size = db->state->handle->size;
+  // tag::db_create_32_bits[]
   if (!owned_options.avoid_mmap_io) {
     ensure(pal_mmap(db->state->handle, 0,
                     &db->state->global_state.span));
   }
+  // end::db_create_32_bits[]
   ensure(db_initialize_default_read_tx(db->state));
   ensure(wal_open_and_recover(db));
   ensure(db_init(db));
@@ -42,6 +44,7 @@ implementation_detail result_t db_validate_options(
   if (user_options->wal_size)
     default_options->wal_size = user_options->wal_size;
   default_options->page_validation = user_options->page_validation;
+  default_options->avoid_mmap_io = user_options->avoid_mmap_io;
   memcpy(default_options->encryption_key,
          user_options->encryption_key,
          crypto_aead_xchacha20poly1305_ietf_KEYBYTES);

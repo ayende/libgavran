@@ -26,7 +26,8 @@ static result_t create_and_write_file(const char* path) {
   db_state_t db_state = {.global_state = global_state,
                          .handle = handle};
   page_t p = {.page_num = 0};
-  txn_state_t txn_state = {.global_state = global_state};
+  txn_state_t txn_state = {.global_state = global_state,
+                           .db = &db_state};
   txn_t txn = {.state = &txn_state};
 
   // <4>
