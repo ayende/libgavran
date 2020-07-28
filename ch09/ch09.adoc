@@ -408,7 +408,7 @@ Gavran's diff format has an important optimization for zeroed sections, but beyo
 gets rid of all the data that didn't change, but we can do better and reduce the amount we write to disk even further. 
 
 .The process of recovery must proceed to the end
-====
+****
 During the recovery process, Gavran will run over the WAL and apply each transaction in order. When using diffed writes, we may get into some interesting situations. Let's 
 consider a scenario where we have a page with the following values (each 8 bytes in size, aligned on 8 bytes, to match the diff format): `[0,0,0,0]`. We have a sequence 
 of transactions with the following modifications to this page:
@@ -429,7 +429,7 @@ What happens if we have a very large WAL to process, modifying many pages? We'll
 The simplest solution here is to write the data to the file, and let the operating system to manage the in memory buffers as it sees fit. In the vast majority of the cases, 
 we'll do pure in memory I/O, without really needing to touch the disk. The additional system calls cost that may be involved isn't meaningful enough to matter in the grand
 scheme of things.
-====
+****
 
 === Compressing the transactions
 
@@ -499,11 +499,11 @@ to gain space reduction from the compression, we'll mark the WAL transaction as 
 buffer to the transaction's buffer. The result of this function is the new end of the transaction buffer.
 
 .Memory allocation costs
-====
+****
 We are allocating a buffer for the transaction and another buffer for the compression. In general, for high performance work, we need to police our allocations
 because memory allocation and de-allocations are a common cause for performance issues. I'm going to write the simplest code that I can write right now and
 then use the benchmarks to guide me on how to fix this.
-====
+****
 
 The `wal_compress_transaction()` marks the transaction as compressed if it was able to reduce the size of the input. That will be relevant when we
 need to recover from the transaction. This is done in the `wal_validate_transaction()` function shown earlier in <<wal_validate_transaction>> using the

@@ -110,10 +110,10 @@ don't really care where the hash is in the metadata entry. The data we need for 
 nicer in terms of the API usage.
 
 .What about freed pages?
-====
+****
 A freed page is one that was modified and then freed. From the point of view of the WAL and the lowest levels of Gavran, there is no different between a freed page and a modified
 one. A freed page is simply one that has its free space bitmap cleared and its value was set to zeroes. As such, it will have a _valid_ hash for a zeroed buffer.
-====
+****
 
 We are computing the hashes for all of the modified pages before we write them to the WAL, which means that the hash changes will get to the WAL as everything does. I love this approach
 because it is simply layering behaviors on top of existing behaviors, in orthogonal manner. 
@@ -259,7 +259,7 @@ library and has gone through several security reviews. I'm going to implement en
 audit. I wanted to call it out explicitly, although I obviously believe that the system is secure. If you care about the encryption feature, you might want to get a proper cryptographer to review it. 
 
 .Transparent data encryption
-====
+****
 We are going to implement a feature called TDE (transparent data encryption). In this model, the data is _always_ encrypted. On disk and in memory, in the WAL and for the data file.
 The only time that we hold the data in its decrypted form is when we have an active transaction that to hold it. From the point of view of the higher level APIs, there it no change
 in the behavior of the system, it can work with the data as usual.
@@ -268,7 +268,7 @@ Whoever get a hold of the data files, on the other hand, must get the key in ord
 data. This is an algorithm with 256 bits key and very high degree of security. 
 
 That said, note that the security of the system is dependent on the _whole_ system. How you store the key, for example, is quite important, but it is out of scope for Gavran.
-====
+****
 
 Before I can get into the guts of the encryption implementation, I want to talk a bit about how encryption is used. This is _not_ a premiere on encryption. I _would_ recommend that you'll
 read some. The https://www.amazon.com/dp/1593278268/[Serious Cryptography: A Practical Introduction to Modern Encryption] is a great introduction to cryptography and contains a lot of
@@ -335,7 +335,7 @@ nonce as the base and then increment it each time is to avoid to leak the freque
 observer some interesting data about where the important bits of the file are.
 
 .Encrypting the concents of the WAL
-====
+****
 We don't need to do that, it turns out. Given that the pages are already encrypted, what information do we have in the transaction that is secret?
 
 The only thing that the WAL can tell an observer is _what_ pages have been changed (but not _what_ changed). How problematic is up for debate, but I'm going to assume that 
@@ -347,7 +347,7 @@ number are going to be visible in the WAL, the actual _data_ is going to be encr
 
 As an aside, if we _were_ to encrypt the WAL, how would we handle the nonce? In this case, we could have used a random nonce, we'll derive a key per transaction, so there is no
 chance for a reuse of both key and nonce. 
-==== 
+**** 
 
 Enough with the theoretical discussion, let's get digging into the actual code and see how this gets implemented. The journey starts on <<tx_finalize_page>>, with the `tx_finalize_page()` 
 function. You can see that most of the work is delegated to `txn_encrypt_page()`, with `tx_finalize_page()` being responsible to decide whatever to encrypt of hash the page and 
@@ -411,7 +411,7 @@ There are a few things to consider with this approach however, we can no longer 
 _read_ the data back?
 
 .Diffing and compressing encrypted data is a no go
-====
+****
 By the time the transaction's data reach the WAL, it is already encrypted. One of the properties of encrypted data is that unless you have the key, it is indistinguishable from random
 noise. Compression _relies_ of finding repetitions in the data, which isn't going to happen when we are comparing encrypted values. 
 
@@ -431,7 +431,7 @@ Which means that we are stuck with a single bit flip causing us to be unable to 
 
 There is a reason why the WAL only does validation of the pages it modified in the end. We _assume_ that up until then, we may have corrupted data, and the act of re-applying the diffs
 from the last `fsync()` forward will make it all go away. With encryption, that is not possible, we have to overwrite the whole page. 
-====
+****
 
 It turns out that reading the data is complex, because we have no place to _put_ it. If you'll recall, a read transaction is just an immutable copy of a write transaction, and we 
 already encrypted the data. We need to decrypt the data before we can look at it, but where will we _put_ this data?
@@ -465,7 +465,7 @@ include::./code/txn.c[tags=working_set_txn_close]
 The key piece of the code in <<working_set_txn_close>> is the call to `sodium_memzero()`, this will remove decrypted data from memory as soon as the transaction closes.
 
 .Where is your security boundary?
-====
+****
 In general, I'm trying to follow best practices for secure code in Gavran, making sure that we use the cryptographic API appropriately, that hold on to sensitive data for as short a 
 time as possible, etc. That is a good start, but be aware that there is a _lot_ more that you probably need to consider, depending on your situation.
 
@@ -474,7 +474,7 @@ Those tend to be _very_ specific for a scenario and need, however. Locking pages
 On Linux, `RLIMIT_MEMLOCK` controls how many pages an unprivileged process can lock, the default value is _eight_. 
 
 That means that if you want to keep the data in memory, you have to do quite a bit of work. It is easier to make sure that you are running with encrypted SWAP, to be honest. 
-====
+****
 
 There wasn't actually much that needed to be changed to support reading encrypted data. Take a look at <<txn_raw_get_page_11>>, which shows the biggest change to the transaction's behavior.
 
@@ -569,14 +569,14 @@ We're also trying to see if intersection of features will cause us a failure. Tr
 memory, for example. 
 
 .Some notes on performance
-====
+****
 I have chosen to implement decryption of pages on a per transaction basis. In other words, each transaction is going to have to decrypt the data independently. That gives us 
 the maximum safety guarantees, but also means that we have to pay the decryption cost all the time. Another way would be to have a cache of decrypted pages, which we can check
 before we have to decrypt.
 
 Most workloads have a shared set of pages that are routinely touched, so such a cache is likely to get really good hit ratios. Building such a cache, however, it pretty complex.
 Especially when we need to consider security implications of holding potentially a lot of data in decrypted form. 
-====
+****
 
 
 [source]

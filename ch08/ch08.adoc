@@ -118,14 +118,14 @@ general, these will be explained in the next chapter. What is important right no
 can use this information to recover on startup, repeating any committed transaction.
 
 .Gavran is using a "blind" WAL model
-====
+****
 There are many ways to structure a WAL, but I have chosen to use a WAL model that sits _very_ low in the stack. The WAL we use has _no_ idea about what kind of data is stored or how
 to manipulate persistent data structure. The only thing that the WAL does is store the _raw binary_ page data. Aside from understanding the concept of pages (page number and the number
 of pages), the WAL was have is unaware of anything built on top it.
 
 That means that we can add more features to Gavran without considering the impact on the WAL. Other features can be built on top of the WAL as well, log shipping and incremental 
 backups can both be built on top of this infrastructure.
-====
+****
 
 This ability to replay transaction by writing the modifications they made to the disk is a _really_ important property of the WAL. It means that we can mostly be free from considerations
 of what changes happened, what is the _meaning_ of them, etc. We are dealing with the raw pages and look at the data as binary changes that we can operate on.
