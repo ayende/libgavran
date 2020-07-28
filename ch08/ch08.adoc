@@ -323,11 +323,11 @@ A checkpoint notify the WAL that the data file has properly persisted (and made 
 from transactions that are known to be in the data file already. That is the role of the `wal_checkpoint()` function, which is called from `txn_write_state_to_disk()`. When called, it 
 will check to see if the transaction that was saved to the data file is the last transaction in effect, which will allow us to reset the WAL location. 
 
-Before we get to the impact of checkpoints on the WAL, let's see what this means for the data file itself. <<txn_write_state_to_disk>> shows the changes to `txn_write_state_to_disk()`
+Before we get to the impact of checkpoints on the WAL, let's see what this means for the data file itself. <<txn_write_state_to_disk_08>> shows the changes to `txn_write_state_to_disk()`
 to support checkpoints. 
 
 [source]
-[[txn_write_state_to_disk]]
+[[txn_write_state_to_disk_08]]
 .`txn.c` - Flushing the file data when the WAL says that it is a good idea
 ```
 include::./code/txn.c[tags=txn_write_state_to_disk]

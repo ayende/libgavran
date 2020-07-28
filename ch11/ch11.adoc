@@ -578,9 +578,10 @@ Most workloads have a shared set of pages that are routinely touched, so such a 
 Especially when we need to consider security implications of holding potentially a lot of data in decrypted form. 
 ====
 
+
 [source]
-[[tests_11]]
-.`test.c` - Unit tests for page hashing and encrypted databases
+[[test_11]]
+.`test.c` - Unit testing page validation and encryption
 ----
 include::./code/test.c[tags=tests11]
 ----

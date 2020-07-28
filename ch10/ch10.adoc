@@ -493,7 +493,7 @@ of transactions data, we won't need to change the `wal_recover` function. We'll 
 [[wal_state_t_10]]
 .`gavran/db.h` - The data structures we use to manage the WAL
 ----
-include::../include/gavran/db.h[tags=wal_state_t]
+include::../include/gavran/db.h[tags=wal_data_structs]
 ----
 
 In <<wal_state_t_10>> you can see the `wal_state_t`, which is held by `db_state_t`. The `wal_state_t` has an array of two `wal_file_state_t` and the 
@@ -521,7 +521,7 @@ function, shown in <<wal_init_recover_state_10>>.
 
 [source]
 [[wal_init_recover_state_10]]
-`wal.c` - Initialize the state of the recovery process and select which file we'll process first
+.`wal.c` - Initialize the state of the recovery process and select which file we'll process first
 ----
 include::./code/wal.c[tags=wal_init_recover_state]
 ----
@@ -585,11 +585,11 @@ on, it is the database that will complete its own setup.
 
 The checkpoint behavior of Gavran has changed with the introduction of dual WAL files. Now, instead of waiting until we reached half the WAL
 and then checkpoint the file, we'll have a slightly more sophisticated behavior, shown in Listing 10.20.
-The `(cur_file_index + 1) & 1` in <<wal_will_checkpoint>> is used to refer to the _other_ WAL file, regardless of what the current one it. This basically
+The `(cur_file_index + 1) & 1` in <<wal_will_checkpoint_10>> is used to refer to the _other_ WAL file, regardless of what the current one it. This basically
 implements overflow addition in the range [0,1]. 
 
 [source]
-[[wal_will_checkpoint]]
+[[wal_will_checkpoint_10]]
 .`wal.c` - Deciding when to checkpoint when using double buffering between the files
 ----
 include::./code/wal.c[tags=wal_will_checkpoint]
@@ -684,9 +684,4 @@ and it took very little code (add the field, and add a check on `db_try_increase
 ****
 
 
-[source,python]
-.Listing 10.23 - Unit test growing the size of the file and the WAL double buffering mode
-----
-include::../pyapi/tests10.py[]
-----
-
+You can see the tests in <<test_10>>.

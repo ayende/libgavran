@@ -7,7 +7,6 @@
 :source-highlighter: coderay
 :source-language: c
 :xrefstyle: short
-////
 = Practical Storage Engine Design & Implementation
 Oren Eini <oren@ravendb.net>
 June 2020
@@ -80,7 +79,7 @@ include::./ch09/ch09.adoc[]
 :!figure-number:
 :!listing-number:  
 include::./ch10/ch10.adoc[]
-////
+
 :figure-caption: Figure 11,
 :listing-caption: Listing 11,
 :!figure-number:
@@ -88,8 +87,6 @@ include::./ch10/ch10.adoc[]
 include::./ch11/ch11.adoc[]
 
 ////
-
 :listing-caption: Listing 12, 
 include::./ch12/ch12.adoc[]
-
 ////

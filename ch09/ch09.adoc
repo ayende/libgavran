@@ -212,7 +212,7 @@ transactions _and_ the WAL is over half full.  That gives us the option to delay
 decide how often the checkpoint process should run.
 
 [source]
-[[wal_will_checkpoint]]
+[[wal_will_checkpoint_09]]
 .`wal.c` -  Deciding to checkpoint only when the WAL is over half full, to delay expensive `fsync()` calls.
 ```
 include::./code/wal.c[tags=wal_will_checkpoint]
