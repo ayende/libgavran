@@ -3,7 +3,7 @@
 #include <string.h>
 
 // tag::txn_create[]
-result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
+result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   errors_assert_empty();
 
   size_t cancel_defer = 0;
@@ -13,7 +13,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
 
   ensure(hash_new(8, &state->modified_pages));
 
-  state->flags = flags;
+  state->flags = flags | db->state->options.flags;
   state->db = db->state;
   state->map = db->state->map;
   state->number_of_pages = db->state->number_of_pages;

@@ -20,7 +20,7 @@ result_t db_create(const char *path, db_options_t *options,
   ensure(pal_set_file_size(db->state->handle,
                            owned_options.minimum_size, UINT64_MAX));
   db->state->map.size = db->state->handle->size;
-  if (!owned_options.avoid_mmap_io) {
+  if (!(owned_options.flags & db_flags_avoid_mmap_io)) {
     ensure(pal_mmap(db->state->handle, 0, &db->state->map));
   }
   try_defer(pal_unmap, db->state->map, done);

@@ -4,9 +4,9 @@
 
 // tag::txn_create[]
 // tag::txn_create_working_set[]
-result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
+result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   errors_assert_empty();
-  if (db->state->options.encrypted) {
+  if (db->state->options.flags & db_flags_page_need_txn_working_set) {
     ensure(hash_new(8, &tx->working_set));
   } else {
     tx->working_set = 0;
@@ -32,7 +32,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
 
   ensure(hash_new(8, &state->modified_pages));
 
-  state->flags = flags;
+  state->flags = flags | db->state->options.flags;
   state->db = db->state;
   state->map = db->state->map;
   state->number_of_pages = db->state->number_of_pages;
@@ -83,28 +83,23 @@ static result_t txn_validate_page(txn_t *tx, page_t *page) {
 
 // tag::txn_ensure_page_is_valid[]
 static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
-  switch (tx->state->db->options.page_validation) {
-    case page_validation_none:
-      return success();
-    case page_validation_always:
-      ensure(txn_validate_page(tx, page));
-      return success();
-    case page_validation_once:
-      break;
-    default:
-      failed(EINVAL, msg("Unexpected validation option"),
-             with(tx->state->db->options.page_validation, "%d"));
-  }
-  db_state_t *db = tx->state->db;
-  uint64_t *bitmap = db->first_read_bitmap;
-  // before the db init is completed or extended during this run
-  if (!bitmap || page->page_num > db->original_number_of_pages ||
-      // already checked
-      (bitmap[page->page_num / 64] & (1UL << page->page_num % 64)))
+  if ((tx->state->flags & db_flags_page_validation_none) ==
+      db_flags_page_validation_none) {
+    ensure(txn_validate_page(tx, page));
     return success();
-  ensure(txn_validate_page(tx, page));
-  // we only do it one, can skip it next time
-  bitmap[page->page_num / 64] |= (1UL << page->page_num % 64);
+  }
+  if (tx->state->flags & db_flags_page_validation_once) {
+    db_state_t *db = tx->state->db;
+    uint64_t *bitmap = db->first_read_bitmap;
+    // before the db init is completed or extended during this run
+    if (!bitmap || page->page_num > db->original_number_of_pages ||
+        // already checked
+        (bitmap[page->page_num / 64] & (1UL << page->page_num % 64)))
+      return success();
+    ensure(txn_validate_page(tx, page));
+    // we only do it one, can skip it next time
+    bitmap[page->page_num / 64] |= (1UL << page->page_num % 64);
+  }
   return success();
 }
 // end::txn_ensure_page_is_valid[]
@@ -243,7 +238,7 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
     ensure(pages_get(tx, page));
   }
 
-  if (tx->state->db->options.encrypted) {
+  if (tx->state->flags & db_flags_encrypted) {
     // <4>
     ensure(txn_decrypt_page(tx, page));
   } else {
@@ -313,7 +308,7 @@ static result_t txn_hash_page(
 // tag::tx_finalize_page[]
 static result_t tx_finalize_page(txn_t *tx, page_t *page,
                                  page_metadata_t *metadata) {
-  if (tx->state->db->options.encrypted) {
+  if (tx->state->flags & db_flags_encrypted) {
     if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
       size_t shift = PAGE_METADATA_CRYPTO_HEADER_SIZE;
       return txn_encrypt_page(tx, page->page_num,
@@ -389,7 +384,7 @@ result_t txn_commit(txn_t *tx) {
   ensure(txn_finalize_modified_pages(tx));
   ensure(wal_append(tx->state));
 
-  tx->state->flags = TX_COMMITED;
+  tx->state->flags |= TX_COMMITED;
   tx->state->usages = 1;
 
   // <1>
@@ -534,7 +529,7 @@ result_t txn_close(txn_t *tx) {
     size_t iter_state = 0;
     page_t *p;
     while (hash_get_next(tx->working_set, &iter_state, &p)) {
-      if (tx->state->db->options.encrypted) {
+      if (tx->state->flags & db_flags_encrypted) {
         sodium_memzero(p->address, p->number_of_pages * PAGE_SIZE);
       }
       free(p->address);

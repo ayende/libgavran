@@ -84,6 +84,9 @@ static result_t txn_validate_page(txn_t *tx, page_t *page) {
 
 // tag::txn_ensure_page_is_valid[]
 static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
+  if ((tx->state->flags & db_flags_page_validation_none) ==
+      db_flags_page_validation_none)
+    return success();
   if (tx->state->flags & db_flags_page_validation_always) {
     ensure(txn_validate_page(tx, page));
     return success();
@@ -397,7 +400,7 @@ result_t txn_commit(txn_t *tx) {
 
   ensure(wal_append(tx->state));
 
-  tx->state->flags = TX_COMMITED;
+  tx->state->flags |= TX_COMMITED;
   tx->state->usages = 1;
 
   // <1>

@@ -3,7 +3,7 @@
 #include <string.h>
 
 // tag::txn_create[]
-result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
+result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   errors_assert_empty();
   // <1>
   if (flags == TX_READ) {

@@ -142,6 +142,8 @@ typedef enum db_flags {
   db_flags_encrypted = 1 << 6,
   db_flags_page_validation_once = 1 << 7,
   db_flags_page_validation_always = 1 << 8,
+  db_flags_page_validation_none =
+      db_flags_page_validation_once | db_flags_page_validation_always,
   db_flags_page_validation_none_mask =
       ~(db_flags_page_validation_once |
         db_flags_page_validation_always),

@@ -122,7 +122,7 @@ static void *wal_setup_transaction_data(txn_state_t *tx,
     wt->pages[index].page_num = entry->page_num;
     size_t size = wt->pages[index].number_of_pages * PAGE_SIZE;
     void *end;
-    if (tx->db->options.encrypted) {
+    if (tx->flags & db_flags_encrypted) {
       memcpy(output, entry->address, size);
       end = output + size;
     } else {
@@ -184,7 +184,7 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   wt->tx_id = tx->tx_id;
   void *end = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
-  if (!tx->db->options.encrypted) {
+  if (!(tx->flags & db_flags_encrypted)) {
     end = wal_compress_transaction(wt, (char *)wt + sizeof(wal_txn_t),
                                    end);
   }
@@ -544,7 +544,7 @@ static result_t wal_ensure_data_file_size(db_t *db,
   span_t *map = &db->state->map;
   ensure(pal_unmap(map));
   map->size = db->state->handle->size;
-  if (!db->state->options.avoid_mmap_io) {
+  if (!(db->state->options.flags & db_flags_avoid_mmap_io)) {
     ensure(pal_mmap(db->state->handle, 0, map));
   }
   db->state->default_read_tx->map = *map;

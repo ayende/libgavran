@@ -45,6 +45,9 @@ implementation_detail result_t db_validate_options(
   if (user_options->wal_size)
     options->wal_size = user_options->wal_size;
   options->flags = user_options->flags;
+  if (!(options->flags & db_flags_page_validation_none))
+    options->flags |= db_flags_page_validation_once;
+
   options->wal_write_callback_state =
       user_options->wal_write_callback_state;
   options->wal_write_callback = user_options->wal_write_callback;
