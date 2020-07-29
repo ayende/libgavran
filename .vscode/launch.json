@@ -26,11 +26,13 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/ch12/code/build/gavran",
+      "program": "${workspaceRoot}/ch13/code/build/gavran",
       "sourceFileMap": {
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },
-      "args": [],
+      "args": [
+        "log_shipping"
+      ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],

@@ -176,7 +176,7 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   try_defer(free, wt, cancel_defer);
   memset(wt, 0, total_size);
   wt->number_of_modified_pages = pages;
-  wt->tx_id = tx->global_state.header.last_tx_id;
+  wt->tx_id = tx->tx_id;
   void *end = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
   // <2>
@@ -217,27 +217,21 @@ result_t wal_append(txn_state_t *tx) {
                         (char *)txn_buffer,
                         txn_buffer->page_aligned_tx_size));
   cur_file->last_write_pos += txn_buffer->page_aligned_tx_size;
-  cur_file->last_tx_id = tx->global_state.header.last_tx_id;
+  cur_file->last_tx_id = tx->tx_id;
   return success();
 }
 // end::wal_append[]
 
 // tag::wal_recovery_operation[]
-typedef struct file_recovery_info {
-  wal_file_state_t *state;
-  void *buffer;
-  size_t size;
-  size_t used;
-} file_recovery_info_t;
-
 typedef struct wal_recovery_operation {
   db_t *db;
   wal_state_t *wal;
-  file_recovery_info_t files[2];
+  wal_file_state_t *files[2];
   size_t current_recovery_file_index;
   void *start;
   void *end;
   uint64_t last_recovered_tx_id;
+  reusable_buffer_t tmp_buffer;
 } wal_recovery_operation_t;
 // end::wal_recovery_operation[]
 
@@ -248,11 +242,11 @@ static void wal_init_recover_state(db_t *db, wal_state_t *wal,
   state->db = db;
   state->wal = wal;
   state->last_recovered_tx_id = 0;
-  state->files[0].state = &wal->files[0];
-  state->files[1].state = &wal->files[1];
+  state->files[0] = &wal->files[0];
+  state->files[1] = &wal->files[1];
 
-  state->start = state->files[0].state->span.address;
-  state->end = state->start + state->files[0].state->span.size;
+  state->start = state->files[0]->span.address;
+  state->end = state->start + state->files[0]->span.size;
 }
 // end::wal_init_recover_state[]
 
@@ -291,7 +285,7 @@ static void wal_increment_next_range_start(
 }
 // end::wal_range[]
 
-static result_t wal_validate_transaction(file_recovery_info_t *file,
+static result_t wal_validate_transaction(reusable_buffer_t *file,
                                          void *start, void *end,
                                          wal_txn_t **txn_p);
 
@@ -316,8 +310,8 @@ static result_t wal_validate_after_end_of_transactions(
     ensure(wal_get_next_range(s, &cur, &end));
     if (!cur) break;
     wal_txn_t *tx;
-    if (flopped(
-            wal_validate_transaction(&s->files[0], cur, end, &tx)) ||
+    if (flopped(wal_validate_transaction(&s->tmp_buffer, cur, end,
+                                         &tx)) ||
         !tx) {
       errors_clear();  // errors are expected here
       wal_increment_next_range_start(s, PAGE_SIZE);
@@ -326,19 +320,19 @@ static result_t wal_validate_after_end_of_transactions(
     if (s->last_recovered_tx_id > tx->tx_id) {
       break;  // valid old tx, we had a WAL reset and can stop
     }
-    ssize_t corrupted_pos = cur - s->files[0].state->span.address;
+    ssize_t corrupted_pos = cur - s->files[0]->span.address;
     wal_txn_t *corrupted_tx = cur;
     failed(ENODATA, msg("Valid TX after invalid TX"),
            with(corrupted_pos, "%zd"), with(tx->tx_id, "%lu"),
            with(corrupted_tx->tx_id, "%lu"),
-           with(s->db->state->global_state.header.last_tx_id, "%lu"));
+           with(s->db->state->last_tx_id, "%lu"));
   }
   return success();
 }
 // end::wal_validate_after_end_of_transactions[]
 
 // tag::wal_decompress_transaction[]
-static result_t wal_decompress_transaction(file_recovery_info_t *file,
+static result_t wal_decompress_transaction(reusable_buffer_t *buffer,
                                            wal_txn_t *in,
                                            wal_txn_t **txp) {
   // <1>
@@ -351,12 +345,12 @@ static result_t wal_decompress_transaction(file_recovery_info_t *file,
       ZSTD_getDecompressedSize((void *)in + sizeof(wal_txn_t),
                                in->tx_size - sizeof(wal_txn_t)) +
       sizeof(wal_txn_t);
-  if (required_size > file->size) {
-    ensure(mem_realloc(&file->buffer, required_size));
-    file->size = required_size;
+  if (required_size > buffer->size) {
+    ensure(mem_realloc(&buffer->address, required_size));
+    buffer->size = required_size;
   }
   // <3>
-  size_t res = ZSTD_decompress(file->buffer + sizeof(wal_txn_t),
+  size_t res = ZSTD_decompress(buffer->address + sizeof(wal_txn_t),
                                required_size - sizeof(wal_txn_t),
                                (void *)in + sizeof(wal_txn_t),
                                in->tx_size - sizeof(wal_txn_t));
@@ -366,15 +360,15 @@ static result_t wal_decompress_transaction(file_recovery_info_t *file,
            with(in->tx_id, "%lu"), with(zstd_error, "%s"));
   }
   // <4>
-  memcpy(file->buffer, in, sizeof(wal_txn_t));
-  *txp = file->buffer;
-  (*txp)->tx_size = file->used = res + sizeof(wal_txn_t);
+  memcpy(buffer->address, in, sizeof(wal_txn_t));
+  *txp = buffer->address;
+  (*txp)->tx_size = buffer->used = res + sizeof(wal_txn_t);
   return success();
 }
 // end::wal_decompress_transaction[]
 
 // tag::wal_validate_transaction[]
-static result_t wal_validate_transaction(file_recovery_info_t *file,
+static result_t wal_validate_transaction(reusable_buffer_t *buffer,
                                          void *start, void *end,
                                          wal_txn_t **txn_p) {
   *txn_p = 0;
@@ -395,7 +389,7 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
     return success();
   }
   // we got a valid hash, can go forward with this
-  ensure(wal_decompress_transaction(file, tx, txn_p));
+  ensure(wal_decompress_transaction(buffer, tx, txn_p));
   return success();
 }
 // end::wal_validate_transaction[]
@@ -404,7 +398,7 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
 static result_t wal_next_valid_transaction(
     struct wal_recovery_operation *state, wal_txn_t **txp) {
   if (state->start >= state->end ||
-      !wal_validate_transaction(&state->files[0], state->start,
+      !wal_validate_transaction(&state->tmp_buffer, state->start,
                                 state->end, txp) ||
       !*txp || state->last_recovered_tx_id >= (*txp)->tx_id) {
     *txp = 0;
@@ -503,14 +497,16 @@ static result_t wal_complete_recovery(
   ensure(txn_raw_get_page(&recovery_tx, &header_page));
   page_metadata_t *header = header_page.address;
 
-  state->db->state->global_state.header = header->file_header;
+  state->db->state->number_of_pages =
+      header->file_header.number_of_pages;
+  state->db->state->last_tx_id = header->file_header.last_tx_id;
   if (state->last_recovered_tx_id == 0) {  // empty db / no recovery
     if (header->file_header.last_tx_id != 0) {  // no recovery needed
       state->last_recovered_tx_id = header->file_header.last_tx_id;
     }
 
-    state->db->state->global_state.header.number_of_pages =
-        state->db->state->global_state.span.size / PAGE_SIZE;
+    state->db->state->number_of_pages =
+        state->db->state->map.size / PAGE_SIZE;
   } else {
     ensure(header->common.page_flags == page_flags_file_header,
            msg("First page was not a metadata page?"));
@@ -521,8 +517,9 @@ static result_t wal_complete_recovery(
       with(header->file_header.last_tx_id, "%lu"),
       with(state->last_recovered_tx_id, "%lu"));
 
-  state->db->state->default_read_tx->global_state =
-      state->db->state->global_state;
+  state->db->state->default_read_tx->number_of_pages =
+      state->db->state->number_of_pages;
+  state->db->state->default_read_tx->map = state->db->state->map;
   return success();
 }
 // end::wal_complete_recovery[]
@@ -534,8 +531,7 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   pages_hash_table_t *recovered_pages;
   ensure(hash_new(16, &recovered_pages));
   defer(free, recovered_pages);
-  defer(free, recovery_state.files[0].buffer);
-  defer(free, recovery_state.files[1].buffer);
+  defer(free, recovery_state.tmp_buffer.address);
 
   while (true) {
     wal_txn_t *tx;

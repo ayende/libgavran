@@ -522,9 +522,9 @@ include::./code/wal.c[tags=wal_decompress_transaction]
 <4> Copy the `wal_txn_t` transaction header from the original buffer to the start of the decompressed one.
 
 Unlike before, we aren't going to allocate and free a buffer in the `wal_decompress_transaction()` function. This is because we need to access the contents of the
-buffer outside of this function. To enable that scenario, we use the `buffer` field in the `file_recovery_info_t` we are passed. This allows us to keep the buffer
+buffer outside of this function. To enable that scenario, we use the `address` field in the `reusable_buffer_t` we are passed. This allows us to keep the buffer
 for the duration of the recovery process. Multiple recovery operations are likely to use the same underlying buffer, saving us the cost of allocations.
-I've added `defer(free, recovery_state.files[0].buffer);` to the `wal_recover()` function to handle the releasing of this buffer. 
+I've added `defer(free, recovery_state.tmp_buffer.address);` to the `wal_recover()` function to handle the releasing of this buffer. 
 
 And that is about it, we are now able to compress the WAL transactions as we write them and significantly reduce the overall I/O that we need in most cases.
 Adding the diffs for the process, we have lightened our I/O budget in the critical path. The cost of committing a transaction is lowered, because we trade I/O time

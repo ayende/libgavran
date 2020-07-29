@@ -11,7 +11,8 @@
 // tag::tx_flags[]
 #define TX_WRITE (1 << 1)
 #define TX_READ (1 << 2)
-#define TX_COMMITED (1 << 24)
+#define TX_APPLY_LOG (1 << 3)
+#define TX_COMMITED (1 << 4)
 // end::tx_flags[]
 
 #define BITS_IN_PAGE (PAGE_SIZE * 8)
@@ -130,6 +131,25 @@ typedef struct pages_hash_table pages_hash_table_t;
 typedef struct db {
   db_state_t *state;
 } db_t;
+
+typedef enum db_flags {
+  db_flags_none = 0,
+  txn_write = 1 << 1,
+  txn_read = 1 << 2,
+  txn_apply_log = 1 << 3,
+  txn_commited = 1 << 4,
+  db_flags_avoid_mmap_io = 1 << 5,
+  db_flags_encrypted = 1 << 6,
+  db_flags_page_validation_once = 1 << 7,
+  db_flags_page_validation_always = 1 << 8,
+  db_flags_page_validation_none_mask =
+      ~(db_flags_page_validation_once |
+        db_flags_page_validation_always),
+  db_flags_page_need_txn_working_set =
+      db_flags_encrypted | db_flags_avoid_mmap_io
+
+} db_flags_t;
+
 // tag::txn_t[]
 typedef struct txn {
   txn_state_t *state;
@@ -138,22 +158,21 @@ typedef struct txn {
 // end::txn_t[]
 // end::tx_structs[]
 
-// tag::database_page_validation_options[]
-typedef enum database_page_validation_options {
-  page_validation_once = 0,
-  page_validation_none = 1,
-  page_validation_always = 2
-} database_page_validation_options_t;
+// tag::wal_write_callback_t[]
+typedef void (*wal_write_callback_t)(void *state, uint64_t tx_id,
+                                     span_t *wal_record);
+// end::wal_write_callback_t[]
 
+// tag::database_page_validation_options[]
 typedef struct db_options {
   uint64_t minimum_size;
   uint64_t maximum_size;
   uint64_t wal_size;
   uint8_t encryption_key[32];
-  uint32_t encrypted;
-  database_page_validation_options_t page_validation;
-  uint32_t avoid_mmap_io;
+  db_flags_t flags;
   uint32_t _padding;
+  wal_write_callback_t wal_write_callback;
+  void *wal_write_callback_state;
 } db_options_t;
 // end::database_page_validation_options[]
 
@@ -172,14 +191,11 @@ typedef struct wal_state {
 // end::wal_data_structs[]
 
 // tag::db_state_t[]
-typedef struct db_global_state {
-  span_t span;
-  file_header_t header;
-} db_global_state_t;
-
 typedef struct db_state {
   db_options_t options;
-  db_global_state_t global_state;
+  span_t map;
+  uint64_t number_of_pages;
+  uint64_t last_tx_id;
   file_handle_t *handle;
   wal_state_t wal_state;
   txn_state_t *last_write_tx;
@@ -202,16 +218,19 @@ typedef struct cleanup_callback {
 
 // tag::txn_state_t[]
 typedef struct txn_state {
+  uint64_t tx_id;
   db_state_t *db;
-  db_global_state_t global_state;
+  span_t map;
+  uint64_t number_of_pages;
   pages_hash_table_t *modified_pages;
   cleanup_callback_t *on_forget;
   cleanup_callback_t *on_rollback;
   txn_state_t *prev_tx;
   txn_state_t *next_tx;
+  void *shipped_wal_record;
   uint64_t can_free_after_tx_id;
   uint32_t usages;
-  uint32_t flags;
+  db_flags_t flags;
 } txn_state_t;
 // end::txn_state_t[]
 
@@ -221,7 +240,7 @@ result_t db_create(const char *filename, db_options_t *options,
 result_t db_close(db_t *db);
 enable_defer(db_close);
 
-result_t txn_create(db_t *db, uint32_t flags, txn_t *tx);
+result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx);
 result_t txn_close(txn_t *tx);
 enable_defer(txn_close);
 
@@ -268,3 +287,12 @@ result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
 result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
                              page_metadata_t **metadata);
 // end::metadata_api[]
+
+typedef struct reusable_buffer {
+  void *address;
+  size_t size;
+  size_t used;
+} reusable_buffer_t;
+
+result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
+                              uint64_t tx_id, span_t *wal_record);

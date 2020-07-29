@@ -68,7 +68,7 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   try_defer(free, wt, cancel_defer);
   memset(wt, 0, total_size);
   wt->number_of_modified_pages = pages;
-  wt->tx_id = tx->global_state.header.last_tx_id;
+  wt->tx_id = tx->tx_id;
   void *end = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
   wt->tx_size = (uint64_t)((char *)end - (char *)wt);
@@ -92,27 +92,21 @@ result_t wal_append(txn_state_t *tx) {
                         (char *)txn_buffer,
                         txn_buffer->page_aligned_tx_size));
   cur_file->last_write_pos += txn_buffer->page_aligned_tx_size;
-  cur_file->last_tx_id = tx->global_state.header.last_tx_id;
+  cur_file->last_tx_id = tx->tx_id;
   return success();
 }
 // end::wal_append[]
 
 // tag::wal_recovery_operation[]
-typedef struct file_recovery_info {
-  wal_file_state_t *state;
-  void *buffer;
-  size_t size;
-  size_t used;
-} file_recovery_info_t;
-
 typedef struct wal_recovery_operation {
   db_t *db;
   wal_state_t *wal;
-  file_recovery_info_t files[2];
+  wal_file_state_t *files[2];
   size_t current_recovery_file_index;
   void *start;
   void *end;
   uint64_t last_recovered_tx_id;
+  reusable_buffer_t tmp_buffer;
 } wal_recovery_operation_t;
 // end::wal_recovery_operation[]
 
@@ -123,11 +117,11 @@ static void wal_init_recover_state(db_t *db, wal_state_t *wal,
   state->db = db;
   state->wal = wal;
   state->last_recovered_tx_id = 0;
-  state->files[0].state = &wal->files[0];
-  state->files[1].state = &wal->files[1];
+  state->files[0] = &wal->files[0];
+  state->files[1] = &wal->files[1];
 
-  state->start = state->files[0].state->span.address;
-  state->end = state->start + state->files[0].state->span.size;
+  state->start = state->files[0]->span.address;
+  state->end = state->start + state->files[0]->span.size;
 }
 // end::wal_init_recover_state[]
 
@@ -149,10 +143,10 @@ static result_t wal_validate_recovered_pages(
 // end::wal_validate_recovered_pages[]
 
 // tag::wal_next_valid_transaction[]
-static result_t wal_validate_transaction(file_recovery_info_t *file,
+static result_t wal_validate_transaction(reusable_buffer_t *buffer,
                                          void *start, void *end,
                                          wal_txn_t **tx_p) {
-  (void)file;
+  (void)buffer;
   wal_txn_t *tx = start;
   if (!tx->tx_id || tx->page_aligned_tx_size + start > end) {
     *tx_p = 0;
@@ -164,7 +158,7 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
 static result_t wal_next_valid_transaction(
     struct wal_recovery_operation *state, wal_txn_t **txp) {
   if (state->start >= state->end ||
-      !wal_validate_transaction(&state->files[0], state->start,
+      !wal_validate_transaction(&state->tmp_buffer, state->start,
                                 state->end, txp) ||
       !*txp || state->last_recovered_tx_id >= (*txp)->tx_id) {
     *txp = 0;
@@ -251,14 +245,15 @@ static result_t wal_complete_recovery(
   ensure(txn_raw_get_page(&recovery_tx, &header_page));
   page_metadata_t *header = header_page.address;
 
-  state->db->state->global_state.header = header->file_header;
+  state->db->state->number_of_pages =
+      header->file_header.number_of_pages;
   if (state->last_recovered_tx_id == 0) {  // empty db / no recovery
     if (header->file_header.last_tx_id != 0) {  // no recovery needed
       state->last_recovered_tx_id = header->file_header.last_tx_id;
     }
 
-    state->db->state->global_state.header.number_of_pages =
-        state->db->state->global_state.span.size / PAGE_SIZE;
+    state->db->state->number_of_pages =
+        state->db->state->map.size / PAGE_SIZE;
   } else {
     ensure(header->common.page_flags == page_flags_file_header,
            msg("First page was not a metadata page?"));
@@ -269,8 +264,9 @@ static result_t wal_complete_recovery(
       with(header->file_header.last_tx_id, "%lu"),
       with(state->last_recovered_tx_id, "%lu"));
 
-  state->db->state->default_read_tx->global_state =
-      state->db->state->global_state;
+  state->db->state->default_read_tx->number_of_pages =
+      state->db->state->number_of_pages;
+  state->db->state->default_read_tx->map = state->db->state->map;
   return success();
 }
 // end::wal_complete_recovery[]

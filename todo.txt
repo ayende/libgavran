@@ -1,0 +1,2 @@
+* `tx` vs `transaction` in the API
+* `TX_` vs `TXN_`

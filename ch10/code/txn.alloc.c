@@ -9,8 +9,9 @@
 // tag::txn_free_space_mark_page[]
 static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
                                          bool busy) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
+  page_metadata_t *metadata;
+  ensure(txn_get_metadata(tx, 0, &metadata));
+  uint64_t start = metadata->file_header.free_space_bitmap_start;
 
   uint64_t relevant_free_space_bitmap_page =
       start + page_num / BITS_IN_PAGE;
@@ -23,8 +24,10 @@ static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
 // end::txn_free_space_mark_page[]
 
 result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
+  page_metadata_t *metadata;
+  ensure(txn_get_metadata(tx, 0, &metadata));
   uint64_t bitmap_start =
-      tx->state->db->global_state.header.free_space_bitmap_start;
+      metadata->file_header.free_space_bitmap_start;
   page_t bitmap_page = {.page_num = bitmap_start};
   ensure(txn_get_page(tx, &bitmap_page));
   *busy = bitmap_is_set(bitmap_page.address, page_num);
@@ -69,9 +72,10 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
                            page_metadata_t **metadata,
                            uint64_t nearby_hint) {
   // end::txn_allocate_page[]
-
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
+  page_metadata_t *file_header_metadata;
+  ensure(txn_get_metadata(tx, 0, &file_header_metadata));
+  uint64_t start =
+      file_header_metadata->file_header.free_space_bitmap_start;
 
   if (!page->number_of_pages) page->number_of_pages = 1;
 
@@ -113,8 +117,10 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
 // tag::txn_free_space_bitmap_metadata_range_is_free[]
 static result_t txn_free_space_bitmap_metadata_range_is_free(
     txn_t *tx, uint64_t page_num, bool *is_free) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
+  page_metadata_t *file_header_metadata;
+  ensure(txn_get_metadata(tx, 0, &file_header_metadata));
+  uint64_t start =
+      file_header_metadata->file_header.free_space_bitmap_start;
 
   uint64_t relevant_free_space_bitmap_page =
       start + page_num / BITS_IN_PAGE;

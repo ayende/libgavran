@@ -2,16 +2,16 @@
 
 // tag::paging-impl[]
 result_t pages_get(txn_t *tx, page_t *p) {
-  db_global_state_t *state = &tx->state->global_state;
   uint64_t offset = p->page_num * PAGE_SIZE;
-  if (offset + p->number_of_pages * PAGE_SIZE > state->span.size) {
+  if (offset + p->number_of_pages * PAGE_SIZE > tx->state->map.size) {
     failed(ERANGE,
            msg("Requests for a page that is outside of the bounds of "
                "the file"),
-           with(p->page_num, "%lu"), with(state->span.size, "%lu"));
+           with(p->page_num, "%lu"),
+           with(tx->state->map.size, "%lu"));
   }
 
-  p->address = ((char *)state->span.address + offset);
+  p->address = (tx->state->map.address + offset);
   return success();
 }
 

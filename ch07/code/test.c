@@ -127,14 +127,12 @@ describe(transaction_tests) {
       assert(txn_commit(&wtx));
       assert(txn_close(&wtx));
 
-      char* address = db.state->global_state.span.address +
-                      (page_num * PAGE_SIZE);
+      char* address = db.state->map.address + (page_num * PAGE_SIZE);
       assert(*address == 0);
     }
     // and now it will write to the disk
     {
-      char* address = db.state->global_state.span.address +
-                      (page_num * PAGE_SIZE);
+      char* address = db.state->map.address + (page_num * PAGE_SIZE);
       assert(strcmp(address, "Hello Gavran") == 0);
     }
   }
@@ -153,8 +151,7 @@ describe(transaction_tests) {
     assert(txn_commit(&wtx));
     assert(txn_close(&wtx));
 
-    char* address =
-        db.state->global_state.span.address + (page_num * PAGE_SIZE);
+    char* address = db.state->map.address + (page_num * PAGE_SIZE);
     assert(strcmp(address, "Hello Gavran") == 0);
   }
 
@@ -167,8 +164,7 @@ describe(transaction_tests) {
     defer(db_close, db);
     txn_t tx1, tx2, tx3, tx4, tx5, tx6, tx7, tx8;
 
-    uint32_t* ptr =
-        db.state->global_state.span.address + PAGE_SIZE * 3;
+    uint32_t* ptr = db.state->map.address + PAGE_SIZE * 3;
 
     assert(write_and_return_read_tx(&db, 1, &tx1));
     assert(write_and_return_read_tx(&db, 2, &tx2));

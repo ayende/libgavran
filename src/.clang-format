@@ -1,8 +1,0 @@
----
-Language:        Cpp
-BasedOnStyle:  Google      
-ColumnLimit:     70
-IndentWidth:    2
-AlignTrailingComments: true
-...
-

@@ -10,8 +10,8 @@
 #include <gavran/test.h>
 
 static void rude_shutdown_db(db_t* db) {
-  (void)pal_unmap(&db->state->global_state.span);
-  db->state->global_state.span.address = 0;
+  (void)pal_unmap(&db->state->map);
+  db->state->map.address = 0;
   (void)pal_close_file(db->state->handle);
   db->state->handle = 0;
   (void)db_close(db);

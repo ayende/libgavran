@@ -3,8 +3,8 @@
 #include <string.h>
 
 // tag::db_find_next_db_size[]
-static uint64_t db_find_next_db_size(uint64_t current,
-                                     uint64_t requested_size) {
+implementation_detail uint64_t
+db_find_next_db_size(uint64_t current, uint64_t requested_size) {
   uint64_t uint_of_growth = next_power_of_two(current / 10);
   uint64_t suggested = uint_of_growth;
   if (suggested > 1024 * 1024 * 1024) suggested = 1024 * 1024 * 1024;
@@ -67,10 +67,8 @@ static result_t db_move_free_space_bitmap(
                              &free_space_metadata));
   free_space_metadata->free_space.page_flags =
       page_flags_free_space_bitmap;
-  free_space_metadata->free_space.number_of_pages = pages;
   // <9>
-  tx->state->global_state.header.free_space_bitmap_start =
-      search.output.found_position;
+  free_space_metadata->free_space.number_of_pages = pages;
   // <10>
   ensure(txn_free_page(tx, old));  // release the old space
   return success();
@@ -81,8 +79,10 @@ static result_t db_move_free_space_bitmap(
 static result_t db_increase_free_space_bitmap(txn_t *tx,
                                               uint64_t from,
                                               uint64_t to) {
+  page_metadata_t *file_header_metadata;
+  ensure(txn_modify_metadata(tx, 0, &file_header_metadata));
   uint64_t free_space_page =
-      tx->state->global_state.header.free_space_bitmap_start;
+      file_header_metadata->file_header.free_space_bitmap_start;
   page_metadata_t *metadata;
   ensure(txn_modify_metadata(tx, free_space_page, &metadata));
   page_t free_space = {.page_num = free_space_page};
@@ -104,9 +104,8 @@ static result_t db_finalize_file_size_increase(txn_t *tx,
   ensure(db_increase_free_space_bitmap(tx, from, to));
   page_metadata_t *file_header_metadata;
   ensure(txn_modify_metadata(tx, 0, &file_header_metadata));
-  tx->state->global_state.header.number_of_pages = to;
-  memcpy(&file_header_metadata->file_header,
-         &tx->state->global_state.header, sizeof(file_header_t));
+  tx->state->number_of_pages = to;
+  file_header_metadata->file_header.number_of_pages = to;
   return success();
 }
 // end::db_finalize_file_size_increase[]
@@ -126,20 +125,15 @@ static result_t db_new_size_can_fit_free_space_bitmap(
   return success();
 }
 implementation_detail result_t
-db_try_increase_file_size(txn_t *tx, uint64_t pages) {
-  uint64_t new_size = db_find_next_db_size(
-      tx->state->global_state.header.number_of_pages * PAGE_SIZE,
-      pages * PAGE_SIZE);
-  ensure(db_new_size_can_fit_free_space_bitmap(
-      tx->state->global_state.span.size, &new_size));
+db_increase_file_size(txn_t *tx, uint64_t new_size) {
+  ensure(db_new_size_can_fit_free_space_bitmap(tx->state->map.size,
+                                               &new_size));
   ensure(new_size < tx->state->db->options.maximum_size,
          msg("Unable to grow the database beyond the maximum size"),
-         with(new_size, "%lu"), with(pages, "%lu"),
+         with(new_size, "%lu"),
          with(tx->state->db->options.maximum_size, "%lu"));
   file_handle_t *handle = tx->state->db->handle;
   ensure(pal_set_file_size(handle, new_size, UINT64_MAX));
-  uint64_t from = tx->state->global_state.header.number_of_pages;
-  uint64_t to = new_size / PAGE_SIZE;
   span_t new_map = {.size = new_size};
   ensure(pal_mmap(handle, 0, &new_map),
          msg("Unable to map the file again"),
@@ -155,9 +149,22 @@ db_try_increase_file_size(txn_t *tx, uint64_t pages) {
   }
   // discard old map when no one is looking at this tx
   ensure(txn_register_cleanup_action(
-      &tx->state->on_forget, db_clear_old_mmap,
-      &tx->state->global_state.span, sizeof(span_t)));
-  tx->state->global_state.span = new_map;
-  return db_finalize_file_size_increase(tx, from, to);
+      &tx->state->on_forget, db_clear_old_mmap, &tx->state->map,
+      sizeof(span_t)));
+  tx->state->map = new_map;
+  tx->state->number_of_pages = new_size / PAGE_SIZE;
+  return success();
+}
+
+implementation_detail result_t
+db_try_increase_file_size(txn_t *tx, uint64_t pages) {
+  page_metadata_t *metadata;
+  ensure(txn_get_metadata(tx, 0, &metadata));
+  uint64_t from = metadata->file_header.number_of_pages;
+  uint64_t new_size =
+      db_find_next_db_size(from * PAGE_SIZE, pages * PAGE_SIZE);
+  ensure(db_increase_file_size(tx, new_size));
+  return db_finalize_file_size_increase(tx, from,
+                                        new_size / PAGE_SIZE);
 }
 // end::db_try_increase_file_size[]

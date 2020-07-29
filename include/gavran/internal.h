@@ -21,10 +21,18 @@ result_t hash_new(size_t initial_number_of_elements,
 implementation_detail void txn_free_single_tx_state(
     txn_state_t *state);
 
+implementation_detail result_t txn_clear_working_set(txn_t *tx);
+enable_defer(txn_clear_working_set);
+
+implementation_detail result_t
+db_increase_file_size(txn_t *tx, uint64_t new_size);
+
+implementation_detail uint64_t
+db_find_next_db_size(uint64_t current, uint64_t requested_size);
+
 implementation_detail result_t db_validate_options(
     db_options_t *user_options, db_options_t *default_options);
-implementation_detail result_t
-db_setup_page_validation(db_state_t *ptr);
+implementation_detail result_t db_setup_page_validation(db_t *ptr);
 
 implementation_detail result_t db_init(db_t *db);
 

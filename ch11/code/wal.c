@@ -181,7 +181,7 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   try_defer(free, wt, cancel_defer);
   memset(wt, 0, total_size);
   wt->number_of_modified_pages = pages;
-  wt->tx_id = tx->global_state.header.last_tx_id;
+  wt->tx_id = tx->tx_id;
   void *end = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
   if (!tx->db->options.encrypted) {
@@ -200,6 +200,22 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
 // end::wal_prepare_txn_buffer[]
 
 // tag::wal_append[]
+// <1>
+static result_t wal_increase_file_size_if_needed(
+    wal_file_state_t *cur_file, uint64_t size_to_write) {
+  if (cur_file->last_write_pos + size_to_write >
+      cur_file->span.size) {
+    // we need to increase the WAL size
+    uint64_t wal_size =
+        cur_file->span.size +
+        MAX(next_power_of_two(cur_file->span.size / 10),
+            size_to_write * 2);
+    ensure(pal_set_file_size(cur_file->handle, wal_size, UINT64_MAX));
+    cur_file->span.size = wal_size;
+  }
+  return success();
+}
+
 result_t wal_append(txn_state_t *tx) {
   wal_txn_t *txn_buffer;
   ensure(wal_prepare_txn_buffer(tx, &txn_buffer));
@@ -214,48 +230,35 @@ result_t wal_append(txn_state_t *tx) {
          with(txn_buffer->tx_id, "%lu"));
 
   wal_state_t *wal = &tx->db->wal_state;
-
-  // <1>
+  // <2>
   wal_file_state_t *cur_file =
       &wal->files[wal->current_append_file_index];
-  if (cur_file->last_write_pos + txn_buffer->page_aligned_tx_size >
-      cur_file->span.size) {
-    // we need to increase the WAL size
-    uint64_t wal_size =
-        cur_file->span.size +
-        MAX(next_power_of_two(cur_file->span.size / 10),
-            txn_buffer->page_aligned_tx_size * 2);
-    ensure(pal_set_file_size(cur_file->handle, wal_size, UINT64_MAX));
-    cur_file->span.size = wal_size;
-  }
+  ensure(wal_increase_file_size_if_needed(
+      cur_file, txn_buffer->page_aligned_tx_size));
+
   ensure(pal_write_file(cur_file->handle, cur_file->last_write_pos,
                         (char *)txn_buffer,
                         txn_buffer->page_aligned_tx_size));
   cur_file->last_write_pos += txn_buffer->page_aligned_tx_size;
-  cur_file->last_tx_id = tx->global_state.header.last_tx_id;
+  cur_file->last_tx_id = tx->tx_id;
   return success();
 }
 // end::wal_append[]
 
 // tag::wal_recovery_operation[]
-typedef struct file_recovery_info {
-  wal_file_state_t *state;
-  void *buffer;
-  size_t size;
-  size_t used;
-} file_recovery_info_t;
 typedef struct wal_recovery_operation {
   db_t *db;
   wal_state_t *wal;
-  file_recovery_info_t files[2];
+  wal_file_state_t *files[2];
   size_t current_recovery_file_index;
   void *start;
   void *end;
   uint64_t last_recovered_tx_id;
+  reusable_buffer_t tmp_buffer;
 } wal_recovery_operation_t;
 // end::wal_recovery_operation[]
 
-static result_t wal_validate_transaction(file_recovery_info_t *file,
+static result_t wal_validate_transaction(reusable_buffer_t *buffer,
                                          void *start, void *end,
                                          wal_txn_t **txn_p);
 
@@ -273,8 +276,8 @@ static void wal_init_recover_state(db_t *db, wal_state_t *wal,
     void *start = wal->files[i].span.address;
     void *end = start + wal->files[i].span.size;
     wal_txn_t *tx;
-    if (flopped(wal_validate_transaction(&state->files[i], start, end,
-                                         &tx)))
+    if (flopped(wal_validate_transaction(&state->tmp_buffer, start,
+                                         end, &tx)))
       continue;
     if (tx) {
       tx_ids[i] = tx->tx_id;
@@ -287,23 +290,21 @@ static void wal_init_recover_state(db_t *db, wal_state_t *wal,
   }
   if (tx_ids[0] > tx_ids[1]) {
     if (tx_ids[1]) {
-      state->files[1].state = &wal->files[1];
+      state->files[1] = &wal->files[1];
     } else {
       state->current_recovery_file_index = 1;
     }
-    state->files[state->current_recovery_file_index].state =
-        &wal->files[0];
+    state->files[state->current_recovery_file_index] = &wal->files[0];
   } else {
     if (tx_ids[0]) {
-      state->files[1].state = &wal->files[0];
+      state->files[1] = &wal->files[0];
     } else {
       state->current_recovery_file_index = 1;
     }
-    state->files[state->current_recovery_file_index].state =
-        &wal->files[1];
+    state->files[state->current_recovery_file_index] = &wal->files[1];
   }
   wal_file_state_t *cur =
-      state->files[state->current_recovery_file_index].state;
+      state->files[state->current_recovery_file_index];
   wal->current_append_file_index =
       !state->current_recovery_file_index;
   state->start = cur->span.address;
@@ -367,8 +368,8 @@ static result_t wal_validate_after_end_of_transactions(
     ensure(wal_get_next_range(s, &cur, &end));
     if (!cur) break;
     wal_txn_t *tx;
-    if (flopped(
-            wal_validate_transaction(&s->files[0], cur, end, &tx)) ||
+    if (flopped(wal_validate_transaction(&s->tmp_buffer, cur, end,
+                                         &tx)) ||
         !tx) {
       errors_clear();  // errors are expected here
       wal_increment_next_range_start(s, PAGE_SIZE);
@@ -377,19 +378,19 @@ static result_t wal_validate_after_end_of_transactions(
     if (s->last_recovered_tx_id > tx->tx_id) {
       break;  // valid old tx, we had a WAL reset and can stop
     }
-    ssize_t corrupted_pos = cur - s->files[0].state->span.address;
+    ssize_t corrupted_pos = cur - s->files[0]->span.address;
     wal_txn_t *corrupted_tx = cur;
     failed(ENODATA, msg("Valid TX after invalid TX"),
            with(corrupted_pos, "%zd"), with(tx->tx_id, "%lu"),
            with(corrupted_tx->tx_id, "%lu"),
-           with(s->db->state->global_state.header.last_tx_id, "%lu"));
+           with(s->db->state->last_tx_id, "%lu"));
   }
   return success();
 }
 // end::wal_validate_after_end_of_transactions[]
 
 // tag::wal_decompress_transaction[]
-static result_t wal_decompress_transaction(file_recovery_info_t *file,
+static result_t wal_decompress_transaction(reusable_buffer_t *buffer,
                                            wal_txn_t *in,
                                            wal_txn_t **txp) {
   // <1>
@@ -402,12 +403,12 @@ static result_t wal_decompress_transaction(file_recovery_info_t *file,
       ZSTD_getDecompressedSize((void *)in + sizeof(wal_txn_t),
                                in->tx_size - sizeof(wal_txn_t)) +
       sizeof(wal_txn_t);
-  if (required_size > file->size) {
-    ensure(mem_realloc(&file->buffer, required_size));
-    file->size = required_size;
+  if (required_size > buffer->size) {
+    ensure(mem_realloc(&buffer->address, required_size));
+    buffer->size = required_size;
   }
   // <3>
-  size_t res = ZSTD_decompress(file->buffer + sizeof(wal_txn_t),
+  size_t res = ZSTD_decompress(buffer->address + sizeof(wal_txn_t),
                                required_size - sizeof(wal_txn_t),
                                (void *)in + sizeof(wal_txn_t),
                                in->tx_size - sizeof(wal_txn_t));
@@ -417,15 +418,15 @@ static result_t wal_decompress_transaction(file_recovery_info_t *file,
            with(in->tx_id, "%lu"), with(zstd_error, "%s"));
   }
   // <4>
-  memcpy(file->buffer, in, sizeof(wal_txn_t));
-  *txp = file->buffer;
-  (*txp)->tx_size = file->used = res + sizeof(wal_txn_t);
+  memcpy(buffer->address, in, sizeof(wal_txn_t));
+  *txp = buffer->address;
+  (*txp)->tx_size = buffer->used = res + sizeof(wal_txn_t);
   return success();
 }
 // end::wal_decompress_transaction[]
 
 // tag::wal_validate_transaction[]
-static result_t wal_validate_transaction(file_recovery_info_t *file,
+static result_t wal_validate_transaction(reusable_buffer_t *buffer,
                                          void *start, void *end,
                                          wal_txn_t **txn_p) {
   *txn_p = 0;
@@ -446,7 +447,7 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
     return success();
   }
   // we got a valid hash, can go forward with this
-  ensure(wal_decompress_transaction(file, tx, txn_p));
+  ensure(wal_decompress_transaction(buffer, tx, txn_p));
   return success();
 }
 // end::wal_validate_transaction[]
@@ -455,7 +456,7 @@ static result_t wal_validate_transaction(file_recovery_info_t *file,
 static result_t wal_next_valid_transaction(
     struct wal_recovery_operation *state, wal_txn_t **txp) {
   if (state->start >= state->end ||
-      !wal_validate_transaction(&state->files[0], state->start,
+      !wal_validate_transaction(&state->tmp_buffer, state->start,
                                 state->end, txp) ||
       !*txp || state->last_recovered_tx_id >= (*txp)->tx_id) {
     *txp = 0;
@@ -465,18 +466,18 @@ static result_t wal_next_valid_transaction(
     // <2>
     if (state->current_recovery_file_index) {
       *txp = 0;
-      if (state->files[1].state) {
-        state->files[1].state->last_write_pos = (uint64_t)(
-            end_of_valid_tx - state->files[1].state->span.address);
+      if (state->files[1]) {
+        state->files[1]->last_write_pos = (uint64_t)(
+            end_of_valid_tx - state->files[1]->span.address);
       }
       return success();
     }
     // <3>
-    state->files[0].state->last_write_pos = (uint64_t)(
-        end_of_valid_tx - state->files[0].state->span.address);
+    state->files[0]->last_write_pos =
+        (uint64_t)(end_of_valid_tx - state->files[0]->span.address);
     state->current_recovery_file_index++;
-    state->start = state->files[1].state->span.address;
-    state->end = state->start + state->files[1].state->span.size;
+    state->start = state->files[1]->span.address;
+    state->end = state->start + state->files[1]->span.size;
     // <4>
     return wal_next_valid_transaction(state, txp);
   } else {
@@ -540,13 +541,13 @@ static result_t wal_ensure_data_file_size(db_t *db,
   }
   ensure(pal_set_file_size(db->state->handle, min_pages * PAGE_SIZE,
                            UINT64_MAX));
-  span_t *map = &db->state->global_state.span;
+  span_t *map = &db->state->map;
   ensure(pal_unmap(map));
   map->size = db->state->handle->size;
   if (!db->state->options.avoid_mmap_io) {
     ensure(pal_mmap(db->state->handle, 0, map));
   }
-  db->state->default_read_tx->global_state.span = *map;
+  db->state->default_read_tx->map = *map;
   return success();
 }
 // end::wal_ensure_data_file_size[]
@@ -595,14 +596,15 @@ static result_t wal_complete_recovery(
   ensure(txn_raw_get_page(&recovery_tx, &header_page));
   page_metadata_t *header = header_page.address;
 
-  state->db->state->global_state.header = header->file_header;
+  state->db->state->number_of_pages =
+      header->file_header.number_of_pages;
   if (state->last_recovered_tx_id == 0) {  // empty db / no recovery
     if (header->file_header.last_tx_id != 0) {  // no recovery needed
       state->last_recovered_tx_id = header->file_header.last_tx_id;
     }
 
-    state->db->state->global_state.header.number_of_pages =
-        state->db->state->global_state.span.size / PAGE_SIZE;
+    state->db->state->number_of_pages =
+        state->db->state->map.size / PAGE_SIZE;
   } else {
     ensure(header->common.page_flags == page_flags_file_header,
            msg("First page was not a metadata page?"));
@@ -614,10 +616,11 @@ static result_t wal_complete_recovery(
       with(state->last_recovered_tx_id, "%lu"));
 
   ensure(wal_ensure_data_file_size(
-      state->db,
-      state->db->state->global_state.header.number_of_pages));
-  state->db->state->default_read_tx->global_state =
-      state->db->state->global_state;
+      state->db, state->db->state->number_of_pages));
+
+  state->db->state->default_read_tx->number_of_pages =
+      state->db->state->number_of_pages;
+  state->db->state->default_read_tx->map = state->db->state->map;
   return success();
 }
 // end::wal_complete_recovery[]
@@ -629,8 +632,7 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
   pages_hash_table_t *recovered_pages;
   ensure(hash_new(16, &recovered_pages));
   defer(free, recovered_pages);
-  defer(free, recovery_state.files[0].buffer);
-  defer(free, recovery_state.files[1].buffer);
+  defer(free, recovery_state.tmp_buffer.address);
 
   while (true) {
     wal_txn_t *tx;

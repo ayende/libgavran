@@ -15,7 +15,8 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
 
   state->flags = flags;
   state->db = db->state;
-  state->global_state = db->state->global_state;
+  state->map = db->state->map;
+  state->number_of_pages = db->state->number_of_pages;
 
   tx->state = state;
   cancel_defer = 1;

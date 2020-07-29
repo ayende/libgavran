@@ -19,19 +19,19 @@ describe(using_32_bits) {
 
   it("can start in 32 bits mode") {
     db_t db;
-    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
-    options.avoid_mmap_io = 1;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024,
+                            .flags = db_flags_avoid_mmap_io};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
-    assert(db.state->global_state.span.address == 0,
+    assert(db.state->map.address == 0,
            "No mapping should be generated");
   }
 
   it("can modify data and restart in 32 bits mode") {
     db_t db;
-    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
-    options.avoid_mmap_io = 1;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024,
+                            .flags = db_flags_avoid_mmap_io};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -58,8 +58,8 @@ describe(using_32_bits) {
 
   it("can use 32 bits and encryption both") {
     db_t db;
-    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
-    options.avoid_mmap_io = 1;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024,
+                            .flags = db_flags_avoid_mmap_io};
     randombytes_buf(options.encryption_key, 32);
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);

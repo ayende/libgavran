@@ -690,7 +690,8 @@ us to focus solely on what `wal_append` is doing, shown in <<wal_append_10>>.
 ----
 include::./code/wal.c[tags=wal_append]
 ----
-<1> New code here, we select the current file to append to, check if we need to increase the size of the file and then write to the file.
+<1> Check if we need to increase the size of the WAL to accommodate the next write and increase the file if needed.
+<2> New code here, we select the current file to append to, check if we need to increase the size of the file and then write to the file.
 
 In `wal_append()` we generate the hash for the transaction and then check if there is space in the current WAL file and increase the
 size if needed. It _always_ write to the current WAL file. Switching between them is the responsibility of `wal_checkpoint()`. 

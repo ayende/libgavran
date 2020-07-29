@@ -13,7 +13,7 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
   }
   // <2>
   ensure(flags == TX_WRITE,
-         msg("tx_create(flags) must be either TX_WRITE or TX_READ"),
+         msg("txn_create(flags) must be either TX_WRITE or TX_READ"),
          with(flags, "%d"));
   ensure(!db->state->active_write_tx,
          msg("Opening a second write transaction is forbidden"));
@@ -27,12 +27,12 @@ result_t txn_create(db_t *db, uint32_t flags, txn_t *tx) {
 
   state->flags = flags;
   state->db = db->state;
-  state->global_state = db->state->global_state;
+  state->map = db->state->map;
+  state->number_of_pages = db->state->number_of_pages;
   // <3>
   state->prev_tx = db->state->last_write_tx;
-  state->global_state.header.last_tx_id =
-      state->global_state.header.last_tx_id + 1;
-  db->state->active_write_tx = state->global_state.header.last_tx_id;
+  state->tx_id = db->state->last_tx_id + 1;
+  db->state->active_write_tx = state->tx_id;
 
   tx->state = state;
   cancel_defer = 1;
@@ -104,8 +104,7 @@ result_t txn_commit(txn_t *tx) {
   // <1>
   page_metadata_t *header;
   ensure(txn_modify_metadata(tx, 0, &header));
-  header->file_header.last_tx_id =
-      tx->state->global_state.header.last_tx_id;
+  header->file_header.last_tx_id = tx->state->tx_id;
 
   ensure(wal_append(tx->state));
 
@@ -114,8 +113,7 @@ result_t txn_commit(txn_t *tx) {
 
   tx->state->db->last_write_tx->next_tx = tx->state;
   tx->state->db->last_write_tx = tx->state;
-  memcpy(&tx->state->db->global_state.header, &header->file_header,
-         sizeof(file_header_t));
+  tx->state->db->last_tx_id = tx->state->tx_id;
 
   return success();
 }
@@ -147,7 +145,8 @@ static void txn_free_registered_transactions(db_state_t *state) {
 
     state->transactions_to_free = cur->next_tx;
     state->default_read_tx->next_tx = cur->next_tx;
-    state->default_read_tx->global_state = cur->global_state;
+    state->default_read_tx->map = cur->map;
+    state->default_read_tx->number_of_pages = cur->number_of_pages;
     if (state->last_write_tx == cur)
       state->last_write_tx = state->default_read_tx;
 
@@ -164,9 +163,9 @@ static result_t txn_write_state_to_disk(txn_state_t *s) {
     ensure(pages_write(s->db, current));
   }
   // <1>
-  if (wal_will_checkpoint(s->db, s->global_state.header.last_tx_id)) {
+  if (wal_will_checkpoint(s->db, s->tx_id)) {
     ensure(pal_fsync(s->db->handle));
-    ensure(wal_checkpoint(s->db, s->global_state.header.last_tx_id));
+    ensure(wal_checkpoint(s->db, s->tx_id));
   }
   return success();
 }
@@ -197,8 +196,7 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
 static result_t txn_gc(txn_state_t *state) {
   // <1>
   db_state_t *db = state->db;
-  state->can_free_after_tx_id =
-      db->global_state.header.last_tx_id + 1;
+  state->can_free_after_tx_id = db->last_tx_id + 1;
   // <2>
   txn_state_t *latest_unused = state->db->default_read_tx;
   if (latest_unused->usages)  // tx using the file directly
@@ -212,12 +210,10 @@ static result_t txn_gc(txn_state_t *state) {
     return success();  // no work to be done
   }
   // <4>
-  db->oldest_active_tx =
-      latest_unused->global_state.header.last_tx_id + 1;
+  db->oldest_active_tx = latest_unused->tx_id + 1;
   // no one is looking, can release immediately
   if (latest_unused == db->last_write_tx) {
-    latest_unused->can_free_after_tx_id =
-        db->global_state.header.last_tx_id;
+    latest_unused->can_free_after_tx_id = db->last_tx_id;
   }
   // <5>
   ensure(txn_merge_unique_pages(latest_unused));
@@ -231,8 +227,7 @@ static result_t txn_gc(txn_state_t *state) {
 result_t txn_close(txn_t *tx) {
   if (!tx || !tx->state) return success();
   db_state_t *db = tx->state->db;
-  if (tx->state->global_state.header.last_tx_id ==
-      db->active_write_tx) {
+  if (tx->state->tx_id == db->active_write_tx) {
     db->active_write_tx = 0;
   }
   if (!(tx->state->flags & TX_COMMITED)) {  // rollback

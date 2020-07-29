@@ -22,12 +22,9 @@ static result_t create_and_write_file(const char* path) {
   defer(pal_unmap, m);
 
   // <3>
-  db_global_state_t global_state = {.span = m};
-  db_state_t db_state = {.global_state = global_state,
-                         .handle = handle};
+  db_state_t db_state = {.map = m, .handle = handle};
   page_t p = {.page_num = 0};
-  txn_state_t txn_state = {.global_state = global_state,
-                           .db = &db_state};
+  txn_state_t txn_state = {.map = m, .db = &db_state};
   txn_t txn = {.state = &txn_state};
 
   // <4>

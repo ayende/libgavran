@@ -1,0 +1,137 @@
+== Log shipping and other fun activities
+
+Log shipping allows us to have a primary database as well as secondary one (or multiple secondaries). There are several reasons why you'll want to use log shipping:
+
+* To enable high availability.
+* To have multiple copies of the database.
+* For backup purposes.
+
+The core of the idea is simple. A database that uses a WAL is going to use the WAL to recover on startup. In other words, the WAL records all the actions that were 
+made on the database. What will happen if we took the same approach, but didn't apply the WAL records on the database on startup, what happens if we'll apply them
+on _another_ database? 
+
+The result of applying the WAL is going to be the same, so we'll have another copy of the database in another location.
+We can extend this idea to _store_ the WAL records in some manner and then use them later of for backup purposes. Applying the WAL records on an empty file will
+bring us up to the state as of the last transaction, after all.
+
+.Considerations for log shipping
+****
+I'm going to implement the skeleton of log shipping, the ability to intercept and replay the WAL records. What I'm _not_ going to do is handle the distribution of
+the data between databases. I'm leaving that entirely up to you.
+
+I'll say that you need to take into account the reliability of the mechanism that you use to send the data and the fact that there can only ever be a _single_ 
+primary using this method. The transactions in the WAL must form a single log of operations that are applied in a consistent order across all the environments
+that you use.
+
+If you are interested in how to distribute the data and manage that in a reliable manner, you might want to read up on the https://raft.github.io/[Raft algorithm] and
+there is a great example https://github.com/rqlite/rqlite[in the rqlite project], which enable you to use Sqlite in a distributed manner.
+****
+
+=== Intercepting writes to the WAL
+
+In `db_options_t` we have the `wal_write_callback` field, this is a function pointer whose signature you can see in <<wal_write_callback_t>>.
+
+[source]
+[[wal_write_callback_t]]
+.`gavran/db.h` - The write callback signature
+----
+include::../include/gavran/db.h[tags=wal_write_callback_t]
+----
+
+The idea is that whenever we write to the WAL, we'll call this callback function and allow the caller to copy the WAL transaction record. By defining the signature
+in this way, we have enforced several design decisions. The `wal_write_callback` has no way to convey failure. That is intentional, we are going to call this callback
+_after_ we already wrote transaction to the WAL. In such a case, the transaction has been _committed_, there is no way to roll it back.
+
+The callback should be written in such a way that is is robust to failure. If we are working with a distributed system, maybe write it to the a temporary file if we
+can't connect to the other system. If we are working on a backup and we run out of space on the disk, we may decide to notify the admin so they can clean the disk and
+create a snapshot. The key here is that this isn't something that _Gavran_ is interested about. The callback is a courtesy, we'll let the callback know that a WAL 
+write happened, but any errors should be handled there.
+
+[QUESTION]
+.Strategies for handling callback errors
+====
+There are ways that we could have made the callback author's life easier. If we had a way to report errors, for example, that would be great. The problem is what 
+are we supposed to _do_ about it. Consider the case where we are using the callback to generate a backup log. We can invoke the callback before the actual write 
+to disk and abort the transaction on error. That sounds just great, right?
+
+But what happens if _after_ we wrote to the backup, we'll try to write to the disk and _fail_? In this case, we have inconsistent state. There are transactions in the
+backup that aren't on data file, they have been rolled back. 
+
+Conversely, if we invoke the callback _after_ the write, we have to deal with the fact that the callback failed, but the WAL has a valid transaction. We could try 
+overwriting it with invalid data (effectively nulling the previous write), though. That _sounds_ okay, but it won't work. What happens if we crashed immediately after
+successfully writing to the file? The callback didn't run, it didn't have a chance. And we'll recover the transaction from the log as usual. 
+
+As you can see, this is a tough issue and I'm quite happy to declare what is the responsibility of Gavran and what should be handled elsewhere.
+====
+
+In <<wal_append_13>> you can see the changes we made to the `wal_append()` function to invoke the callback in the right place.
+
+
+[source]
+[[wal_append]]
+.`wal.c` - Invoking the user's callback after writing to disk
+----
+include::./code/wal.c[tags=wal_append]
+----
+<1> Check if we _received_ a log shipping record, if not, prepare the transaction buffer normally.
+<2> If we got a log shipping record, we can skip preparing of the buffer and just use the buffer we were provided.
+<1> New code here, invoking the callback after the `pal_write_file()` call.
+
+I'm not going to implement it at this stage, but there are other options for handling failures in the WAL. We can allow the user to tell us when it is okay to reset the WAL.
+If we are trying to send Transaction No. 17 to another server but it is currently unavailable, we can make sure that `wal_will_checkpoint()` will return false. Then when we
+resume connectivity to the other side, we'll be able to scan through the WAL file and send any past transactions that were dropped. That requires more machinery and I'm writing
+this chapter mostly to show how we can use the WAL to do more than just recover the data. I just wanted to point out that there _are_ options to handle this gracefully.
+
+=== Applying log records on live database
+
+We have seen how we can recover transactions previously, on database startup. The process of applying the WAL records from one instance to another is pretty much the same. The
+major difference is that we need to handle concurrent transactions while this is happening, while the recovery process can assume that nothing else is running. By concurrent 
+transactions, I mean that we have read transactions running. By the very nature of log shipping, only the instance that _ships_ the logs can run a write transaction. All other
+instances are strictly observers.
+
+There isn't really a requirement that only a single instance will do all the writes, but there _is_ a requirement that the writes will create a single cohesive log. In other 
+words, instance `A` writing tx 7 and then instance `B` writing tx 8 on top of tx 7's changes is fine. in practice, distributed coordination is _hard_ and it is better to slap:
+"only a single primary, ever!" sign on our options.
+
+Let's consider what we need to do on the other side of a the log shipping process. We are going to accept `tx_id`, `wal_record` and we need to go from these into an 
+applied transaction. How can we do that? In `wal_recover_tx`, we are doing pretty much the same thing, but we assume that we are alone and that the our WAL is stable. In the 
+case of accepting a log shipping record from the outside world, there are a few notable differences:
+
+* We have to deal with concurrent read transactions and not interfere with them.
+* We have to write the new record into _our_ WAL. We can't just write it to the data file, we need to persist the changes in such a way that failure of the database will not
+lose any data that we confirmed receipt of. 
+
+This is implemented in `wal_apply_wal_record()`, which you can see in <<wal_apply_wal_record>>.
+
+[source]
+[[wal_apply_wal_record]]
+.`wal.c` - Apply a WAL record to a live database
+----
+include::./code/wal.c[tags=wal_apply_wal_record]
+----
+<1> Open a new write transaction, marking it as `TX_APPLY_LOG` so we'll know that we need to treat it differently. Register the WAL record in the transaction directly, so
+we can avoid work during the transaction commit.
+<2> Validate the transaction buffer, along the way making sure that to decompress the transaction data if the transaction is compressed.
+<3> Verify that the transaction passed validation and it is in the same order as expected. Each write transaction will increase the `tx_id`, and we must match it to the 
+shipped record to pass validation. This help ensure that we aren't going to run into conflicting writes. 
+<4> For each of the pages in the transaction, apply the changes to the data file. 
+<5> We need to handle the file growing in the middle of the transaction, since the trigger for this wasn't run on this instance.
+<6> Get the current version of the page and then either set it to its new value or use the diff. 
+
+A lot is going on in <<wal_apply_wal_record>>. We start by creating a transaction with a state that we weren't familiar with so far, `TX_APPLY_LOG`. This indicates to Gavran
+that this transaction is going to process transaction that came from the outside world. It is paired with the `txn_register_log_shipped_record()` which gives the transaction
+access to the `wal_record` for the transaction.
+
+We are able to use this `wal_record` to optimize the commit process of the transaction. Instead of finalizing the transaction ourselves (encrypting or hashing the pages, compressing
+the data, computing the transaction hash, etc) we can just write the shipped record buffer directly to our own WAL.
+
+With log shipping, we need to take additional precautions. We validate the transaction as if we read it from a file using `wal_validate_transaction()`. It is especially important to
+validate the _order_ of transactions. We make sure that the incoming shipped record is a match to the transaction id we expect. In case of divergence, we'll be able to error 
+immediately, instead of losing data or corrupting our internal structure.
+
+Finally, we iterate over the pages in the transaction and use the `write_tx` to modify those pages based on the content of the shipped record. Finally, we can just call `txn_commit()`
+to ensure that the data is persisted. Because we registered the `wal_record` in the transaction, we can skip several steps in the commit process and simply write the contents of the 
+shipped record directly to our own WAL. 
+
+One interesting issue we have with `wal_apply_wal_record()` is that we pass it a `tmp_buffer`. This is meant to be kept _across_ invocations of `wal_apply_wal_record()`, to avoid 
+allocating and releasing the memory on each processed record. 

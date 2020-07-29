@@ -18,15 +18,14 @@ result_t db_create(const char *path, db_options_t *options,
   memcpy(&db->state->options, &owned_options, sizeof(db_options_t));
   ensure(pal_set_file_size(db->state->handle,
                            owned_options.minimum_size, UINT64_MAX));
-  db->state->global_state.span.size = db->state->handle->size;
+  db->state->map.size = db->state->handle->size;
   if (!owned_options.avoid_mmap_io) {
-    ensure(pal_mmap(db->state->handle, 0,
-                    &db->state->global_state.span));
+    ensure(pal_mmap(db->state->handle, 0, &db->state->map));
   }
   ensure(db_initialize_default_read_tx(db->state));
   ensure(wal_open_and_recover(db));
   ensure(db_init(db));
-  ensure(db_setup_page_validation(db->state));
+  ensure(db_setup_page_validation(db));
   done = 1;  // no need to do resource cleanup
   return success();
 }
@@ -82,7 +81,7 @@ result_t db_close(db_t *db) {
   if (!db || !db->state) return success();  // double close?
 
   bool failure = false;
-  failure |= !pal_unmap(&db->state->global_state.span);
+  failure |= !pal_unmap(&db->state->map);
   failure |= !pal_close_file(db->state->handle);
   failure |= !wal_close(db->state);
 

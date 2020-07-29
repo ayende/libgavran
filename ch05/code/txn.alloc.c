@@ -9,8 +9,10 @@
 // tag::txn_free_space_mark_page[]
 static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
                                          bool busy) {
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
+  page_t p = {.page_num = 0};
+  ensure(txn_raw_get_page(tx, &p));
+  page_metadata_t *metadata = p.address;
+  uint64_t start = metadata->file_header.free_space_bitmap_start;
 
   uint64_t relevant_free_space_bitmap_page =
       start + page_num / BITS_IN_PAGE;
@@ -27,8 +29,11 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
                            page_metadata_t **metadata,
                            uint64_t nearby_hint) {
   *metadata = 0;  // unused as for right now
-  file_header_t *header = &tx->state->global_state.header;
-  uint64_t start = header->free_space_bitmap_start;
+  page_t p = {.page_num = 0};
+  ensure(txn_raw_get_page(tx, &p));
+  page_metadata_t *file_header_metadata = p.address;
+  uint64_t start =
+      file_header_metadata->file_header.free_space_bitmap_start;
 
   if (!page->number_of_pages) page->number_of_pages = 1;
 
