@@ -535,7 +535,7 @@ static result_t txn_gc(txn_state_t *state) {
 
 // tag::txn_close[]
 // tag::working_set_txn_close[]
-implementation_detail result_t txn_clear_working_set(txn_t *tx) {
+implementation_detail void txn_clear_working_set(txn_t *tx) {
   if (tx->working_set) {
     size_t iter_state = 0;
     page_t *p;
@@ -547,7 +547,6 @@ implementation_detail result_t txn_clear_working_set(txn_t *tx) {
     }
     free(tx->working_set);
   }
-  return success();
 }
 result_t txn_close(txn_t *tx) {
   if (!tx || !tx->state) return success();
@@ -555,7 +554,7 @@ result_t txn_close(txn_t *tx) {
   if (tx->state->tx_id == db->active_write_tx) {
     db->active_write_tx = 0;
   }
-  ensure(txn_clear_working_set(tx));
+  txn_clear_working_set(tx);
   // end::working_set_txn_close[]
   if (!(tx->state->flags & TX_COMMITED)) {  // rollback
     // <1>

@@ -21,8 +21,11 @@ result_t hash_new(size_t initial_number_of_elements,
 implementation_detail void txn_free_single_tx_state(
     txn_state_t *state);
 
-implementation_detail result_t txn_clear_working_set(txn_t *tx);
-enable_defer(txn_clear_working_set);
+implementation_detail void txn_clear_working_set(txn_t *tx);
+static inline void defer_txn_clear_working_set(cancel_defer_t *cd) {
+  if (cd->cancelled && *cd->cancelled) return;
+  txn_clear_working_set(cd->target);
+}
 
 implementation_detail result_t
 db_increase_file_size(txn_t *tx, uint64_t new_size);
