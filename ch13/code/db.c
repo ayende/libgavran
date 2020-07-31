@@ -103,7 +103,6 @@ static result_t db_validate_file_on_startup(db_t *db) {
 }
 // end::db_validate_file_on_startup[]
 
-// tag::db_init[]
 static result_t db_is_new_file(db_t *db, bool *is_new) {
   txn_t tx;
   ensure(txn_create(db, TX_READ, &tx));
@@ -119,7 +118,12 @@ static result_t db_is_new_file(db_t *db, bool *is_new) {
   return success();
 }
 
+// tag::db_init[]
 implementation_detail result_t db_init(db_t *db) {
+  // <1>
+  if ((db->state->options.flags & db_flags_log_shipping_target) ==
+      db_flags_log_shipping_target)
+    return success();
   bool is_new;
   ensure(db_is_new_file(db, &is_new));
   if (is_new) {

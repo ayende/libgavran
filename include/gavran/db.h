@@ -136,12 +136,13 @@ typedef enum db_flags {
   db_flags_none = 0,
   txn_write = 1 << 1,
   txn_read = 1 << 2,
-  txn_apply_log = 1 << 3,
-  txn_commited = 1 << 4,
+  txn_flags_apply_log = 1 << 3,
+  txn_flags_commited = 1 << 4,
   db_flags_avoid_mmap_io = 1 << 5,
   db_flags_encrypted = 1 << 6,
   db_flags_page_validation_once = 1 << 7,
   db_flags_page_validation_always = 1 << 8,
+  db_flags_log_shipping_target = 1 << 9,
   db_flags_page_validation_none =
       db_flags_page_validation_once | db_flags_page_validation_always,
   db_flags_page_validation_none_mask =

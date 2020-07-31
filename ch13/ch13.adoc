@@ -47,7 +47,7 @@ can't connect to the other system. If we are working on a backup and we run out 
 create a snapshot. The key here is that this isn't something that _Gavran_ is interested about. The callback is a courtesy, we'll let the callback know that a WAL 
 write happened, but any errors should be handled there.
 
-[QUESTION]
+[NOTE]
 .Strategies for handling callback errors
 ====
 There are ways that we could have made the callback author's life easier. If we had a way to report errors, for example, that would be great. The problem is what 
@@ -68,14 +68,13 @@ In <<wal_append_13>> you can see the changes we made to the `wal_append()` funct
 
 
 [source]
-[[wal_append]]
+[[wal_append_13]]
 .`wal.c` - Invoking the user's callback after writing to disk
 ----
 include::./code/wal.c[tags=wal_append]
 ----
 <1> Check if we _received_ a log shipping record, if not, prepare the transaction buffer normally.
-<2> If we got a log shipping record, we can skip preparing of the buffer and just use the buffer we were provided.
-<1> New code here, invoking the callback after the `pal_write_file()` call.
+<2> Invoking the callback after the `pal_write_file()` call.
 
 I'm not going to implement it at this stage, but there are other options for handling failures in the WAL. We can allow the user to tell us when it is okay to reset the WAL.
 If we are trying to send Transaction No. 17 to another server but it is currently unavailable, we can make sure that `wal_will_checkpoint()` will return false. Then when we
@@ -93,15 +92,35 @@ There isn't really a requirement that only a single instance will do all the wri
 words, instance `A` writing tx 7 and then instance `B` writing tx 8 on top of tx 7's changes is fine. in practice, distributed coordination is _hard_ and it is better to slap:
 "only a single primary, ever!" sign on our options.
 
-Let's consider what we need to do on the other side of a the log shipping process. We are going to accept `tx_id`, `wal_record` and we need to go from these into an 
-applied transaction. How can we do that? In `wal_recover_tx`, we are doing pretty much the same thing, but we assume that we are alone and that the our WAL is stable. In the 
+Let's consider what we need to do on the other side of a the log shipping process. We are going to accept `tx_id` and the `wal_record`. We need to go from these into an 
+applied transaction. How can we do that? In `wal_recover_tx()`, we are doing pretty much the same thing, but we assume that we are alone and that the our WAL is stable. In the 
 case of accepting a log shipping record from the outside world, there are a few notable differences:
 
 * We have to deal with concurrent read transactions and not interfere with them.
 * We have to write the new record into _our_ WAL. We can't just write it to the data file, we need to persist the changes in such a way that failure of the database will not
 lose any data that we confirmed receipt of. 
+* The database size may have increased during the transaction.
+* During the application of the `wal_record`, the state of the database is not consistent. 
 
-This is implemented in `wal_apply_wal_record()`, which you can see in <<wal_apply_wal_record>>.
+.Applying a remote transaction and inconsistent state
+****
+During the application of the `wal_record`, the state of the database is not consistent. This statement requires further explanation, I think. Consider a transaction that modify a 
+value on Page 3. When the transaction is committed, we also update the page's 
+hash to reflect the updated value. In this case, that means that we updated Page 0 as well. We ship this transaction to the other instance and apply it. When we apply Page 0, 
+we instantly ensure that access to Page 3 will be invalid. The hash no longer match, after all. And vice versa, if we update Page 3 and then try to access it, the hash on 
+Page 0 will reflect the _old_ value, meaning that we are again going to get an error. 
+
+The situation is actually worse when we consider how to deal with encrypted databases, 
+but the core of the problem remains the same. We must apply the changes to the system as a whole before we can access the data. Once we applied all the changes, the state of
+the system is consistent, but during the process of writing the remote transaction, we have a database in an inconsistent state. Good thing that Gavran implements snapshot
+isolation, so no one else can observe this until we finish doing all the work and commit the transaction.
+****
+
+Ideally, the log shipping should be able to operate blindingly, without really caring what data is changed. In order to help that, we'll set the `total_number_of_pages_in_database`
+field in `wal_txn_t` to the size of the database. The `wal_txn_t` isn't encrypted, and the size of the database isn't a secret, so there is no harm in doing so. It also 
+_drastically_ simplify handling of log shipping with encrypted databases. 
+
+The core behavior for log shipping is implemented in `wal_apply_wal_record()`, which you can see in <<wal_apply_wal_record>>.
 
 [source]
 [[wal_apply_wal_record]]
@@ -109,29 +128,177 @@ This is implemented in `wal_apply_wal_record()`, which you can see in <<wal_appl
 ----
 include::./code/wal.c[tags=wal_apply_wal_record]
 ----
-<1> Open a new write transaction, marking it as `TX_APPLY_LOG` so we'll know that we need to treat it differently. Register the WAL record in the transaction directly, so
-we can avoid work during the transaction commit.
-<2> Validate the transaction buffer, along the way making sure that to decompress the transaction data if the transaction is compressed.
+<1> Open a new write transaction, marking it as `TX_APPLY_LOG` so we'll know that we need to treat it differently. We also pass the WAL record to the transaction
+    so we can avoid work during the transaction commit.
+<2> Validate the transaction buffer, along the way making sure to decompress the transaction data if the transaction is compressed.
 <3> Verify that the transaction passed validation and it is in the same order as expected. Each write transaction will increase the `tx_id`, and we must match it to the 
-shipped record to pass validation. This help ensure that we aren't going to run into conflicting writes. 
-<4> For each of the pages in the transaction, apply the changes to the data file. 
-<5> We need to handle the file growing in the middle of the transaction, since the trigger for this wasn't run on this instance.
-<6> Get the current version of the page and then either set it to its new value or use the diff. 
+    shipped record to pass validation. This help ensure that we aren't going to run into conflicting writes. 
+<4> Make sure that the file size match the file size expected by the transaction we are replaying.
+<5> Apply all the pages from the transaction and commit.
 
 A lot is going on in <<wal_apply_wal_record>>. We start by creating a transaction with a state that we weren't familiar with so far, `TX_APPLY_LOG`. This indicates to Gavran
-that this transaction is going to process transaction that came from the outside world. It is paired with the `txn_register_log_shipped_record()` which gives the transaction
+that this transaction is going to process transaction that came from the outside world. We are also setting the  `state\->shipped_wal_record` field which gives the transaction
 access to the `wal_record` for the transaction.
 
-We are able to use this `wal_record` to optimize the commit process of the transaction. Instead of finalizing the transaction ourselves (encrypting or hashing the pages, compressing
-the data, computing the transaction hash, etc) we can just write the shipped record buffer directly to our own WAL.
+[TIP]
+.Reusing the buffer
+====
+In `wal_apply_wal_record()` we have the `tmp_buffer` value. 
+This is meant to be kept _across_ invocations of `wal_apply_wal_record()`, to avoid allocating and releasing the memory on each processed record
+====
+
+We are able to use this `wal_record` to optimize the commit process of the transaction. Instead of finalizing the transaction ourselves (encrypting or hashing the pages, 
+compressing the data, computing the transaction hash, etc) we can just write the shipped record buffer directly to our own WAL.
 
 With log shipping, we need to take additional precautions. We validate the transaction as if we read it from a file using `wal_validate_transaction()`. It is especially important to
 validate the _order_ of transactions. We make sure that the incoming shipped record is a match to the transaction id we expect. In case of divergence, we'll be able to error 
 immediately, instead of losing data or corrupting our internal structure.
 
-Finally, we iterate over the pages in the transaction and use the `write_tx` to modify those pages based on the content of the shipped record. Finally, we can just call `txn_commit()`
-to ensure that the data is persisted. Because we registered the `wal_record` in the transaction, we can skip several steps in the commit process and simply write the contents of the 
-shipped record directly to our own WAL. 
+A key issue that we have to deal with is that the transaction may grow the data file. We handle with the `total_number_of_pages_in_database` and increasing the file size before we
+process the rest of the transaction. The actual processing of the pages in the transaction is done using and in `wal_apply_log_write_pages()` shown in <<wal_apply_log_write_pages>>.
 
-One interesting issue we have with `wal_apply_wal_record()` is that we pass it a `tmp_buffer`. This is meant to be kept _across_ invocations of `wal_apply_wal_record()`, to avoid 
-allocating and releasing the memory on each processed record. 
+[source]
+[[wal_apply_log_write_pages]]
+.`wal.c` - Apply a shipped transaction pages to our own data file
+----
+include::./code/wal.c[tags=wal_apply_log_write_pages]
+----
+
+In <<wal_apply_log_write_pages>> we are iterating over the pages in the transaction and applying them to the data file. This is very similar to how we deal with recover in `wal_recover_tx()`.
+There is a _major_ change here, however, we are not writing directly to the file. Instead, we are effectively re-running the transaction. Why are we doing this? 
+We use the transaction API so concurrent transactions that are now running can still operate. In other words, as far as the rest of the system is concerned, the shipped transactions
+are just normal transactions that behave in the same manner.
+Shipped transactions use `modified_pages`, follow the same snapshot rules and write to the WAL to make sure that we maintain the ACID properties of Gavran.
+
+There are a few things that we had to modify to make sure that everything works, though. If you'll look at <<wal_apply_log_write_pages>> you can see that we use `txn_raw_modify_page()`,
+but that is _problematic_ for us, as we saw before. Page validation and decryption will now work properly while we are writing pages from a remote transaction. The solution to that is
+to detect such transactions and handle it. 
+
+<<txn_raw_get_page_13>> shows the changes made to `txn_raw_get_page()` to support applying remote transactions. We check the transaction's flag and if it is a transaction that is applying
+a remote transaction, we'll skip validation and decryption.
+
+[source]
+[[txn_raw_get_page_13]]
+.`txn.c` - Avoid validation and decryption for transaction that apply remote transactions
+----
+include::./code/txn.c[tags=txn_raw_get_page]
+----
+
+We use `txn_raw_modify_page()` in <<wal_apply_log_write_pages>>, but the changes are made in `txn_raw_get_page()`. That is because `txn_raw_modify_page()` implement reading via `txn_raw_get_page()`.
+It is also important to note that this means that the transaction in <<wal_apply_log_write_pages>> is going to get _encrypted_ pages. The process of applying a remote transaction is totally blind to
+what is going on the file. 
+
+In <<tests13>> you'll see a test `"log shipping with encryption, destination without key"` that show how we can use log shipping from an encrypted database to another instance that _doesn't have the
+encryption key_. Of course, if we want to handle reads, we have to provide the key at a later point in time. But no key is required for the actual log shipping.
+
+Transaction commits when applying a remote transaction is also different as you can see in <<txn_commit_13>>. 
+
+[source]
+[[txn_commit_13]]
+.`txn.c` - Changes in `txn_commit()` to support committing remote transactions
+----
+include::./code/txn.c[tags=txn_commit]
+    // rest of the function is unchanged
+}
+----
+<1> New code, we only need to finalize a transaction is this _our_ transaction. A remote transaction was already finalized and we applied those changes.
+
+In <<txn_commit_13>> you can see that if we are processing a remote transaction, we skip some important steps in the commit process. This is because these steps were already taken, on the _other_ side.
+There is no point in doing these again. Indeed, we cannot if we want to operate blindly on the data. We also have a similar change to `wal_append()` shown in <<wal_append_13>>.
+
+The final important change we have is when creating a new database, <<db_init_13>> shows the changes to `db_init()`. 
+
+[source]
+[[db_init_13]]
+.`db.c` - There is no use for `db_init()` when we are the destination for log shipping
+----
+include::./code/db.c[tags=db_init]
+----
+<1> New code, if we are the target of log shipping, we should do nothing. The database initialization happens on the _other_ side.
+
+The reason for the changes in <<db_init_13>> may not be obvious. One of the _important_ rules of log shipping is that there is a single history of transactions. You cannot apply a transaction
+out of order or with missing information. You have to always have the same sequence of transactions. The problem is that `db_init()` will write a transaction to the file, but that would mean
+that transaction 1 was done on the destination. When transaction 1 comes from the source, it cannot be applied, because the sequence of transaction don't match. There is also the issue of what
+would happen if we initialized the databases with different configuration, etc. 
+
+This concludes the details we need to concern ourselves with for log shipping. For such a feature, the amount of code required is actually pretty minimal, even if we are ignoring the "how" of 
+sending the WAL records between instances.
+
+=== Additional considerations for log shipping
+
+We covered the coding parts of log shipping, but there are other things we need to take into account. The way I implemented log shipping in Gavran, you must start the database in log shipping
+mode if you want it to be at target for log shipping. That is done by specifying `db_flags_log_shipping_target` on the database's options `flags` field. When this value is set, there are some
+changes to the way Gavran behaves:
+
+* You cannot use write transactions, the only allowed changes are via `wal_apply_wal_record()`.
+* You cannot call `wal_apply_wal_record()` on a database that isn't marked with `db_flags_log_shipping_target`. 
+
+These are restrictions that I added, to avoid users causing themselves injuries. If there is a need to switch from log shipping mode to normal mode (to allow local writes), you can restart
+the database without the `db_flags_log_shipping_target` to allow it. Allowing users to turn log shipping target on and off easily is something that is already possible, but I worry that it
+would lead to making changes in multiple locations and preventing the log shipping process from succeeding. 
+
+As I mentioned, you _can_ use an instance as the destination of an encrypted database without supplying the encryption key. That might be a good idea if you want to keep a copy of the 
+database on the side. If you need to actually read from the database, you'll need to supply the key of course. 
+
+Finally, while I talked a lot about log shipping, which implies that we'll apply the logs immediately, that doesn't have to be the case. One use case for log shipping is to implement incremental
+backup strategy. 
+
+=== Implementing incremental backup using log shipping
+
+[CAUTION]
+.Treat the code in this section as a draft, not a ready made solution
+====
+I'm going to present an incremental backup solution in this section, but I want to emphasis that this is more a concept that production ready code. There are a lot of things that I'm ignoring 
+here that you'll probably have to deal with if you wanted to create a proper system. The point of the code is to show the _idea_ and how you can take the log shipping feature and utilize it in 
+all sorts of interesting ways.
+====
+
+The idea with incremental backups using log shipping is simple. We'll get called whenever a transaction is committed. We'll take those transactions and write them to a file and then we can 
+use that to recover. Let's see how that work in <<incremental_backup>>. 
+
+[source]
+[[incremental_backup]]
+.`test.c` - Building the incremental backup file
+----
+include::./code/test.c[tags=incremental_backup]
+
+include::./code/test.c[tags=incremental_backup_setup]
+----
+
+You can see in <<incremental_backup>> that we define a `FILE* backup` that is passed as the state for the `incremental_backup()` function. This is called whenever we commit a transaction and
+will write the transaction data to the `backup` file. We also write some additional metadata, the time of the transaction, the transaction id and its size. This allows us to do some nice 
+tricks. For example, restore up to a particular point in time.
+
+You can see the restore side of things in <<apply_backups>>, where we read from the file.
+
+[source]
+[[apply_backups]]
+.`test.c` - Applying an incremental backup to a database 
+----
+include::./code/test.c[tags=apply_backups]
+----
+
+The code in <<apply_backups>> is straightforward, we read the time of the transaction and if it isn't too late, we apply it using `wal_apply_wal_record()`. You can see these being used in the
+`"can use log shipping for backups"` test. 
+
+What is missing from this backup implementation? From the top of my head we aren't handling restarts of the database. Right now it will not work properly if you restart the database. We are also 
+not ensuring that the writes hit the disk, if there is a failure, we will have a committed transaction but no backup. There are probably many other details that I'm missing, those were just to 
+prove that this is just the start of this feature. 
+
+Note that what we _do_ have, however, is quite impressive. We can do full & incremental backups. If we take the data file, we can apply the incremental backup on top of that. Backups are usually
+compressed, but in this case, we don't need to. The WAL records are either already compressed or encrypted (in which case they cannot be compressed).
+
+And with that, we are closing the chapter and this part of the book. We have implemented a _lot_ of functionality at the lowest tiers of the storage engine. Now it is time to start building 
+data structures and actually _using_ Gavran.
+
+=== Unit Tests
+
+The tests we have here verify that log shipping work by running everything in a single process and shared memory ownership. Extending the tests a bit, you can use something like 
+https://zeromq.org/[ZeroMQ] to handle the actual distribution of the data. Just remember to ensure that there are no missed or out of order transactions.
+
+[source]
+[[tests13]]
+.`test.c` - Testing log shipping
+-----
+include::./code/test.c[tags=tests13]
+-----

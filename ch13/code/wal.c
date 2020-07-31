@@ -29,6 +29,7 @@ typedef struct wal_txn {
   uint64_t page_aligned_tx_size;
   uint64_t tx_size;
   uint64_t number_of_modified_pages;
+  uint64_t total_number_of_pages_in_database;
   enum wal_txn_flags flags;
   uint8_t padding[4];
   wal_txn_page_t pages[];
@@ -180,6 +181,7 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   ensure(mem_alloc_page_aligned((void *)&wt, total_size));
   try_defer(free, wt, cancel_defer);
   memset(wt, 0, total_size);
+  wt->total_number_of_pages_in_database = tx->number_of_pages;
   wt->number_of_modified_pages = pages;
   wt->tx_id = tx->tx_id;
   void *end = wal_setup_transaction_data(
@@ -220,7 +222,8 @@ result_t wal_append(txn_state_t *tx) {
   size_t skip_free_buffer = 0;
   try_defer(free, txn_buffer, skip_free_buffer);
 
-  if (tx->flags & txn_apply_log) {
+  // <1>
+  if (tx->flags & txn_flags_apply_log) {
     skip_free_buffer = 1;
     txn_buffer = tx->shipped_wal_record;
   } else {
@@ -596,16 +599,12 @@ static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
 }
 // end::wal_recover_tx[]
 
-// tag::wal_apply_wal_record[]
+// tag::wal_apply_log_write_pages[]
 static result_t wal_apply_log_write_pages(wal_txn_t *wal_tx,
                                           txn_t *write_tx,
                                           void *input, void *src) {
   for (size_t i = 0; i < wal_tx->number_of_modified_pages; i++) {
     wal_txn_page_t *cur = &wal_tx->pages[i];
-    uint64_t last_page = cur->page_num + cur->number_of_pages;
-    if (last_page > write_tx->state->number_of_pages) {
-      ensure(db_increase_file_size(write_tx, last_page * PAGE_SIZE));
-    }
     size_t end_offset = i + 1 < wal_tx->number_of_modified_pages
                             ? wal_tx->pages[i + 1].offset
                             : wal_tx->tx_size;
@@ -623,36 +622,17 @@ static result_t wal_apply_log_write_pages(wal_txn_t *wal_tx,
   }
   return success();
 }
-static result_t wal_apply_log_ensure_final_file_size(
-    txn_t *write_tx) {
-  // fake read transaction we need to handle encrypted dbs
-  txn_state_t read_tx_state = {
-      .prev_tx = write_tx->state,
-      .db = write_tx->state->db,
-      .flags =
-          (write_tx->state->flags & ~txn_apply_log) | TX_COMMITED};
-  txn_t read_tx = {.state = &read_tx_state};
-  defer(txn_clear_working_set, read_tx);
-  if (write_tx->state->flags & db_flags_page_need_txn_working_set) {
-    ensure(hash_new(8, &read_tx.working_set));
-  }
-  page_metadata_t *file_header_metadata;
-  ensure(txn_get_metadata(&read_tx, 0, &file_header_metadata));
-  uint64_t last_page =
-      file_header_metadata->file_header.number_of_pages;
-  if (last_page > write_tx->state->number_of_pages) {
-    ensure(db_increase_file_size(write_tx, last_page * PAGE_SIZE));
-  }
-  return success();
-}
+// end::wal_apply_log_write_pages[]
+
+// tag::wal_apply_wal_record[]
 result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
                               uint64_t tx_id, span_t *wal_record) {
-  if (tx_id == 1) return success();  // 1st tx is always the same
+  ensure(db->state->options.flags & db_flags_log_shipping_target,
+         msg("db wasn't set with db_flags_apply_log flag"));
   // <1>
   txn_t write_tx;
   ensure(txn_create(db, TX_WRITE | TX_APPLY_LOG, &write_tx));
   defer(txn_close, write_tx);
-  write_tx.state->flags &= db_flags_page_validation_none_mask;
   write_tx.state->shipped_wal_record = wal_record->address;
 
   // <2>
@@ -667,13 +647,20 @@ result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
          msg("Cannot apply a transaction out of order"),
          with(tx_id, "%lu"), with(wal_tx->tx_id, "%lu"),
          with(write_tx.state->tx_id, "%lu"));
+
   // <4>
+  if (wal_tx->total_number_of_pages_in_database >
+      write_tx.state->number_of_pages) {
+    ensure(db_increase_file_size(
+        &write_tx,
+        wal_tx->total_number_of_pages_in_database * PAGE_SIZE));
+  }
+  // <5>
   void *input =
       (void *)wal_tx + sizeof(wal_txn_t) +
       sizeof(wal_txn_page_t) * wal_tx->number_of_modified_pages;
   ensure(wal_apply_log_write_pages(wal_tx, &write_tx, input,
                                    wal_record->address));
-  ensure(wal_apply_log_ensure_final_file_size(&write_tx));
   ensure(txn_commit(&write_tx));
   return success();
 }

@@ -18,7 +18,13 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
     tx->state->usages++;
     return success();
   }
-  // <2>
+  if ((db->state->options.flags & db_flags_log_shipping_target)) {
+    ensure(flags & txn_flags_apply_log,
+           msg("txn_create(flags) must have txn_flags_apply_log when "
+               "running in log shipping mode"),
+           with(flags, "%d"));
+  }
+
   ensure(flags & TX_WRITE,
          msg("txn_create(flags) must be flagged with either TX_WRITE "
              "or TX_READ"),
@@ -97,7 +103,7 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
   db_state_t *db = tx->state->db;
   uint64_t *bitmap = db->first_read_bitmap;
   // before the db init is completed or extended during this run
-  if (!bitmap || page->page_num > db->original_number_of_pages ||
+  if (!bitmap || page->page_num >= db->original_number_of_pages ||
       // already checked
       (bitmap[page->page_num / 64] & (1UL << page->page_num % 64)))
     return success();
@@ -252,7 +258,8 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
     ensure(pages_get(tx, page));
   }
 
-  if (!(tx->state->flags & txn_apply_log)) {
+  // <1>
+  if (!(tx->state->flags & txn_flags_apply_log)) {
     if (tx->state->flags & db_flags_encrypted) {
       ensure(txn_decrypt_page(tx, page));
     } else {
@@ -391,7 +398,8 @@ result_t txn_commit(txn_t *tx) {
   errors_assert_empty();
   if (!tx->state->modified_pages->count) return success();
 
-  if (!(tx->state->flags & txn_apply_log)) {
+  // <1>
+  if (!(tx->state->flags & txn_flags_apply_log)) {
     page_metadata_t *header;
     ensure(txn_modify_metadata(tx, 0, &header));
     header->file_header.last_tx_id = tx->state->tx_id;
@@ -399,6 +407,7 @@ result_t txn_commit(txn_t *tx) {
   }
 
   ensure(wal_append(tx->state));
+  // end::txn_commit[]
 
   tx->state->flags |= TX_COMMITED;
   tx->state->usages = 1;
@@ -420,7 +429,6 @@ result_t txn_commit(txn_t *tx) {
 
   return success();
 }
-// end::txn_commit[]
 
 // tag::txn_free_single_tx_state[]
 implementation_detail void txn_free_single_tx_state(
