@@ -25,7 +25,7 @@ static result_t db_move_free_space_bitmap(
     txn_t *tx, uint64_t from, uint64_t to,
     page_metadata_t *old_metadata, page_t *old) {
   // <1>
-  uint64_t pages = ROUND_UP(to, BITS_IN_PAGE);
+  uint32_t pages = (uint32_t)ROUND_UP(to, BITS_IN_PAGE);
   pages += next_power_of_two(pages / 10);
   // <2>
   void *new_map;
@@ -50,7 +50,7 @@ static result_t db_move_free_space_bitmap(
   if (!bitmap_search(&search)) {
     failed(ENOSPC,
            msg("No place for free space bitmap after resize!"),
-           with(pages, "%lu"));
+           with(pages, "%u"));
   }
   // <6>
   for (uint64_t i = 0; i <= pages; i++) {  // new bitmap page are busy

@@ -42,7 +42,8 @@ typedef struct page {
   void *address;
   void *previous;  // relevant only for modified page
   uint64_t page_num;
-  uint64_t number_of_pages;
+  uint32_t number_of_pages;
+  uint32_t _padding;
 } page_t;
 
 result_t pages_get(txn_t *tx, page_t *p);
@@ -69,20 +70,34 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_metadata = 2,
   page_flags_free_space_bitmap = 3,
   page_flags_overflow = 4,
+  page_flags_container = 5,
 } page_flags_t;
+
+typedef struct container_page {
+  page_flags_t page_flags;
+  uint8_t _padding[1];
+  uint16_t free_space;
+  uint16_t floor;
+  uint16_t ceiling;
+  uint64_t next;
+  uint64_t prev;
+  uint64_t next_allocation_at;
+} container_page_t;
 
 typedef struct overflow_page {
   page_flags_t page_flags;
-  uint8_t _padding1[7];
-  uint64_t number_of_pages;
+  bool is_container_value;
+  uint8_t _padding[2];
+  uint32_t number_of_pages;
   uint64_t size_of_value;
+  uint64_t container_item_id;
 } overflow_page_t;
 
 typedef struct free_space_bitmap_heart {
   page_flags_t page_flags;
-  uint8_t _padding1[7];
-  uint64_t number_of_pages;
-  uint8_t _padding2[16];
+  uint8_t _padding1[3];
+  uint32_t number_of_pages;
+  uint8_t _padding2[20];
 } free_space_bitmap_heart_t;
 
 // tag::file_header[]
@@ -114,6 +129,7 @@ typedef struct page_metadata {
     file_header_t file_header;
     free_space_bitmap_heart_t free_space;
     overflow_page_t overflow;
+    container_page_t container;
   };
 } page_metadata_t;
 
@@ -249,6 +265,7 @@ enable_defer(txn_close);
 
 result_t txn_commit(txn_t *tx);
 result_t txn_raw_get_page(txn_t *tx, page_t *page);
+
 result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 // end::txn_api[]
 
@@ -258,6 +275,8 @@ result_t txn_register_cleanup_action(cleanup_callback_t **head,
                                      size_t size_of_state);
 
 result_t txn_get_page(txn_t *tx, page_t *page);
+result_t txn_get_page_and_metadata(txn_t *tx, page_t *page,
+                                   page_metadata_t **metadata);
 result_t txn_modify_page(txn_t *tx, page_t *page);
 
 // tag::tx_allocation[]
@@ -299,3 +318,24 @@ typedef struct reusable_buffer {
 
 result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
                               uint64_t tx_id, span_t *wal_record);
+
+// tag::container_api[]
+// create / delete container
+result_t container_create(txn_t *tx, uint64_t *container_id);
+result_t container_destroy(txn_t *tx, uint64_t container_id);
+
+typedef struct container_item {
+  uint64_t container_id;
+  uint64_t item_id;
+  span_t data;
+} container_item_t;
+
+// CRUD operations
+result_t container_item_put(txn_t *tx, container_item_t *item);
+result_t container_item_update(txn_t *tx, container_item_t *item,
+                               bool *in_place);
+result_t container_item_get(txn_t *tx, container_item_t *item);
+result_t container_item_del(txn_t *tx, container_item_t *item);
+// iteration
+result_t container_get_next(txn_t *tx, container_item_t *item);
+// end::container_api[]

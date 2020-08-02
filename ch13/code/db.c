@@ -31,8 +31,8 @@ static result_t db_init_free_space_bitmap(txn_t *tx) {
   uint64_t free_space_start = 1;
   entry->file_header.free_space_bitmap_start = free_space_start;
 
-  uint64_t pages =
-      ROUND_UP(entry->file_header.number_of_pages, BITS_IN_PAGE);
+  uint32_t pages = (uint32_t)ROUND_UP(
+      entry->file_header.number_of_pages, BITS_IN_PAGE);
 
   entry[free_space_start].free_space.page_flags =
       page_flags_free_space_bitmap;

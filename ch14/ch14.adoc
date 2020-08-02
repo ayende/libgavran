@@ -1,0 +1,56 @@
+= Persistent data structures
+
+We have spent _quite_ a bit of time on the foundation of Gavran, how we put bits to the disk in the proper manner, implementing transactions, ensuring that Gavran meets all 
+the ACID properties, etc. We also dealt with some fairly advanced features, from supporting Transparent Data Encryption to implementing log shipping. Having a solid foundation
+is critical for a storage engine and I made the conscious choice to have a strong separation between the data structures that Gavran will offer and _how_ it is implemented.
+
+In some cases, storage engines make no distinction between the layers or have strong correlation between the external interface offered and the internal details of the data store.
+LevelDB, for example, offers a single data structure, a key/value store, which is the only thing that it _can_ really offer, given how it is implemented. Gavran is built to be 
+more generic in nature. That meant that we had to spend a lot more time building infrastructure, but now that we have a robust core, we can move forward with things.
+
+As I'm writing this, the Gavran code base hovers just under 2,500 lines of code, which isn't bad at all, given what we have implemented. Even with just the foundation, there are
+critical functionalities that are missing. Multi threading support, cross platform support and performance work are just some of the items that pops to mind when I think about the
+remaining work. Nevertheless, we are going to shift our focus a bit and start building persistent data structures for Gavran. 
+
+So far we have dealt strictly with pages and aside from the free space bitmap we didn't really do anything interesting with them. This part of the book aims to change that. We are
+going to implement data storage containers as well as support for hash indexes and B+Trees. These terms may not mean much to you right now, but they will shortly become much 
+clearer. 
+
+We'll start with the most basic of tasks, storing and retrieving data from the database. What we have done so far is store data in pages and then get them back. That _works_, but
+only as long as we work with page size data. Let's see how we can manage a more robust system.
+
+== Raw data containers
+
+The API we have to deal with data right now in Gavran is fairly poor, in terms of what it can offer us. We have pages, and that is pretty much it. That doesn't work very well when
+we deal with arbitrary data, we need some better way to handle it. After thinking about it for quite a bit, I cam up with the most minimal set of API that I could think of for 
+managing arbitrary data in Gavran, shown in <<container_api>>.
+
+[source]
+[[container_api]]
+.`gavran/db.h` - API for CRUD operations on arbitrary data 
+----
+include::../include/gavran/db.h[tags=container_api]
+----
+
+The code in <<container_api>> expose two new primitives that we'll be able to make use of. There is the _Container_ and the _Container Item_. You can think about a container as 
+simply a grouping of values. Gavran makes no requirements about that. You may have a single container and dump all the items there or multiple containers. The key here is that 
+once you have a container you can place items in it. An item is simply a piece of memory that is stored by Gavran. Again, we make no requirement on its shape, form or size. The
+latter is important, since it means that we'll need to support items of any size, including those that span multiple pages.
+
+Let's look at how we can use the API usage in <<remember_item>>, here we are storing a JSON string inside Gavran. The container was already previously allocated and we are creating
+a new write transaction to store the JSON to the container, returning the new item id back to the caller.
+
+[source]
+[[remember_item]]
+.`test.c` - Using the container API to store a value
+-----
+include::./code/test.c[tags=remember_item]
+-----
+
+In <<remember_item>>, we can see that we simply call `container_item_put()` to add an item, and then we get an `item_id` value, which we could later use to get the value back. That
+is important, because it means that we have a simple way to recall items. With the API and its usage in place, let's talk a bit about what kind of promises we are going to give to
+the user.
+
+* A container is expected to be a very long lived object. It is similar to a table in a relational database. Something that you create once and use for many time afterward. 
+* An item id should allow us to access the item's content with `O(1)` cost.
+* The item id is going to remain stable for the life time of the item. 

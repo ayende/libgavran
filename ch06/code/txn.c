@@ -4,11 +4,12 @@
 
 // tag::txn_get_number_of_pages[]
 static result_t txn_get_number_of_pages(page_metadata_t *metadata,
-                                        uint64_t *number_of_pages) {
+                                        uint32_t *number_of_pages) {
   switch (metadata->common.page_flags) {
     case page_flags_file_header:
     case page_flags_free:
     case page_flags_metadata:
+    case page_flags_container:
       *number_of_pages = 1;
       return success();
     case page_flags_overflow:
@@ -29,8 +30,13 @@ static result_t txn_get_number_of_pages(page_metadata_t *metadata,
 // tag::txn_get_modify_page[]
 result_t txn_get_page(txn_t *tx, page_t *page) {
   page_metadata_t *metadata;
-  ensure(txn_get_metadata(tx, page->page_num, &metadata));
-  ensure(txn_get_number_of_pages(metadata, &page->number_of_pages));
+  return txn_get_page_and_metadata(tx, page, &metadata);
+}
+
+result_t txn_get_page_and_metadata(txn_t *tx, page_t *page,
+                                   page_metadata_t **metadata) {
+  ensure(txn_get_metadata(tx, page->page_num, metadata));
+  ensure(txn_get_number_of_pages(*metadata, &page->number_of_pages));
   ensure(txn_raw_get_page(tx, page));
   return success();
 }

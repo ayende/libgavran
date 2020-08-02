@@ -13,9 +13,8 @@ enum wal_txn_page_flags {
 typedef struct wal_txn_page {
   uint64_t page_num;
   uint64_t offset;
-  uint64_t number_of_pages;
+  uint32_t number_of_pages;
   uint32_t flags;
-  uint8_t padding[4];
 } wal_txn_page_t;
 
 enum wal_txn_flags {

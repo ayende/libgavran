@@ -88,3 +88,8 @@ result_t wal_checkpoint(db_state_t *db, uint64_t tx_id);
 result_t wal_close(db_state_t *db);
 enable_defer(wal_close);
 // end::wal_api[]
+
+// varint
+uint32_t varint_encoding_length(uint64_t n);
+uint8_t *varint_encode(uint64_t n, uint8_t *buf);
+uint8_t *varint_decode(uint8_t *buf, uint64_t *value);
