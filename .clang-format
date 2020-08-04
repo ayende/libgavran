@@ -4,5 +4,9 @@ BasedOnStyle:  Google
 ColumnLimit:     70
 IndentWidth:    2
 AlignTrailingComments: true
+BinPackParameters: true
+AllowAllParametersOfDeclarationOnNextLine: true
+AlignConsecutiveAssignments: true
+AlignAfterOpenBracket: DontAlign
 ...
 

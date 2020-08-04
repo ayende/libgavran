@@ -20,7 +20,7 @@ static const uint64_t N8 = 72057594037927936;
 static const uint64_t N9 = 9223372036854775808U;
 
 // clang-format off
-uint32_t varint_encoding_length(uint64_t n) {
+uint32_t varint_get_length(uint64_t n) {
   return (
       n < N1 ? 1
     : n < N2 ? 2

@@ -65,24 +65,26 @@ typedef struct page_crypto_metadata {
 // end::page_crypto_metadata_t[]
 
 typedef enum __attribute__((__packed__)) page_flags {
-  page_flags_free = 0,
-  page_flags_file_header = 1,
-  page_flags_metadata = 2,
+  page_flags_free              = 0,
+  page_flags_file_header       = 1,
+  page_flags_metadata          = 2,
   page_flags_free_space_bitmap = 3,
-  page_flags_overflow = 4,
-  page_flags_container = 5,
+  page_flags_overflow          = 4,
+  page_flags_container         = 5,
 } page_flags_t;
 
+// tag::container_page_t[]
 typedef struct container_page {
   page_flags_t page_flags;
-  uint8_t _padding[1];
+  uint8_t _padding1[1];
   uint16_t free_space;
   uint16_t floor;
   uint16_t ceiling;
   uint64_t next;
   uint64_t prev;
-  uint64_t next_allocation_at;
+  uint64_t next_alloc;
 } container_page_t;
+// end::container_page_t[]
 
 typedef struct overflow_page {
   page_flags_t page_flags;
@@ -134,9 +136,9 @@ typedef struct page_metadata {
 } page_metadata_t;
 
 _Static_assert(sizeof(page_crypto_metadata_t) == 32,
-               "The size of page crypto must be 32 bytes");
+    "The size of page crypto must be 32 bytes");
 _Static_assert(sizeof(page_metadata_t) == 64,
-               "The size of page metadata must be 64 bytes");
+    "The size of page metadata must be 64 bytes");
 // end::page_metadata_t[]
 
 // tag::tx_structs[]
@@ -149,21 +151,21 @@ typedef struct db {
 } db_t;
 
 typedef enum db_flags {
-  db_flags_none = 0,
-  txn_write = 1 << 1,
-  txn_read = 1 << 2,
-  txn_flags_apply_log = 1 << 3,
-  txn_flags_commited = 1 << 4,
-  db_flags_avoid_mmap_io = 1 << 5,
-  db_flags_encrypted = 1 << 6,
-  db_flags_page_validation_once = 1 << 7,
+  db_flags_none                   = 0,
+  txn_write                       = 1 << 1,
+  txn_read                        = 1 << 2,
+  txn_flags_apply_log             = 1 << 3,
+  txn_flags_commited              = 1 << 4,
+  db_flags_avoid_mmap_io          = 1 << 5,
+  db_flags_encrypted              = 1 << 6,
+  db_flags_page_validation_once   = 1 << 7,
   db_flags_page_validation_always = 1 << 8,
-  db_flags_log_shipping_target = 1 << 9,
+  db_flags_log_shipping_target    = 1 << 9,
   db_flags_page_validation_none =
       db_flags_page_validation_once | db_flags_page_validation_always,
   db_flags_page_validation_none_mask =
       ~(db_flags_page_validation_once |
-        db_flags_page_validation_always),
+          db_flags_page_validation_always),
   db_flags_page_need_txn_working_set =
       db_flags_encrypted | db_flags_avoid_mmap_io
 
@@ -178,8 +180,8 @@ typedef struct txn {
 // end::tx_structs[]
 
 // tag::wal_write_callback_t[]
-typedef void (*wal_write_callback_t)(void *state, uint64_t tx_id,
-                                     span_t *wal_record);
+typedef void (*wal_write_callback_t)(
+    void *state, uint64_t tx_id, span_t *wal_record);
 // end::wal_write_callback_t[]
 
 // tag::database_page_validation_options[]
@@ -254,8 +256,8 @@ typedef struct txn_state {
 // end::txn_state_t[]
 
 // tag::txn_api[]
-result_t db_create(const char *filename, db_options_t *options,
-                   db_t *db);
+result_t db_create(
+    const char *filename, db_options_t *options, db_t *db);
 result_t db_close(db_t *db);
 enable_defer(db_close);
 
@@ -270,19 +272,17 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page);
 // end::txn_api[]
 
 result_t txn_register_cleanup_action(cleanup_callback_t **head,
-                                     void (*action)(void *),
-                                     void *state_to_copy,
-                                     size_t size_of_state);
+    void (*action)(void *), void *state_to_copy,
+    size_t size_of_state);
 
 result_t txn_get_page(txn_t *tx, page_t *page);
-result_t txn_get_page_and_metadata(txn_t *tx, page_t *page,
-                                   page_metadata_t **metadata);
+result_t txn_get_page_and_metadata(
+    txn_t *tx, page_t *page, page_metadata_t **metadata);
 result_t txn_modify_page(txn_t *tx, page_t *page);
 
 // tag::tx_allocation[]
 result_t txn_allocate_page(txn_t *tx, page_t *page,
-                           page_metadata_t **metadata,
-                           uint64_t nearby_hint);
+    page_metadata_t **metadata, uint64_t nearby_hint);
 result_t txn_free_page(txn_t *tx, page_t *page);
 // end::tx_allocation[]
 
@@ -290,8 +290,8 @@ result_t txn_free_page(txn_t *tx, page_t *page);
 result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy);
 
 // tag::bit-manipulations[]
-static inline void bitmap_set(uint64_t *buffer, uint64_t pos,
-                              bool val) {
+static inline void bitmap_set(
+    uint64_t *buffer, uint64_t pos, bool val) {
   if (val)
     buffer[pos / 64] |= (1UL << pos % 64);
   else
@@ -303,11 +303,11 @@ static inline bool bitmap_is_set(uint64_t *buffer, uint64_t pos) {
 // end::bit-manipulations[]
 
 // tag::metadata_api[]
-result_t txn_get_metadata(txn_t *tx, uint64_t page_num,
-                          page_metadata_t **metadata);
+result_t txn_get_metadata(
+    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
 
-result_t txn_modify_metadata(txn_t *tx, uint64_t page_num,
-                             page_metadata_t **metadata);
+result_t txn_modify_metadata(
+    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
 // end::metadata_api[]
 
 typedef struct reusable_buffer {
@@ -317,7 +317,7 @@ typedef struct reusable_buffer {
 } reusable_buffer_t;
 
 result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
-                              uint64_t tx_id, span_t *wal_record);
+    uint64_t tx_id, span_t *wal_record);
 
 // tag::container_api[]
 // create / delete container
@@ -332,8 +332,8 @@ typedef struct container_item {
 
 // CRUD operations
 result_t container_item_put(txn_t *tx, container_item_t *item);
-result_t container_item_update(txn_t *tx, container_item_t *item,
-                               bool *in_place);
+result_t container_item_update(
+    txn_t *tx, container_item_t *item, bool *in_place);
 result_t container_item_get(txn_t *tx, container_item_t *item);
 result_t container_item_del(txn_t *tx, container_item_t *item);
 // iteration

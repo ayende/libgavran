@@ -1,0 +1,267 @@
+= Persistent data structures
+
+We have spent _quite_ a bit of time on the foundation of Gavran, how we put bits to the disk in the proper manner, implementing transactions, ensuring that Gavran meets all 
+the ACID properties, etc. We also dealt with some fairly advanced features, from supporting Transparent Data Encryption to implementing log shipping. Having a solid foundation
+is critical for a storage engine and I made the conscious choice to have a strong separation between the data structures that Gavran will offer and _how_ it is implemented.
+
+In some cases, storage engines make no distinction between the layers or have strong correlation between the external interface offered and the internal details of the data store.
+LevelDB, for example, offers a single data structure, a key/value store, which is the only thing that it _can_ really offer, given how it is implemented. Gavran is built to be 
+more generic in nature. That meant that we had to spend a lot more time building infrastructure, but now that we have a robust core, we can move forward with things.
+
+As I'm writing this, the Gavran code base hovers just under 2,500 lines of code (excluding tests), which isn't bad at all, given what we have implemented. 
+Even with just the foundation, there are critical functionalities that are missing. Multi threading support, cross platform support and performance work are just some of the items 
+that pops to mind when I think about the remaining work. Nevertheless, we are going to shift our focus a bit and start building persistent data structures for Gavran. 
+
+So far we have dealt strictly with pages and aside from the free space bitmap we didn't really do anything interesting with them. This part of the book aims to change that. We are
+going to implement data storage containers as well as support for hash indexes and B+Trees. These terms may not mean much to you right now, but they will shortly become much 
+clearer. 
+
+We'll start with the most basic of tasks, storing and retrieving data from the database. What we have done so far is store data in pages and then get them back. That _works_, but
+only as long as we work with page size data. Let's see how we can manage a more robust system.
+
+== Raw data containers
+
+The API we have to deal with data right now in Gavran is fairly poor, in terms of what it can offer us. We have pages, and that is pretty much it. That doesn't work very well when
+we deal with arbitrary data, we need some better way to handle it. After thinking about it for quite a bit, I came up with the most minimal set of API that I could think of for 
+managing arbitrary data in Gavran, shown in <<container_api>>.
+
+[source]
+[[container_api]]
+.`gavran/db.h` - API for CRUD operations on arbitrary data 
+----
+include::../include/gavran/db.h[tags=container_api]
+----
+
+The code in <<container_api>> expose two new primitives that we'll be able to make use of. There is the _Container_ and the _Container Item_. You can think about a container as 
+simply a grouping of values. Gavran makes no requirements about that. You may have a single container and dump all the items there or multiple containers. The key here is that 
+once you have a container you can place items in it. An item is simply a piece of data that is stored by Gavran. Again, we make no requirement on its shape, form or size. The
+latter is important, since it means that we'll need to support items of any size, including those that span multiple pages.
+
+Let's look at how we can use the API usage in <<remember_item>>, here we are storing a JSON string inside Gavran. The container was already previously allocated and we are creating
+a new write transaction to store the JSON to the container, returning the new item id back to the caller.
+
+[source]
+[[remember_item]]
+.`test.c` - Using the container API to store an item
+-----
+include::./code/test.c[tags=remember_item]
+-----
+
+In <<remember_item>>, we can see that we simply call `container_item_put()` to add an item, and then we get an `item_id` value, which we could later use to get the item back. 
+We have a simple way to recall items, using an opaque ids. With the API and its usage in place, let's talk a bit about what kind of promises we are going to give to
+the user.
+
+* A container is expected to be a very long lived object. It is similar to a table in a relational database. Something that you create once and use for many time afterward. 
+* An item id should allow us to access the item's content with `O(1)` cost.
+* The item id is going to remain stable for the life time of the item.
+
+This means that given an item id, we can very quickly get to the item's data and that we can rely on the item's id not changing behind our back. That means that we can store
+that id and reuse it later. Given just the API we have seen so far, we have enough for basic CRUD operations. But how does this work? Let's look at things in order, we have
+the `container_create()` function, where it all starts, in <<container_create>>.
+
+[source]
+[[container_create]]
+.`container.c` - Creating a new container 
+-----
+include::./code/container_create.c[tags=container_create]
+-----
+
+The `container_create()` allocates a single page and setup its metadata, the metadata for a container page is using the `container_page_t` struct and it is shown in 
+<<container_page_t>>. This is used to manage a container and its items, as we'll shortly see.
+
+[source]
+[[container_page_t]]
+.`gavran/db.h` - The metadata of a container page
+-----
+include::../include/gavran/db.c[tags=container_page_t]
+-----
+
+Looking at the structure in <<container_page_t>> it may not be obvious how everything plays together, so let's look <<container-page>> to see how the container
+is actually structured. This is the first time that we see interesting use of the page's metadata. Pretty much _all_ the interesting details about the container
+page are actually being manage from its metadata. 
+
+[[container-page]]
+.The structure of a single page in a container
+image::container-page.png[]
+
+A container page is meant to contain items, that is why it is named this way. An item can be of any size and we want to pack as many items as possible into a page
+to allow for greater density. That means that we need to somehow _manage_ the items inside a page. This is done using the `floor` and `ceiling` fields in the 
+`container_page_t` structure. 
+
+=== Writing an item
+
+The idea is that when we want to write an item to the page, we'll write it to the _top_ of the page. To write an  that is 64 bytes on a page, we'll lower the
+`ceiling` by 64 bytes and then write 64 bytes from the new `ceiling` position toward the old value. After writing the item, we aren't done. We need some way
+to _refer_ to the item. We could use the offset inside the page, but that has its own issues. In particular, we'll likely need to defrag the page at some point,
+which will require us to move the items around. If we use the offset in the page as the id of the item, we'll need to change the id. We want to avoid that.
+
+Instead, we'll write the offset of the item into the `floor` of the page. We consider the bottom of the page as an array of `int16_t`, containing the offsets
+of the item in the page. Whenever we have a new item, we'll raise the `floor` by another 2 bytes (the size of `int16_t`) and place the offset of the item in
+the new position. The id of the item in this case is the index into this array of positions at the bottom of the page. 
+
+In other words, we place the actual value of an item on the top, growing down and we set the position of the item in the page at the bottom, growing up. A page
+is considered full when the `ceiling` and the `floor` meet. It might be easier to understand how this work if we'll look at <<container_add_item_to_page>>.
+The `container_add_item_to_page()` callers are responsible for making sure that there is enough space in the page for adding the item. 
+
+[source]
+[[container_add_item_to_page]]
+.`container.c` - Adding an item to a page
+-----
+include::./code/container_create.c[tags=container_add_item_to_page]
+-----
+
+In `container_add_item_to_page()` we start by getting the container page's metadata as well as the page itself ready for modifications. We then scan the bottom
+of the page looking for an empty index in the `int64_t* positions` array. If we can't find one, we'll increase the size of the `positions` array by incrementing
+the `floor` field on the metadata.
+
+.Working with raw memory
+****
+One of the things that we'll run into over and over again when implementing persistent data structures is that we give meaning to certain parts of memory
+without bother to go through any sort of structure or API. We have the raw memory of the container page, and we decide that we are going to treat the 
+start of the page as an array of `int16_t`. At the same time, at the end of the page, we are working with raw bytes. 
+
+We also allow ourselves to do extend an array, which is not something that you'll typically see in C. This is because we are working at a lower level than usual.
+It may take a bit of time to get used to the way we look at a piece of memory first as a raw set of bytes and then as an array or a struct. Note that unsaid but
+very important is the notion of alignment. 
+
+We are making sure that our accesses are either properly aligned or going through the proper channels to ensure that we'll not have to deal with alignment issues.
+****
+
+Once we have the index where the position of the value will go, we need to put the value itself in its place. Beside the item's value, we also need to keep its 
+size. We handle that using `varint`. This is a common encoding format for integers that allow us to pack small integers with high degree of efficiency. The idea
+is that we can write an `int64_t` in far fewer bytes. In this case, the size of the page is 8192 bytes, which means that at most, we'll use two bytes to store 
+the length of an item. Varints are _really_ common in many scenarios, and https://developers.google.com/protocol-buffers/docs/encoding[read more about them] if
+you are unfamiliar with them. The API Gavran uses for working with them is shown in <<varint_api>>.
+
+[source]
+[[varint_api]]
+.`gavran/internal.h` - Variable length integers API
+-----
+include::../include/gavran/internal.h[tags=varint_api]
+-----
+
+The `varint_encode()` function return the pointer it received _after_ the write of the number they got. In other words, we write the length of the value, then we return
+from `container_add_item_to_page()` the location to write the value itself in `ptr`. 
+The last action of `container_add_item_to_page()` is to record the position of the item in the `positions` array and then compute the new `item_id`. 
+
+The `item_id` computation is interesting. We use the `page_num` and the `index` to generate the `item_id`. Let's dig deeper into what is going on in the last 
+part of `container_add_item_to_page()`. When _reading_ an item, we'll need to find it with `O(1)` cost. Ideally, we'll want the cost to be similar to just a 
+pointer dereference. 
+
+We achieve this goal by encoding the `page_num` in the `item_id`. What we are _actually_ doing by multiplying the `page_num` by `PAGE_SIZE`? That actually 
+give us the offset of the page in _bytes_. The `index`, on the other hand, is known to be a maximum of 4095. It is an index into an `int16_t` array whose size 
+is a maximum of 8192 bytes, after all. We're adding `1` to the value for reasons that we'll be made clear shortly. With the `item_id` in the shape that it is,
+we can easily get to the relevant page, find the position of the item _within_ the page and return the results to the user.
+
+Looking back at the requirements we have for storing items, we have:
+
+* An `item_id` providing `O(1)` access time, we achieve that by packing both the `page_num` and the `index` into a single `uint64_t`.
+* An `item_id` should remain stable for the life time of the item, we achieve that by returning not the position of the item in the page, but using indirection
+  through the `positions` array. We can change the actual location of the item in the page without affecting its id. 
+
+The `container_add_item_to_page()` function is called under a number of assumptions that I want to call out explicitly:
+
+* The item's size is small enough to fit in a page, I defined that as under 6KB.
+* The page in question _has_ enough space between the `floor` and `ceiling` values to fit an item of the desired size.
+
+There is quite a lot of machinery in place to ensure that these assumptions hold. Let's start with the first item in the list, how do we store an item that is too
+big to be held in a page?
+
+=== Writing a _large_ item
+
+When we are writing small values, we want to place them in a container page, to get the maximum density. But an item can be of _any_ size, we want to support
+storing of an item that is 20KB in size as well as an item that is 10MB in size. These do not fit in a page, so how do we deal with that? When we worked on the 
+foundation of Gavran we implemented allocation strategies for pages, these are going to come in handy now. When we need to write an item whose size is too large
+to a page, we'll allocate it in an _overflow_ page. 
+
+An overflow page is a page (or a set of pages) that are dedicated to holding a single value. They have no structure of their own and simply hold their value. We
+have actually mostly dealt with overflow pages up until this chapter, you saw them quite often in the previous code sample. Jumping forward a bit, in <<container_api>>
+we have the `container_get_next()`. We need it to be able to iterate over all the items in a container. That is simple to do when the values are stored in the 
+container's page, but how will we deal with large values?
+
+The answer to that is simple, we'll store the large item _twice_. The first time, we'll store it in an overflow page, but we'll also store the page number of the
+overflow page in the container page. This is a small value, so it fits very well and it gives us a very simple way to handle iteration of all the values in the 
+container. 
+
+You can see how we handle writing a large value to the container in <<container_item_put_large>>. I have defined large value as any value that exceeds 6KB in size.
+The balance in here is between external and internal fragmentation. A value that is 5.9KB in size will be stored directly in the container page, but it means that
+we can put only values that are much smaller. If there is a good mix of sizes, we'll likely get good density of values. On the other hand, an item that is 6.1 KB 
+will have its own page, but we'll waste the rest of the page that is sitting empty.
+
+[source]
+[[container_item_put_large]]
+.`container.c` - Adding a large item to a container
+-----
+include::./code/container_create.c[tags=container_item_put_large]
+-----
+
+We allocate space directly using `txn_allocate_page()` and then register the metadata as an `page_flags_overflow`. An overflow page has two interesting fields
+in its metadata: `number_of_pages` and the `size_of_value`. The first is meant to record how many pages this value uses and the second what is the actual
+size of the value. You can see that we use `TO_PAGES()` to go from the item's size to the number of pages it will use.
+Gavran's overflow pages use `uint32_t` to store the number of pages, so a single overflow page can use a maximum of 32 TB. I think that this is large enough
+that we don't really need to concern ourselves further with this detail. 
+
+After we allocate the page, we copy the data from the item to the page's buffer and then we register the newly allocated page in the container. We encode
+the overflow page number into a buffer and write _that_ to the container as well. You can see that we pass `true` to the `is_reference` flag of 
+`container_item_allocate()`. We saw how that is used in `container_add_item_to_page()`. If the passed value is a reference, we store the position of the 
+value in the `positions` array on the container's page using negative numbers. This is used as an indication later that this isn't the value itself but
+a reference to it.
+
+The final step in the `container_item_put_large()` is to compute the `item_id`. In the case of a large value, we use the `page_num` multiplied by `PAGE_SIZE`,
+that gives us direct access to the page when we want to read. The `item_id` that is created from storing the page reference in the container is only used
+to link the overflow page back to the container, we are never exposing this it to the outside world.
+
+[TIP]
+.The structure of the `item_id`
+====
+A large item will be stored on an overflow page and the value will be the `page_num * PAGE_SIZE`. A _small_ value, on the other hand, will be stored inside
+a container page and the `item_id` will be the `page_num * PAGE_SIZE + index + 1`. The `+1` there is important. It ensures that we can tell at a glance 
+whatever an `item_id` refers to a small or large item.
+
+If the `item_id` is evenly divisible by `PAGE_SIZE`, that means that we are looking at an overflow page. If the `item_id` isn't divisible by `PAGE_SIZE`,
+it means that we are looking at a small value and we can find the container page number using integer division and the index in the page using modulus on the
+`PAGE_SIZE`. Because `0` is a valid index for a small item value, we increment that by one to ensure that there is no potential for confusion.
+====
+
+=== Allocating space for items
+
+We looked into how we store large items to an overflow page and we saw the final step in adding small items to a container page. Let's see how the entire 
+process works. We'll start at the top, with `container_item_put()`, shown on <<container_item_put>>.
+
+[source]
+[[container_item_put]]
+.`container.c` - Entry point to adding a value to a container
+-----
+include::./code/container_create.c[tags=CONTAINER_ITEM_SMALL_MAX_SIZE]
+
+include::./code/container_create.c[tags=container_item_put]
+-----
+
+If the value is large, we'll call to `container_item_put_large()` to do its work. But small values are handled differently. We call to `container_item_allocate()`
+to find the appropriate location for the value. An interesting note about this function is that it doesn't actually write the item's data. Instead, it gives us
+the address where we can write the data. This allows us to allocate an item and write directly to that location, instead of having to store the data in some
+temporary buffer and then have Gavran copy it. You can see the implementation of `container_item_allocate()` in <<container_item_allocate>>.
+
+[source]
+[[container_item_allocate]]
+.`container.c` - Allocating space for a small item in the container
+-----
+include::./code/container_create.c[tags=container_get_total_size]
+
+include::./code/container_create.c[tags=container_item_allocate]
+-----
+
+We are already familiar with `container_add_item_to_page()` function which is called in <<container_item_allocate>>. It does the work of actually adding the
+item to the page. And `container_find_small_space_to_allocate()` role is find that space. You can also see in <<container_find_small_space_to_allocate>> the
+`container_get_total_size()` function, used to compute how much space a small item will take. In addition to the raw size of the item, we have 2 bytes taken
+by the `int16_t` value we use to store the position of the value as well as the encoded size of the item. 
+
+
+
+
+=== Reading an item
+
+Now that we have seen how we write an item to the container, 
+
+
+=== Reading large

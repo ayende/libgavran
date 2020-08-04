@@ -1,0 +1,24 @@
+
+                  Container         Container
+
+                  Metadata          Page
+
+                +------------+    +------------------------------+
+                |            |    | Raw data go here             |
+                | flags      |    |                              |
+                |            |    |                              |
+   6150 bytes <-+ free_space | +--+-->                           |
+                |            | |  +------------------------------+
+                | ceiling +--+-+  |                              |
+                |            |    |                              |
+                | floor  +---+--+ |                              |
+                |            |  | |  Unused space here           |
+                | next       |  | |                              |
+                |            |  | |                              |
+                | prev       |  | |                              |
+                |            |  | |                              |
+                | next_alloc |  | +------------------------------+
+                |            |  +-+->                            |
+                |            |    |                              |
+                |            |    | Data's position goes here    |
+                +------------+    +------------------------------+
