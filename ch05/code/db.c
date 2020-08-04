@@ -9,7 +9,7 @@
 static result_t db_init_file_header(db_t *db, txn_t *tx) {
   page_t page = {.page_num = 0};
   ensure(txn_raw_modify_page(tx, &page));
-  page_metadata_t *entry = page.address;
+  page_metadata_t *entry        = page.address;
   entry->file_header.page_flags = page_flags_file_header;
   entry->file_header.last_tx_id = 0;
   entry->file_header.page_size_power_of_two =
@@ -27,12 +27,12 @@ static result_t db_init_file_header(db_t *db, txn_t *tx) {
 static result_t db_init_free_space_bitmap(txn_t *tx) {
   page_t page = {.page_num = 0};
   ensure(txn_raw_modify_page(tx, &page));
-  page_metadata_t *entry = page.address;
-  uint64_t free_space_start = 1;
+  page_metadata_t *entry                     = page.address;
+  uint64_t free_space_start                  = 1;
   entry->file_header.free_space_bitmap_start = free_space_start;
 
-  uint64_t pages =
-      ROUND_UP(entry->file_header.number_of_pages, BITS_IN_PAGE);
+  uint32_t pages = (uint32_t)ROUND_UP(
+      entry->file_header.number_of_pages, BITS_IN_PAGE);
 
   entry[free_space_start].free_space.page_flags =
       page_flags_free_space_bitmap;
@@ -77,20 +77,20 @@ static result_t db_validate_file_on_startup(db_t *db) {
   page_metadata_t *entry = page.address;
 
   ensure(!memcmp(FILE_HEADER_MAGIC, entry->file_header.magic, 5),
-         msg("Unable to find valid file header magic value"),
-         with(db->state->handle->filename, "%s"));
+      msg("Unable to find valid file header magic value"),
+      with(db->state->handle->filename, "%s"));
 
   ensure(GAVRAN_VERSION == entry->file_header.version,
-         msg("Gavran version mismatch"), with(GAVRAN_VERSION, "%d"),
-         with(entry->file_header.version, "%d"),
-         with(db->state->handle->filename, "%s"));
+      msg("Gavran version mismatch"), with(GAVRAN_VERSION, "%d"),
+      with(entry->file_header.version, "%d"),
+      with(db->state->handle->filename, "%s"));
 
   ensure(entry->file_header.number_of_pages * PAGE_SIZE <=
              db->state->map.size,
-         msg("The size of the file is smaller than the expected."),
-         with(db->state->handle->filename, "%s"),
-         with(db->state->map.size, "%lu"),
-         with(entry->file_header.number_of_pages * PAGE_SIZE, "%lu"));
+      msg("The size of the file is smaller than the expected."),
+      with(db->state->handle->filename, "%s"),
+      with(db->state->map.size, "%lu"),
+      with(entry->file_header.number_of_pages * PAGE_SIZE, "%lu"));
 
   ensure(
       PAGE_SIZE == pow(2, entry->file_header.page_size_power_of_two),
@@ -114,8 +114,8 @@ static result_t db_is_new_file(db_t *db, bool *is_new) {
   page_metadata_t zero;
   memset(&zero, 0, sizeof(page_metadata_t));
   page_metadata_t *entry = page.address;
-  *is_new = memcmp(&entry->file_header, &zero,
-                   sizeof(page_metadata_t)) == 0;
+  *is_new                = memcmp(&entry->file_header, &zero,
+                sizeof(page_metadata_t)) == 0;
   return success();
 }
 

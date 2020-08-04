@@ -144,7 +144,7 @@ _Static_assert(sizeof(page_metadata_t) == 64,
 // tag::tx_structs[]
 typedef struct db_state db_state_t;
 typedef struct txn_state txn_state_t;
-typedef struct pages_hash_table pages_hash_table_t;
+typedef struct pages_hash_table pages_map_t;
 
 typedef struct db {
   db_state_t *state;
@@ -174,7 +174,7 @@ typedef enum db_flags {
 // tag::txn_t[]
 typedef struct txn {
   txn_state_t *state;
-  pages_hash_table_t *working_set;
+  pages_map_t *working_set;
 } txn_t;
 // end::txn_t[]
 // end::tx_structs[]
@@ -243,7 +243,7 @@ typedef struct txn_state {
   db_state_t *db;
   span_t map;
   uint64_t number_of_pages;
-  pages_hash_table_t *modified_pages;
+  pages_map_t *modified_pages;
   cleanup_callback_t *on_forget;
   cleanup_callback_t *on_rollback;
   txn_state_t *prev_tx;

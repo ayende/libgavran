@@ -2,21 +2,21 @@
 
 #define implementation_detail __attribute__((visibility("hidden")))
 
-// tag::pages_hash_table_t[]
+// tag::pages_map_t[]
 typedef struct pages_hash_table {
   size_t number_of_buckets;
   size_t count;
   size_t resize_required;
   page_t entries[];
-} pages_hash_table_t;
+} pages_map_t;
 
-result_t hash_put_new(pages_hash_table_t **table_p, page_t *page);
-bool hash_lookup(pages_hash_table_t *table, page_t *page);
-bool hash_get_next(
-    pages_hash_table_t *table, size_t *state, page_t **page);
-result_t hash_new(
-    size_t initial_number_of_elements, pages_hash_table_t **table);
-// end::pages_hash_table_t[]
+result_t pagesmap_put_new(pages_map_t **table_p, page_t *page);
+bool pagesmap_lookup(pages_map_t *table, page_t *page);
+bool pagesmap_get_next(
+    pages_map_t *table, size_t *state, page_t **page);
+result_t pagesmap_new(
+    size_t initial_number_of_elements, pages_map_t **table);
+// end::pages_map_t[]
 
 implementation_detail void txn_free_single_tx_state(
     txn_state_t *state);

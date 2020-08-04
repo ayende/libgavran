@@ -13,28 +13,28 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   }
   // <2>
   ensure(flags == TX_WRITE,
-         msg("txn_create(flags) must be either TX_WRITE or TX_READ"),
-         with(flags, "%d"));
+      msg("txn_create(flags) must be either TX_WRITE or TX_READ"),
+      with(flags, "%d"));
   ensure(!db->state->active_write_tx,
-         msg("Opening a second write transaction is forbidden"));
+      msg("Opening a second write transaction is forbidden"));
 
   size_t cancel_defer = 0;
   txn_state_t *state;
   ensure(mem_calloc((void *)&state, sizeof(txn_state_t)));
   try_defer(free, state, cancel_defer);
 
-  ensure(hash_new(8, &state->modified_pages));
+  ensure(pagesmap_new(8, &state->modified_pages));
 
-  state->flags = flags;
-  state->db = db->state;
-  state->map = db->state->map;
+  state->flags           = flags;
+  state->db              = db->state;
+  state->map             = db->state->map;
   state->number_of_pages = db->state->number_of_pages;
   // <3>
-  state->prev_tx = db->state->last_write_tx;
-  state->tx_id = db->state->last_tx_id + 1;
+  state->prev_tx             = db->state->last_write_tx;
+  state->tx_id               = db->state->last_tx_id + 1;
   db->state->active_write_tx = state->tx_id;
 
-  tx->state = state;
+  tx->state    = state;
   cancel_defer = 1;
   return success();
 }
@@ -44,11 +44,12 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
 result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
   page->address = 0;
-  if (hash_lookup(tx->state->modified_pages, page)) return success();
+  if (pagesmap_lookup(tx->state->modified_pages, page))
+    return success();
   // <1>
   txn_state_t *prev = tx->state->prev_tx;
   while (prev) {
-    if (hash_lookup(prev->modified_pages, page)) return success();
+    if (pagesmap_lookup(prev->modified_pages, page)) return success();
     prev = prev->prev_tx;
   }
 
@@ -66,31 +67,31 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
   ensure(tx->state->flags & TX_WRITE,
-         msg("Read transactions cannot modify the pages"),
-         with(tx->state->flags, "%d"));
+      msg("Read transactions cannot modify the pages"),
+      with(tx->state->flags, "%d"));
 
-  if (hash_lookup(tx->state->modified_pages, page)) {
+  if (pagesmap_lookup(tx->state->modified_pages, page)) {
     return success();
   }
   // end::txn_raw_modify_page[]
 
   size_t done = 0;
   if (!page->number_of_pages) page->number_of_pages = 1;
-  ensure(mem_alloc_page_aligned(&page->address,
-                                PAGE_SIZE * page->number_of_pages));
+  ensure(mem_alloc_page_aligned(
+      &page->address, PAGE_SIZE * page->number_of_pages));
   try_defer(free, page->address, done);
   page_t original = {.page_num = page->page_num};
   ensure(txn_raw_get_page(tx, &original));
   if (original.number_of_pages == page->number_of_pages) {
     memcpy(page->address, original.address,
-           (PAGE_SIZE * page->number_of_pages));
+        (PAGE_SIZE * page->number_of_pages));
     page->previous = original.address;
   } else {  // mismatch in size means that we consider to be new only
     memset(page->address, 0, (PAGE_SIZE * page->number_of_pages));
     page->previous = 0;
   }
-  ensure(hash_put_new(&tx->state->modified_pages, page),
-         msg("Failed to allocate entry"));
+  ensure(pagesmap_put_new(&tx->state->modified_pages, page),
+      msg("Failed to allocate entry"));
   done = 1;
   return success();
 }
@@ -108,12 +109,12 @@ result_t txn_commit(txn_t *tx) {
 
   ensure(wal_append(tx->state));
 
-  tx->state->flags = TX_COMMITED;
+  tx->state->flags  = TX_COMMITED;
   tx->state->usages = 1;
 
   tx->state->db->last_write_tx->next_tx = tx->state;
-  tx->state->db->last_write_tx = tx->state;
-  tx->state->db->last_tx_id = tx->state->tx_id;
+  tx->state->db->last_write_tx          = tx->state;
+  tx->state->db->last_tx_id             = tx->state->tx_id;
 
   return success();
 }
@@ -124,7 +125,7 @@ implementation_detail void txn_free_single_tx_state(
     txn_state_t *state) {
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(state->modified_pages, &iter_state, &p)) {
+  while (pagesmap_get_next(state->modified_pages, &iter_state, &p)) {
     free(p->address);
   }
   free(state->modified_pages);
@@ -143,9 +144,9 @@ static void txn_free_registered_transactions(db_state_t *state) {
 
     if (cur->next_tx) cur->next_tx->prev_tx = 0;
 
-    state->transactions_to_free = cur->next_tx;
-    state->default_read_tx->next_tx = cur->next_tx;
-    state->default_read_tx->map = cur->map;
+    state->transactions_to_free             = cur->next_tx;
+    state->default_read_tx->next_tx         = cur->next_tx;
+    state->default_read_tx->map             = cur->map;
     state->default_read_tx->number_of_pages = cur->number_of_pages;
     if (state->last_write_tx == cur)
       state->last_write_tx = state->default_read_tx;
@@ -159,7 +160,8 @@ static void txn_free_registered_transactions(db_state_t *state) {
 static result_t txn_write_state_to_disk(txn_state_t *s) {
   size_t iter_state = 0;
   page_t *current;
-  while (hash_get_next(s->modified_pages, &iter_state, &current)) {
+  while (
+      pagesmap_get_next(s->modified_pages, &iter_state, &current)) {
     ensure(pages_write(s->db, current));
   }
   // <1>
@@ -179,11 +181,12 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
   while (prev) {
     size_t iter_state = 0;
     page_t *entry;
-    while (hash_get_next(prev->modified_pages, &iter_state, &entry)) {
+    while (pagesmap_get_next(
+        prev->modified_pages, &iter_state, &entry)) {
       page_t check = {.page_num = entry->page_num};
-      if (hash_lookup(state->modified_pages, &check)) continue;
+      if (pagesmap_lookup(state->modified_pages, &check)) continue;
 
-      ensure(hash_put_new(&state->modified_pages, entry));
+      ensure(pagesmap_put_new(&state->modified_pages, entry));
       entry->address = 0;  // ownership changed, avoid double free
     }
     prev = prev->prev_tx;
@@ -195,15 +198,15 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
 // tag::txn_gc[]
 static result_t txn_gc(txn_state_t *state) {
   // <1>
-  db_state_t *db = state->db;
+  db_state_t *db              = state->db;
   state->can_free_after_tx_id = db->last_tx_id + 1;
   // <2>
   txn_state_t *latest_unused = state->db->default_read_tx;
   if (latest_unused->usages)  // tx using the file directly
     return success();
   // <3>
-  while (latest_unused->next_tx &&
-         latest_unused->next_tx->usages == 0) {
+  while (
+      latest_unused->next_tx && latest_unused->next_tx->usages == 0) {
     latest_unused = latest_unused->next_tx;
   }
   if (latest_unused == db->default_read_tx) {

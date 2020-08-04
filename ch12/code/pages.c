@@ -6,10 +6,9 @@ result_t pages_get(txn_t *tx, page_t *p) {
   uint64_t offset = p->page_num * PAGE_SIZE;
   if (offset + p->number_of_pages * PAGE_SIZE > tx->state->map.size) {
     failed(ERANGE,
-           msg("Requests for a page that is outside of the bounds of "
-               "the file"),
-           with(p->page_num, "%lu"),
-           with(tx->state->map.size, "%lu"));
+        msg("Requests for a page that is outside of the bounds of "
+            "the file"),
+        with(p->page_num, "%lu"), with(tx->state->map.size, "%lu"));
   }
 
   // <1>
@@ -25,10 +24,10 @@ result_t pages_get(txn_t *tx, page_t *p) {
   try_defer(free, buffer, cancel_defer);
   // <3>
   ensure(pal_read_file(tx->state->db->handle, PAGE_SIZE * p->page_num,
-                       buffer, pages * PAGE_SIZE));
+      buffer, pages * PAGE_SIZE));
   // <4>
   p->address = buffer;
-  ensure(hash_put_new(&tx->working_set, p));
+  ensure(pagesmap_put_new(&tx->working_set, p));
   cancel_defer = 1;
   return success();
 }
@@ -36,7 +35,7 @@ result_t pages_get(txn_t *tx, page_t *p) {
 
 result_t pages_write(db_state_t *db, page_t *p) {
   ensure(pal_write_file(db->handle, p->page_num * PAGE_SIZE,
-                        p->address, PAGE_SIZE * p->number_of_pages),
-         msg("Unable to write page"), with(p->page_num, "%lu"));
+             p->address, PAGE_SIZE * p->number_of_pages),
+      msg("Unable to write page"), with(p->page_num, "%lu"));
   return success();
 }

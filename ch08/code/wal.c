@@ -11,13 +11,12 @@ enum wal_txn_page_flags {
 typedef struct wal_txn_page {
   uint64_t page_num;
   uint64_t offset;
-  uint64_t number_of_pages;
+  uint32_t number_of_pages;
   uint32_t flags;
-  uint8_t padding[4];
 } wal_txn_page_t;
 
 enum wal_txn_flags {
-  wal_txn_flags_none = 0,
+  wal_txn_flags_none       = 0,
   wal_txn_flags_compressed = 1,
 };
 
@@ -34,20 +33,20 @@ typedef struct wal_txn {
 // end::wal_txn_t[]
 
 // tag::wal_setup_transaction_data[]
-static void *wal_setup_transaction_data(txn_state_t *tx,
-                                        wal_txn_t *wt, void *output) {
+static void *wal_setup_transaction_data(
+    txn_state_t *tx, wal_txn_t *wt, void *output) {
   size_t iter_state = 0;
   page_t *entry;
   size_t index = 0;
-  while (hash_get_next(tx->modified_pages, &iter_state, &entry)) {
+  while (pagesmap_get_next(tx->modified_pages, &iter_state, &entry)) {
     wt->pages[index].number_of_pages = entry->number_of_pages;
-    wt->pages[index].page_num = entry->page_num;
+    wt->pages[index].page_num        = entry->page_num;
     size_t size = wt->pages[index].number_of_pages * PAGE_SIZE;
     memcpy(output, entry->address, size);
-    void *end = output + size;
-    wt->pages[index].flags = wal_txn_page_flags_none;
+    void *end               = output + size;
+    wt->pages[index].flags  = wal_txn_page_flags_none;
     wt->pages[index].offset = (uint64_t)(output - (void *)wt);
-    output = end;
+    output                  = end;
     index++;
   }
   return output;
@@ -55,8 +54,8 @@ static void *wal_setup_transaction_data(txn_state_t *tx,
 // end::wal_setup_transaction_data[]
 
 // tag::wal_prepare_txn_buffer[]
-static result_t wal_prepare_txn_buffer(txn_state_t *tx,
-                                       wal_txn_t **txn_buffer) {
+static result_t wal_prepare_txn_buffer(
+    txn_state_t *tx, wal_txn_t **txn_buffer) {
   uint64_t pages = tx->modified_pages->count;
   size_t tx_header_size =
       TO_PAGES(sizeof(wal_txn_t) + pages * sizeof(wal_txn_page_t)) *
@@ -68,13 +67,13 @@ static result_t wal_prepare_txn_buffer(txn_state_t *tx,
   try_defer(free, wt, cancel_defer);
   memset(wt, 0, total_size);
   wt->number_of_modified_pages = pages;
-  wt->tx_id = tx->tx_id;
-  void *end = wal_setup_transaction_data(
+  wt->tx_id                    = tx->tx_id;
+  void *end                    = wal_setup_transaction_data(
       tx, wt, ((char *)wt) + tx_header_size);
-  wt->tx_size = (uint64_t)((char *)end - (char *)wt);
+  wt->tx_size              = (uint64_t)((char *)end - (char *)wt);
   wt->page_aligned_tx_size = TO_PAGES(wt->tx_size) * PAGE_SIZE;
-  *txn_buffer = wt;
-  cancel_defer = 1;
+  *txn_buffer              = wt;
+  cancel_defer             = 1;
   return success();
 }
 // end::wal_prepare_txn_buffer[]
@@ -89,8 +88,7 @@ result_t wal_append(txn_state_t *tx) {
 
   wal_file_state_t *cur_file = &wal->files[0];
   ensure(pal_write_file(cur_file->handle, cur_file->last_write_pos,
-                        (char *)txn_buffer,
-                        txn_buffer->page_aligned_tx_size));
+      (char *)txn_buffer, txn_buffer->page_aligned_tx_size));
   cur_file->last_write_pos += txn_buffer->page_aligned_tx_size;
   cur_file->last_tx_id = tx->tx_id;
   return success();
@@ -111,27 +109,27 @@ typedef struct wal_recovery_operation {
 // end::wal_recovery_operation[]
 
 // tag::wal_init_recover_state[]
-static void wal_init_recover_state(db_t *db, wal_state_t *wal,
-                                   wal_recovery_operation_t *state) {
+static void wal_init_recover_state(
+    db_t *db, wal_state_t *wal, wal_recovery_operation_t *state) {
   memset(state, 0, sizeof(wal_recovery_operation_t));
-  state->db = db;
-  state->wal = wal;
+  state->db                   = db;
+  state->wal                  = wal;
   state->last_recovered_tx_id = 0;
-  state->files[0] = &wal->files[0];
-  state->files[1] = &wal->files[1];
+  state->files[0]             = &wal->files[0];
+  state->files[1]             = &wal->files[1];
 
   state->start = state->files[0]->span.address;
-  state->end = state->start + state->files[0]->span.size;
+  state->end   = state->start + state->files[0]->span.size;
 }
 // end::wal_init_recover_state[]
 
 // tag::wal_validate_recovered_pages[]
 static result_t wal_validate_recovered_pages(
-    db_t *db, pages_hash_table_t *modified_pages) {
+    db_t *db, pages_map_t *modified_pages) {
   size_t iter_state = 0;
   page_t *page_to_validate;
-  while (
-      hash_get_next(modified_pages, &iter_state, &page_to_validate)) {
+  while (pagesmap_get_next(
+      modified_pages, &iter_state, &page_to_validate)) {
     txn_t rtx;
     ensure(txn_create(db, TX_READ, &rtx));
     defer(txn_close, rtx);
@@ -144,8 +142,7 @@ static result_t wal_validate_recovered_pages(
 
 // tag::wal_next_valid_transaction[]
 static result_t wal_validate_transaction(reusable_buffer_t *buffer,
-                                         void *start, void *end,
-                                         wal_txn_t **tx_p) {
+    void *start, void *end, wal_txn_t **tx_p) {
   (void)buffer;
   wal_txn_t *tx = start;
   if (!tx->tx_id || tx->page_aligned_tx_size + start > end) {
@@ -158,8 +155,8 @@ static result_t wal_validate_transaction(reusable_buffer_t *buffer,
 static result_t wal_next_valid_transaction(
     struct wal_recovery_operation *state, wal_txn_t **txp) {
   if (state->start >= state->end ||
-      !wal_validate_transaction(&state->tmp_buffer, state->start,
-                                state->end, txp) ||
+      !wal_validate_transaction(
+          &state->tmp_buffer, state->start, state->end, txp) ||
       !*txp || state->last_recovered_tx_id >= (*txp)->tx_id) {
     *txp = 0;
   } else {
@@ -171,19 +168,18 @@ static result_t wal_next_valid_transaction(
 // end::wal_next_valid_transaction[]
 
 // tag::wal_recover_page[]
-static result_t wal_recover_page(db_t *db, pages_hash_table_t **pages,
-                                 wal_txn_page_t *page, void *end,
-                                 const void *src, void **input) {
+static result_t wal_recover_page(db_t *db, pages_map_t **pages,
+    wal_txn_page_t *page, void *end, const void *src, void **input) {
   (void)db;
   (void)end;
-  size_t size = page->number_of_pages * PAGE_SIZE;
+  size_t size  = page->number_of_pages * PAGE_SIZE;
   page_t final = {.page_num = page->page_num,
-                  .number_of_pages = page->number_of_pages};
+      .number_of_pages      = page->number_of_pages};
   ensure(mem_alloc_page_aligned((void *)&final.address, size));
   size_t done = 0;
   try_defer(free, final.address, done);
   memcpy(final.address, src + page->offset, size);
-  ensure(hash_put_new(pages, &final));
+  ensure(pagesmap_put_new(pages, &final));
   done = 1;
   *input += size;
 
@@ -192,11 +188,10 @@ static result_t wal_recover_page(db_t *db, pages_hash_table_t **pages,
 // end::wal_recover_page[]
 
 // tag::wal_recover_tx[]
-static result_t free_hash_table_and_contents(
-    pages_hash_table_t **pages) {
+static result_t free_hash_table_and_contents(pages_map_t **pages) {
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(*pages, &iter_state, &p)) {
+  while (pagesmap_get_next(*pages, &iter_state, &p)) {
     free(p->address);
   }
   free(*pages);
@@ -204,32 +199,32 @@ static result_t free_hash_table_and_contents(
 }
 enable_defer(free_hash_table_and_contents);
 
-static result_t wal_recover_tx(db_t *db, wal_txn_t *tx,
-                               pages_hash_table_t **recovered_pages) {
+static result_t wal_recover_tx(
+    db_t *db, wal_txn_t *tx, pages_map_t **recovered_pages) {
   void *input = (void *)tx + sizeof(wal_txn_t) +
                 sizeof(wal_txn_page_t) * tx->number_of_modified_pages;
-  pages_hash_table_t *pages;
-  ensure(hash_new(next_power_of_two(tx->number_of_modified_pages +
-                                    tx->number_of_modified_pages / 2),
-                  &pages));
+  pages_map_t *pages;
+  ensure(pagesmap_new(
+      next_power_of_two(tx->number_of_modified_pages +
+                        tx->number_of_modified_pages / 2),
+      &pages));
   defer(free_hash_table_and_contents, pages);
   for (size_t i = 0; i < tx->number_of_modified_pages; i++) {
     size_t end_offset = i + 1 < tx->number_of_modified_pages
                             ? tx->pages[i + 1].offset
                             : tx->tx_size;
     ensure(wal_recover_page(db, &pages, tx->pages + i,
-                            ((void *)tx) + end_offset, tx, &input));
+        ((void *)tx) + end_offset, tx, &input));
   }
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(pages, &iter_state, &p)) {
+  while (pagesmap_get_next(pages, &iter_state, &p)) {
     page_t existing = {.page_num = p->page_num};
-    if (!hash_lookup(*recovered_pages, &existing)) {
-      ensure(hash_put_new(recovered_pages, p));
+    if (!pagesmap_lookup(*recovered_pages, &existing)) {
+      ensure(pagesmap_put_new(recovered_pages, p));
     }
     ensure(pal_write_file(db->state->handle, p->page_num * PAGE_SIZE,
-                          p->address,
-                          p->number_of_pages * PAGE_SIZE));
+        p->address, p->number_of_pages * PAGE_SIZE));
   }
   return success();
 }
@@ -256,7 +251,7 @@ static result_t wal_complete_recovery(
         state->db->state->map.size / PAGE_SIZE;
   } else {
     ensure(header->common.page_flags == page_flags_file_header,
-           msg("First page was not a metadata page?"));
+        msg("First page was not a metadata page?"));
   }
   ensure(
       header->file_header.last_tx_id == state->last_recovered_tx_id,
@@ -275,8 +270,8 @@ static result_t wal_complete_recovery(
 static result_t wal_recover(db_t *db, wal_state_t *wal) {
   wal_recovery_operation_t recovery_state;
   wal_init_recover_state(db, wal, &recovery_state);
-  pages_hash_table_t *recovered_pages;
-  ensure(hash_new(16, &recovered_pages));
+  pages_map_t *recovered_pages;
+  ensure(pagesmap_new(16, &recovered_pages));
   defer(free, recovered_pages);
 
   while (true) {
@@ -292,9 +287,8 @@ static result_t wal_recover(db_t *db, wal_state_t *wal) {
 // end::wal_recover[]
 
 // tag::wal_open_single_file[]
-static result_t wal_get_wal_filename(const char *db_file_name,
-                                     char wal_code,
-                                     char **wal_file_name) {
+static result_t wal_get_wal_filename(
+    const char *db_file_name, char wal_code, char **wal_file_name) {
   size_t db_name_len = strlen(db_file_name);  // \0 + -a.wal
   ensure(mem_alloc((void *)wal_file_name, db_name_len + 1 + 6));
   memcpy(*wal_file_name, db_file_name, db_name_len);
@@ -306,13 +300,13 @@ static result_t wal_get_wal_filename(const char *db_file_name,
 static result_t wal_open_single_file(
     struct wal_file_state *file_state, db_t *db, char wal_code) {
   char *wal_file_name;
-  ensure(wal_get_wal_filename(db->state->handle->filename, wal_code,
-                              &wal_file_name));
+  ensure(wal_get_wal_filename(
+      db->state->handle->filename, wal_code, &wal_file_name));
   defer(free, wal_file_name);
   ensure(pal_create_file(wal_file_name, &file_state->handle,
-                         pal_file_creation_flags_durable));
-  ensure(pal_set_file_size(file_state->handle,
-                           db->state->options.wal_size, UINT64_MAX));
+      pal_file_creation_flags_durable));
+  ensure(pal_set_file_size(
+      file_state->handle, db->state->options.wal_size, UINT64_MAX));
   file_state->span.size = file_state->handle->size;
   ensure(pal_mmap(file_state->handle, 0, &file_state->span));
   return success();
@@ -359,8 +353,8 @@ bool wal_will_checkpoint(db_state_t *db, uint64_t tx_id) {
 // end::wal_will_checkpoint[]
 
 // tag::wal_checkpoint[]
-static result_t wal_reset_file(db_state_t *db,
-                               wal_file_state_t *file) {
+static result_t wal_reset_file(
+    db_state_t *db, wal_file_state_t *file) {
   (void)db;
   void *zero;
   ensure(mem_alloc_page_aligned(&zero, PAGE_SIZE));
@@ -368,7 +362,7 @@ static result_t wal_reset_file(db_state_t *db,
   memset(zero, 0, PAGE_SIZE);
   // reset the start of the log, preventing recovery from proceeding
   ensure(pal_write_file(file->handle, 0, zero, PAGE_SIZE),
-         msg("Unable to reset WAL first page"));
+      msg("Unable to reset WAL first page"));
   file->last_write_pos = 0;
   return success();
 }

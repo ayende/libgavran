@@ -11,7 +11,7 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   ensure(mem_calloc((void *)&state, sizeof(txn_state_t)));
   try_defer(free, state, cancel_defer);
 
-  ensure(hash_new(8, &state->modified_pages));
+  ensure(pagesmap_new(8, &state->modified_pages));
 
   state->flags = flags | db->state->options.flags;
   state->db = db->state;
@@ -28,7 +28,8 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
 result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
   page->address = 0;
-  if (hash_lookup(tx->state->modified_pages, page)) return success();
+  if (pagesmap_lookup(tx->state->modified_pages, page))
+    return success();
 
   if (!page->address) {
     if (!page->number_of_pages) page->number_of_pages = 1;
@@ -42,7 +43,7 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
 // tag::txn_raw_modify_page[]
 result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
-  if (hash_lookup(tx->state->modified_pages, page)) {
+  if (pagesmap_lookup(tx->state->modified_pages, page)) {
     return success();
   }
 
@@ -57,7 +58,7 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
   memcpy(page->address, original.address,
          (PAGE_SIZE * page->number_of_pages));
   page->previous = original.address;
-  ensure(hash_put_new(&tx->state->modified_pages, page),
+  ensure(pagesmap_put_new(&tx->state->modified_pages, page),
          msg("Failed to allocate entry"));
   done = 1;
   return success();
@@ -70,7 +71,8 @@ result_t txn_commit(txn_t *tx) {
 
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(tx->state->modified_pages, &iter_state, &p)) {
+  while (
+      pagesmap_get_next(tx->state->modified_pages, &iter_state, &p)) {
     ensure(pages_write(tx->state->db, p));
   }
 
@@ -84,7 +86,8 @@ result_t txn_close(txn_t *tx) {
 
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(tx->state->modified_pages, &iter_state, &p)) {
+  while (
+      pagesmap_get_next(tx->state->modified_pages, &iter_state, &p)) {
     free(p->address);
     p->address = 0;
   }

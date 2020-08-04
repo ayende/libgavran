@@ -307,7 +307,7 @@ change to the file metadata is persisted. Changes to the file's data are by no m
 this chapter, and atomic commit. 
 
 <<txn_create>> shows how we create a transaction. A `txn_t` is mostly just a pointer to `txn_state_t`, which holds the details about the transaction as well as the hash table to hold
-the modified pages. This is initialized by the `hash_new()` call. You'll note that we are passing a `flags` parameter to the `txn_create()`, but not doing much of it. I'm currently 
+the modified pages. This is initialized by the `pagesmap_new()` call. You'll note that we are passing a `flags` parameter to the `txn_create()`, but not doing much of it. I'm currently 
 ignoring that but we'll use that to set various behaviors on the transaction, such as whatever it is read only or allowed to write.
 
 One of the key responsibilities of the transaction is managing the work of `txn_modify_page`, to handle that properly, we need to store the modified
@@ -364,12 +364,12 @@ that you might want to keep in mind.
 
 === Managing the transaction state with a hash table
 
-The most important piece in `txn_raw_modify_page()` is the management of the `modified_pages` on the transaction. This is a pointer to `pages_hash_table_t`, which is a hash table for 
+The most important piece in `txn_raw_modify_page()` is the management of the `modified_pages` on the transaction. This is a pointer to `pages_map_t`, which is a hash table for 
 the modified pages in the transaction. 
 I have to admit, given that I write databases for a living, I was highly amused by how reluctant I was to implement a hash table. I have written
 a few, so it isn't a new task. I'm also doing that while implementing a _storage engine_, which is closely related. 
 
-The good news here is that this hash table only need to support `hash_put_new` and `hash_lookup`, we don't need to handle deletions at all. That makes the overall complexity much easier.
+The good news here is that this hash table only need to support `pagesmap_put_new` and `pagesmap_lookup`, we don't need to handle deletions at all. That makes the overall complexity much easier.
 
 Given that the readers of this book are likely interested, I'm going to go for an open addressing with linear probing model. And one of the 
 key features that I care about is avoiding the usual pointer caching that you'll typically see in hash tables. Data locality is a huge performance boost and I want some of that. This 
@@ -378,20 +378,20 @@ Since `page_t` already contain the key, I can simplify my implementation signifi
 where you'll have more separation between the data containers and the values. 
 
 `Dictionary<K,V>` is a prime example of that. You have the container data and the data held by the container and they can live very far apart. That is not the case here, we always keep them
- very close by. You can see how the `pages_hash_table_t` is defined in <<pages_hash_table_t>>
+ very close by. You can see how the `pages_map_t` is defined in <<pages_map_t>>
 
 [source]
-[[pages_hash_table_t]]
+[[pages_map_t]]
 .`gavran/internal.h` - The hash table definition
 ----
-include::../include/gavran/internal.h[tags=pages_hash_table_t]
+include::../include/gavran/internal.h[tags=pages_map_t]
 ----
 
 I'm going to skip explaining https://en.wikipedia.org/wiki/Hash_table[how hash tables work], I assume that you either have a grasp on that
 or is able to learn that from other sources. I'll mention that I'm using a hash table implementation strategy called 
 https://en.wikipedia.org/wiki/Linear_probing[linear probing]. This refers to how the hash table handles collisions. Instead of creating a 
 linked list of values on hash collision, we'll move to the next location in the array. That means that we are going to have good locality
-of reference when doing the search, the entire hash table is typically a single allocation and the `hash_lookup` and `hash_put_new` implementations
+of reference when doing the search, the entire hash table is typically a single allocation and the `pagesmap_lookup` and `pagesmap_put_new` implementations
 are straightforward.
 
 [TIP]
@@ -417,8 +417,8 @@ There are a few other things to consider for this case:
 * This is where the load factor comes into play. Given that the page numbers are likely to cluster around specific values, the
   empty buckets that remain act as backstop to avoid iterating through all the buckets. 
 
-In <<hash_new_and_lookup>> you can see how we create a new hash table using `hash_new()` and looking up a single value using `hash_lookup()`. The
-transaction's `modified_pages` field is setup via `hash_new()` in `txn_create()`. We are going to be using this hash table a _lot_. It is going 
+In <<pagesmap_new_and_lookup>> you can see how we create a new hash table using `pagesmap_new()` and looking up a single value using `pagesmap_lookup()`. The
+transaction's `modified_pages` field is setup via `pagesmap_new()` in `txn_create()`. We are going to be using this hash table a _lot_. It is going 
 to serve as one of the most fundamental pieces in the transaction's implementation. 
 
 One thing to note about the implementation here, I have chosen to favor readability over performance. There are several low hanging
@@ -427,14 +427,14 @@ can be assumed to be a power of two) is a simple one. We might get to that when 
 code is the key.
 
 [source]
-[[hash_new_and_lookup]]
+[[pagesmap_new_and_lookup]]
 .`hashtable.h` - Creating a hash table and looking up a single value
 ----
-include::./code/hashtable.c[tags=hash_new_and_lookup]
+include::./code/hashtable.c[tags=pagesmap_new_and_lookup]
 ----
 
-In <<hash_new_and_lookup>> you can see that creating a new hash table is simple, we allocate a single buffer, for the `pages_hash_table_t` as well
-as the `entries` immediately following it. That is why we have an "empty" array at the end of `pages_hash_table_t`, that indicates to the compiler
+In <<pagesmap_new_and_lookup>> you can see that creating a new hash table is simple, we allocate a single buffer, for the `pages_map_t` as well
+as the `entries` immediately following it. That is why we have an "empty" array at the end of `pages_map_t`, that indicates to the compiler
 that the value of the field is the area immediately following the struct. 
 
 For lookups, we simply scan through the `entries` array, the starting location depends on the page that we are looking for. But if we found a value
@@ -442,18 +442,18 @@ that isn't the page we are looking for, we know that we need to continue scannin
 of collisions) further away from where it is meant to be. 
 
 This might make more sense when we'll look into how we are going to implement _putting_ a value into the hash table.
-This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. The details are in <<hash_put_new>>.
+This is the more complex operation because we may need to resize the hash table if the load factor grows big enough. The details are in <<pagesmap_put_new>>.
 
-<<hash_put_new>> starts by expanding the hash table if needed, then scans through the table for an empty location that we can place the new value in,
+<<pagesmap_put_new>> starts by expanding the hash table if needed, then scans through the table for an empty location that we can place the new value in,
 starting with the `page_num` modulus the size of the table. It is an error to add a value that already exists in the table. When we add a value, we 
-check if the _next_ call to `hash_put_new()` should expand the table. This is done by checking if we are over 75% full. As mentioned, I'm not going to 
+check if the _next_ call to `pagesmap_put_new()` should expand the table. This is done by checking if we are over 75% full. As mentioned, I'm not going to 
 explain how hash tables work, if you have questions on the implementation, there are more than enough resources about hash tables available.
 
 [source]
-[[hash_put_new]]
+[[pagesmap_put_new]]
 .`hashtable.h` - Put a new value inside the hash table
 ----
-include::./code/hashtable.c[tags=hash_put_new]
+include::./code/hashtable.c[tags=pagesmap_put_new]
 ----
 
 Let's look how expanding the table works. We are going to use simple doubling of the hash table whenever we get to 75% load factor. In other words, if we
@@ -461,8 +461,8 @@ start with 8 entries by default, we'll increase to 16 when we get to the 7th ent
 Note that since we are actually using `page_t` as our entries, we have to take into account it is somewhat large, on 64 bits, it is going to 
 be 32 bytes.
 
-<<hash_expand_table>> shows how we double the size of the table. We allocate a new buffer, twice as large, iterate over the old hash table using `hash_get_next()`
-and add to the new hash table using `hash_put_new()`, pretty simple, overall.
+<<hash_expand_table>> shows how we double the size of the table. We allocate a new buffer, twice as large, iterate over the old hash table using `pagesmap_get_next()`
+and add to the new hash table using `pagesmap_put_new()`, pretty simple, overall.
 We are using `mem_calloc()` to allocate the memory, but couldn't we use `mem_realloc()` instead, to reallocate the buffer without 
 needing to copy the data gain? The answer is no. Part of the expansion of the hash table means that we need to hash the entries _again_, placing them in 
 new locations, based on the new size.
@@ -474,23 +474,23 @@ new locations, based on the new size.
 include::./code/hashtable.c[tags=hash_expand_table]
 ----
 
-There are a few interesting implications to the way we built `hash_expand_table()`. First, any `hash_put_new()` may cause the table to shift, that is why 
+There are a few interesting implications to the way we built `hash_expand_table()`. First, any `pagesmap_put_new()` may cause the table to shift, that is why 
 we send an indirect pointer to the function. 
-You cannot mix `hash_get_next()` and `hash_put_new()`, iteration and mutations generally don't mix with one another.
+You cannot mix `pagesmap_get_next()` and `pagesmap_put_new()`, iteration and mutations generally don't mix with one another.
 
-Finally, let's look at `hash_get_next()`, shown in <<hash_get_next>>.
+Finally, let's look at `pagesmap_get_next()`, shown in <<pagesmap_get_next>>.
 The implementation simple scans through the table, but we use the externally provided `state` variable to hold our state between calls.
-We expect `hash_get_next()` to be used as it is used in <<hash_expand_table>>. Initialize the `iter_state` value to `0` and call `hash_get_next()` until it returns `false`. 
+We expect `pagesmap_get_next()` to be used as it is used in <<hash_expand_table>>. Initialize the `iter_state` value to `0` and call `pagesmap_get_next()` until it returns `false`. 
 
 The hash table implementation we have here is a pretty basic one, intentionally. You can see more options on how I could have implemented it in 
 https://www.amazon.com/dp/20/B07NKYSSR1[The Joys of Hashing], but the idea is to get this working properly and fix any performance issues later. That said, I don't expect to
 have too many problems around the hash table implementation, but I was surprised in the past... 
 
 [source]
-[[hash_get_next]]
+[[pagesmap_get_next]]
 .`hashtable.h` - Iterating over the hash table
 ----
-include::./code/hashtable.c[tags=hash_get_next]
+include::./code/hashtable.c[tags=pagesmap_get_next]
 ----
 
 .Memory management in Linux

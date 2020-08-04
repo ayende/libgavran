@@ -7,7 +7,7 @@
 result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   errors_assert_empty();
   if (db->state->options.flags & db_flags_page_need_txn_working_set) {
-    ensure(hash_new(8, &tx->working_set));
+    ensure(pagesmap_new(8, &tx->working_set));
   } else {
     tx->working_set = 0;
   }
@@ -20,35 +20,35 @@ result_t txn_create(db_t *db, db_flags_t flags, txn_t *tx) {
   }
   // <2>
   ensure(flags == TX_WRITE,
-         msg("txn_create(flags) must be either TX_WRITE or TX_READ"),
-         with(flags, "%d"));
+      msg("txn_create(flags) must be either TX_WRITE or TX_READ"),
+      with(flags, "%d"));
   ensure(!db->state->active_write_tx,
-         msg("Opening a second write transaction is forbidden"));
+      msg("Opening a second write transaction is forbidden"));
 
   size_t cancel_defer = 0;
   txn_state_t *state;
   ensure(mem_calloc((void *)&state, sizeof(txn_state_t)));
   try_defer(free, state, cancel_defer);
 
-  ensure(hash_new(8, &state->modified_pages));
+  ensure(pagesmap_new(8, &state->modified_pages));
 
-  state->flags = flags | db->state->options.flags;
-  state->db = db->state;
-  state->map = db->state->map;
+  state->flags           = flags | db->state->options.flags;
+  state->db              = db->state;
+  state->map             = db->state->map;
   state->number_of_pages = db->state->number_of_pages;
   // <3>
-  state->prev_tx = db->state->last_write_tx;
-  state->tx_id = db->state->last_tx_id + 1;
+  state->prev_tx             = db->state->last_write_tx;
+  state->tx_id               = db->state->last_tx_id + 1;
   db->state->active_write_tx = state->tx_id;
 
-  tx->state = state;
+  tx->state    = state;
   cancel_defer = 1;
   return success();
 }
 // end::txn_create[]
 
-static result_t txn_hash_page(page_t *page,
-                              uint8_t hash[crypto_generichash_BYTES]);
+static result_t txn_hash_page(
+    page_t *page, uint8_t hash[crypto_generichash_BYTES]);
 
 // tag::txn_validate_page[]
 static result_t txn_validate_page_hash(
@@ -61,13 +61,13 @@ static result_t txn_validate_page_hash(
     return success();
   // <3>
   if (sodium_is_zero(expected_hash, crypto_generichash_BYTES) &&
-      sodium_is_zero(page->address,
-                     page->number_of_pages * PAGE_SIZE))
+      sodium_is_zero(
+          page->address, page->number_of_pages * PAGE_SIZE))
     return success();
   // <4>
   failed(ENODATA,
-         msg("Unable to validate hash for page, data corruption?"),
-         with(page->page_num, "%lu"));
+      msg("Unable to validate hash for page, data corruption?"),
+      with(page->page_num, "%lu"));
 }
 static result_t txn_validate_page(txn_t *tx, page_t *page) {
   page_metadata_t *metadata;
@@ -89,7 +89,7 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
     return success();
   }
   if (tx->state->flags & db_flags_page_validation_once) {
-    db_state_t *db = tx->state->db;
+    db_state_t *db   = tx->state->db;
     uint64_t *bitmap = db->first_read_bitmap;
     // before the db init is completed or extended during this run
     if (!bitmap || page->page_num > db->original_number_of_pages ||
@@ -107,38 +107,35 @@ static result_t txn_ensure_page_is_valid(txn_t *tx, page_t *page) {
 // tag::txn_generate_nonce[]
 static void txn_generate_nonce(page_metadata_t *metadata) {
   if (sodium_is_zero(metadata->cyrpto.aead.nonce,
-                     PAGE_METADATA_CRYPTO_NONCE_SIZE)) {
-    randombytes_buf(metadata->cyrpto.aead.nonce,
-                    PAGE_METADATA_CRYPTO_NONCE_SIZE);
+          PAGE_METADATA_CRYPTO_NONCE_SIZE)) {
+    randombytes_buf(
+        metadata->cyrpto.aead.nonce, PAGE_METADATA_CRYPTO_NONCE_SIZE);
   } else {
-    sodium_increment(metadata->cyrpto.aead.nonce,
-                     PAGE_METADATA_CRYPTO_NONCE_SIZE);
+    sodium_increment(
+        metadata->cyrpto.aead.nonce, PAGE_METADATA_CRYPTO_NONCE_SIZE);
   }
 }
-static void txn_set_nonce(
-    page_metadata_t *metadata,
+static void txn_set_nonce(page_metadata_t *metadata,
     uint8_t nonce[crypto_aead_xchacha20poly1305_IETF_NPUBBYTES]) {
   memcpy(nonce, metadata->cyrpto.aead.nonce,
-         PAGE_METADATA_CRYPTO_NONCE_SIZE);
+      PAGE_METADATA_CRYPTO_NONCE_SIZE);
   memset(nonce + PAGE_METADATA_CRYPTO_NONCE_SIZE, 0,
-         crypto_aead_xchacha20poly1305_IETF_NPUBBYTES -
-             PAGE_METADATA_CRYPTO_NONCE_SIZE);
+      crypto_aead_xchacha20poly1305_IETF_NPUBBYTES -
+          PAGE_METADATA_CRYPTO_NONCE_SIZE);
 }
 // end::txn_generate_nonce[]
 
 // tag::txn_encrypt_page[]
 static const char TxnKeyCtx[8] = "TxnPages";
 static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num,
-                                 void *start, size_t size,
-                                 page_metadata_t *metadata) {
+    void *start, size_t size, page_metadata_t *metadata) {
   // <1>
   uint8_t subkey[crypto_aead_xchacha20poly1305_IETF_KEYBYTES];
-  if (crypto_kdf_derive_from_key(
-          subkey, crypto_aead_xchacha20poly1305_IETF_KEYBYTES,
-          page_num, TxnKeyCtx,
-          tx->state->db->options.encryption_key)) {
+  if (crypto_kdf_derive_from_key(subkey,
+          crypto_aead_xchacha20poly1305_IETF_KEYBYTES, page_num,
+          TxnKeyCtx, tx->state->db->options.encryption_key)) {
     failed(EINVAL, msg("Unable to derive key for page decryption"),
-           with(page_num, "%ld"));
+        with(page_num, "%ld"));
   }
   uint8_t nonce[crypto_aead_xchacha20poly1305_IETF_NPUBBYTES];
   // <2>
@@ -150,8 +147,8 @@ static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num,
       nonce, subkey);
   sodium_memzero(subkey, crypto_aead_xchacha20poly1305_IETF_KEYBYTES);
   if (result) {
-    failed(EINVAL, msg("Unable to encrypt page"),
-           with(page_num, "%ld"));
+    failed(
+        EINVAL, msg("Unable to encrypt page"), with(page_num, "%ld"));
   }
   return success();
 }
@@ -159,16 +156,15 @@ static result_t txn_encrypt_page(txn_t *tx, uint64_t page_num,
 
 // tag::txn_decrypt[]
 static result_t txn_decrypt(db_options_t *options, void *start,
-                            size_t size, void *dest,
-                            page_metadata_t *metadata,
-                            uint64_t page_num) {
+    size_t size, void *dest, page_metadata_t *metadata,
+    uint64_t page_num) {
   uint8_t subkey[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
 
-  if (crypto_kdf_derive_from_key(
-          subkey, crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
-          page_num, TxnKeyCtx, options->encryption_key)) {
+  if (crypto_kdf_derive_from_key(subkey,
+          crypto_aead_xchacha20poly1305_ietf_KEYBYTES, page_num,
+          TxnKeyCtx, options->encryption_key)) {
     failed(EINVAL, msg("Unable to derive key for page decryption"),
-           with(page_num, "%ld"));
+        with(page_num, "%ld"));
   }
   uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
   txn_set_nonce(metadata, nonce);
@@ -179,9 +175,9 @@ static result_t txn_decrypt(db_options_t *options, void *start,
   if (result) {
     if (!sodium_is_zero(start, size) &&
         !sodium_is_zero(metadata->cyrpto.aead.mac,
-                        crypto_aead_xchacha20poly1305_ietf_ABYTES)) {
+            crypto_aead_xchacha20poly1305_ietf_ABYTES)) {
       failed(EINVAL, msg("Unable to decrypt page"),
-             with(page_num, "%ld"));
+          with(page_num, "%ld"));
     }
     memset(dest, 0, size);
   }
@@ -192,25 +188,25 @@ static result_t txn_decrypt(db_options_t *options, void *start,
 // tag::txn_decrypt_page[]
 static result_t txn_decrypt_page(txn_t *tx, page_t *page) {
   size_t cancel_defer = 0;
-  void *buffer = 0;
-  ensure(mem_alloc_page_aligned(&buffer,
-                                page->number_of_pages * PAGE_SIZE));
+  void *buffer        = 0;
+  ensure(mem_alloc_page_aligned(
+      &buffer, page->number_of_pages * PAGE_SIZE));
   try_defer(free, buffer, cancel_defer);
   if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
     size_t shift = PAGE_METADATA_CRYPTO_HEADER_SIZE;
     ensure(txn_decrypt(&tx->state->db->options, page->address + shift,
-                       PAGE_SIZE - shift, buffer + shift,
-                       page->address, page->page_num));
+        PAGE_SIZE - shift, buffer + shift, page->address,
+        page->page_num));
     memcpy(buffer, page->address, shift);
   } else {
     page_metadata_t *metadata;
     ensure(txn_get_metadata(tx, page->page_num, &metadata));
     ensure(txn_decrypt(&tx->state->db->options, page->address,
-                       page->number_of_pages * PAGE_SIZE, buffer,
-                       metadata, page->page_num));
+        page->number_of_pages * PAGE_SIZE, buffer, metadata,
+        page->page_num));
   }
   page->address = buffer;
-  ensure(hash_put_new(&tx->working_set, page));
+  ensure(pagesmap_put_new(&tx->working_set, page));
   cancel_defer = 1;
   return success();
 }
@@ -222,14 +218,14 @@ result_t txn_raw_get_page(txn_t *tx, page_t *page) {
   page->address = 0;
   // <1>
   if (!(tx->state->flags & TX_COMMITED) &&
-      hash_lookup(tx->state->modified_pages, page))
+      pagesmap_lookup(tx->state->modified_pages, page))
     return success();
   // <2>
-  if (hash_lookup(tx->working_set, page)) return success();
+  if (pagesmap_lookup(tx->working_set, page)) return success();
   txn_state_t *prev = tx->state;
   // <3>
   while (prev) {
-    if (hash_lookup(prev->modified_pages, page)) break;
+    if (pagesmap_lookup(prev->modified_pages, page)) break;
     prev = prev->prev_tx;
   }
 
@@ -253,31 +249,31 @@ result_t txn_raw_modify_page(txn_t *tx, page_t *page) {
   errors_assert_empty();
 
   ensure(tx->state->flags & TX_WRITE,
-         msg("Read transactions cannot modify the pages"),
-         with(tx->state->flags, "%d"));
+      msg("Read transactions cannot modify the pages"),
+      with(tx->state->flags, "%d"));
 
-  if (hash_lookup(tx->state->modified_pages, page)) {
+  if (pagesmap_lookup(tx->state->modified_pages, page)) {
     return success();
   }
   // end::txn_raw_modify_page[]
 
   size_t done = 0;
   if (!page->number_of_pages) page->number_of_pages = 1;
-  ensure(mem_alloc_page_aligned(&page->address,
-                                PAGE_SIZE * page->number_of_pages));
+  ensure(mem_alloc_page_aligned(
+      &page->address, PAGE_SIZE * page->number_of_pages));
   try_defer(free, page->address, done);
   page_t original = {.page_num = page->page_num};
   ensure(txn_raw_get_page(tx, &original));
   if (original.number_of_pages == page->number_of_pages) {
     memcpy(page->address, original.address,
-           (PAGE_SIZE * page->number_of_pages));
+        (PAGE_SIZE * page->number_of_pages));
     page->previous = original.address;
   } else {  // mismatch in size means that we consider to be new only
     memset(page->address, 0, (PAGE_SIZE * page->number_of_pages));
     page->previous = 0;
   }
-  ensure(hash_put_new(&tx->state->modified_pages, page),
-         msg("Failed to allocate entry"));
+  ensure(pagesmap_put_new(&tx->state->modified_pages, page),
+      msg("Failed to allocate entry"));
   done = 1;
   return success();
 }
@@ -294,10 +290,9 @@ static result_t txn_hash_page(
   size_t size = is_metadata_page ? PAGE_SIZE - sizeof(page_metadata_t)
                                  : page->number_of_pages * PAGE_SIZE;
 
-  if (crypto_generichash(hash, crypto_generichash_BYTES, start, size,
-                         0, 0)) {
-    failed(
-        ENODATA,
+  if (crypto_generichash(
+          hash, crypto_generichash_BYTES, start, size, 0, 0)) {
+    failed(ENODATA,
         msg("Unable to compute page hash for page, shouldn't happen"),
         with(page->page_num, "%lu"));
   }
@@ -306,18 +301,16 @@ static result_t txn_hash_page(
 // end::txn_hash_page[]
 
 // tag::tx_finalize_page[]
-static result_t tx_finalize_page(txn_t *tx, page_t *page,
-                                 page_metadata_t *metadata) {
+static result_t tx_finalize_page(
+    txn_t *tx, page_t *page, page_metadata_t *metadata) {
   if (tx->state->flags & db_flags_encrypted) {
     if ((page->page_num & PAGES_IN_METADATA_MASK) == page->page_num) {
       size_t shift = PAGE_METADATA_CRYPTO_HEADER_SIZE;
       return txn_encrypt_page(tx, page->page_num,
-                              page->address + shift,
-                              PAGE_SIZE - shift, metadata);
+          page->address + shift, PAGE_SIZE - shift, metadata);
     }
     return txn_encrypt_page(tx, page->page_num, page->address,
-                            page->number_of_pages * PAGE_SIZE,
-                            metadata);
+        page->number_of_pages * PAGE_SIZE, metadata);
   } else {
     return txn_hash_page(page, metadata->cyrpto.hash_blake2b);
   }
@@ -330,23 +323,23 @@ static result_t txn_finalize_modified_pages(txn_t *tx) {
   // <1>
   page_t *modified_pages;
   ensure(mem_calloc((void *)&modified_pages,
-                    state->modified_pages->count * sizeof(page_t)));
+      state->modified_pages->count * sizeof(page_t)));
   defer(free, modified_pages);
   size_t modified_pages_idx = 0;
-  size_t iter_state = 0;
+  size_t iter_state         = 0;
   page_t *current;
-  while (hash_get_next(tx->state->modified_pages, &iter_state,
-                       &current)) {
+  while (pagesmap_get_next(
+      tx->state->modified_pages, &iter_state, &current)) {
     // <2>
     // can't modify in place, the hash may change, need a copy
     memcpy(&modified_pages[modified_pages_idx++], current,
-           sizeof(page_t));
+        sizeof(page_t));
   }
   // <3>
   for (size_t i = 0; i < modified_pages_idx; i++) {
     page_metadata_t *metadata;
-    ensure(txn_modify_metadata(tx, modified_pages[i].page_num,
-                               &metadata));
+    ensure(txn_modify_metadata(
+        tx, modified_pages[i].page_num, &metadata));
     if ((modified_pages[i].page_num & PAGES_IN_METADATA_MASK) ==
         modified_pages[i].page_num)
       // we handle metadata page separately, note that metadata pages
@@ -357,8 +350,8 @@ static result_t txn_finalize_modified_pages(txn_t *tx) {
   }
   // <4>
   iter_state = 0;
-  while (hash_get_next(tx->state->modified_pages, &iter_state,
-                       &current)) {
+  while (pagesmap_get_next(
+      tx->state->modified_pages, &iter_state, &current)) {
     if ((current->page_num & PAGES_IN_METADATA_MASK) !=
         current->page_num)
       continue;  // not a metadata page
@@ -390,15 +383,15 @@ result_t txn_commit(txn_t *tx) {
   // <1>
   // Update global references to the current span on commit
   tx->state->db->last_write_tx->next_tx = tx->state;
-  tx->state->db->last_write_tx = tx->state;
-  tx->state->db->last_tx_id = tx->state->tx_id;
-  tx->state->db->map = tx->state->map;
-  tx->state->db->number_of_pages = tx->state->number_of_pages;
+  tx->state->db->last_write_tx          = tx->state;
+  tx->state->db->last_tx_id             = tx->state->tx_id;
+  tx->state->db->map                    = tx->state->map;
+  tx->state->db->number_of_pages        = tx->state->number_of_pages;
 
   // <2>
   while (tx->state->on_rollback) {
     cleanup_callback_t *cur = tx->state->on_rollback;
-    tx->state->on_rollback = cur->next;
+    tx->state->on_rollback  = cur->next;
     free(cur);
   }
 
@@ -411,7 +404,7 @@ implementation_detail void txn_free_single_tx_state(
     txn_state_t *state) {
   size_t iter_state = 0;
   page_t *p;
-  while (hash_get_next(state->modified_pages, &iter_state, &p)) {
+  while (pagesmap_get_next(state->modified_pages, &iter_state, &p)) {
     free(p->address);
   }
   // <1>
@@ -437,9 +430,9 @@ static void txn_free_registered_transactions(db_state_t *state) {
 
     if (cur->next_tx) cur->next_tx->prev_tx = 0;
 
-    state->transactions_to_free = cur->next_tx;
-    state->default_read_tx->next_tx = cur->next_tx;
-    state->default_read_tx->map = cur->map;
+    state->transactions_to_free             = cur->next_tx;
+    state->default_read_tx->next_tx         = cur->next_tx;
+    state->default_read_tx->map             = cur->map;
     state->default_read_tx->number_of_pages = cur->number_of_pages;
     if (state->last_write_tx == cur)
       state->last_write_tx = state->default_read_tx;
@@ -453,7 +446,8 @@ static void txn_free_registered_transactions(db_state_t *state) {
 static result_t txn_write_state_to_disk(txn_state_t *s) {
   size_t iter_state = 0;
   page_t *current;
-  while (hash_get_next(s->modified_pages, &iter_state, &current)) {
+  while (
+      pagesmap_get_next(s->modified_pages, &iter_state, &current)) {
     ensure(pages_write(s->db, current));
   }
   // <1>
@@ -473,11 +467,12 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
   while (prev) {
     size_t iter_state = 0;
     page_t *entry;
-    while (hash_get_next(prev->modified_pages, &iter_state, &entry)) {
+    while (pagesmap_get_next(
+        prev->modified_pages, &iter_state, &entry)) {
       page_t check = {.page_num = entry->page_num};
-      if (hash_lookup(state->modified_pages, &check)) continue;
+      if (pagesmap_lookup(state->modified_pages, &check)) continue;
 
-      ensure(hash_put_new(&state->modified_pages, entry));
+      ensure(pagesmap_put_new(&state->modified_pages, entry));
       entry->address = 0;  // ownership changed, avoid double free
     }
     prev = prev->prev_tx;
@@ -489,15 +484,15 @@ static result_t txn_merge_unique_pages(txn_state_t *state) {
 // tag::txn_gc[]
 static result_t txn_gc(txn_state_t *state) {
   // <1>
-  db_state_t *db = state->db;
+  db_state_t *db              = state->db;
   state->can_free_after_tx_id = db->last_tx_id + 1;
   // <2>
   txn_state_t *latest_unused = state->db->default_read_tx;
   if (latest_unused->usages)  // tx using the file directly
     return success();
   // <3>
-  while (latest_unused->next_tx &&
-         latest_unused->next_tx->usages == 0) {
+  while (
+      latest_unused->next_tx && latest_unused->next_tx->usages == 0) {
     latest_unused = latest_unused->next_tx;
   }
   if (latest_unused == db->default_read_tx) {
@@ -528,7 +523,7 @@ result_t txn_close(txn_t *tx) {
   if (tx->working_set) {
     size_t iter_state = 0;
     page_t *p;
-    while (hash_get_next(tx->working_set, &iter_state, &p)) {
+    while (pagesmap_get_next(tx->working_set, &iter_state, &p)) {
       if (tx->state->flags & db_flags_encrypted) {
         sodium_memzero(p->address, p->number_of_pages * PAGE_SIZE);
       }
@@ -549,7 +544,7 @@ result_t txn_close(txn_t *tx) {
     while (tx->state->on_forget) {
       // we didn't commit, can just discard this
       cleanup_callback_t *cur = tx->state->on_forget;
-      tx->state->on_forget = cur->next;
+      tx->state->on_forget    = cur->next;
       free(cur);
     }
     txn_free_single_tx_state(tx->state);
@@ -570,16 +565,15 @@ result_t txn_close(txn_t *tx) {
 
 // tag::txn_register_cleanup_action[]
 result_t txn_register_cleanup_action(cleanup_callback_t **head,
-                                     void (*action)(void *),
-                                     void *state_to_copy,
-                                     size_t size_of_state) {
+    void (*action)(void *), void *state_to_copy,
+    size_t size_of_state) {
   cleanup_callback_t *cur;
-  ensure(mem_calloc((void *)&cur,
-                    sizeof(cleanup_callback_t) + size_of_state));
+  ensure(mem_calloc(
+      (void *)&cur, sizeof(cleanup_callback_t) + size_of_state));
   memcpy(cur->state, state_to_copy, size_of_state);
   cur->func = action;
   cur->next = *head;
-  *head = cur;
+  *head     = cur;
   return success();
 }
 // end::txn_register_cleanup_action[]
