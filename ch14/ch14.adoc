@@ -1,0 +1,141 @@
+= Persistent data structures
+
+We have spent _quite_ a bit of time on the foundation of Gavran, how we put bits to the disk in the proper manner, implementing transactions, ensuring that Gavran meets all 
+the ACID properties, etc. We also dealt with some fairly advanced features, from supporting Transparent Data Encryption to implementing log shipping. Having a solid foundation
+is critical for a storage engine and I made the conscious choice to have a strong separation between the data structures that Gavran will offer and _how_ it is implemented.
+
+In some cases, storage engines make no distinction between the layers or have strong correlation between the external interface offered and the internal details of the data store.
+LevelDB, for example, offers a single data structure, a key/value store, which is the only thing that it _can_ really offer, given how it is implemented. Gavran is built to be 
+more generic in nature. That meant that we had to spend a lot more time building infrastructure, but now that we have a robust core, we can move forward with things.
+
+As I'm writing this, the Gavran code base hovers just under 2,500 lines of code (excluding tests), which isn't bad at all, given what we have implemented. 
+Even with just the foundation, there are critical functionalities that are missing. Multi threading support, cross platform support and performance work are just some of the items 
+that pops to mind when I think about the remaining work. Nevertheless, we are going to shift our focus a bit and start building persistent data structures for Gavran. 
+
+So far we have dealt strictly with pages and aside from the free space bitmap we didn't really do anything interesting with them. This part of the book aims to change that. We are
+going to implement data storage containers as well as support for hash indexes and B+Trees. These terms may not mean much to you right now, but they will shortly become much 
+clearer. 
+
+We'll start with the most basic of tasks, storing and retrieving data from the database. What we have done so far is store data in pages and then get them back. That _works_, but
+only as long as we work with page size data. We need better tooling to be able to actually store and retrieve data properly. 
+
+I'm going to introduce and implement a few very important data structures:
+
+* Persistent hash tables - using extendible hashing for storing data on disk.
+* Raw data containers - allowing to store raw data and retrieve is by an opaque handle. 
+* B+Tree - allowing to do point, range and prefix queries.
+* Indexed tables - using all three previous items, we'll create a table and allow to run indexed queries on our data.
+
+You might have noticed that I'm talking about the B+Trees last, which is quite odd. B+Trees are the bread and butter of databases and storage engines. B+Trees are often standing at
+the very core of persistent technologies. There are _many_ variants of B+Trees, optimized for specific scenarios. If you are interested in learning more about B+Trees, I would
+recommend reading the http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.219.7269&rep=rep1&type=pdf[Modern B+Trees], it does an awesome job covering the state of the art in
+regards to B+Trees. 
+
+Why am I keeping B+Trees for last, in that case? The answer is that I want to build Gavran in an incremental fashion and starting with persistent hashing gives me the chance to 
+do a very gradual slope. Another reason is that I personally find persistent hash table to be an extremely elegant data structure. 
+
+Raw data containers are a way to store some data to the disk and get an opaque handle that we can later use to retrieve it. That doesn't sound very useful, but together with 
+persistent hashing and B+Trees, they allow us to create a feature that is much larger than the sum of its parts. The last chapter in this part will combine all other aspects
+together and create a table with indexes.
+
+Even if you'll never make use of Gavran, I think that reading through the process of building all the elements that are required to build such a feature would be tremendously 
+useful. And now, without further ado, let's get hashing, persistently.
+
+== Persistent hash table
+
+We already implemented a hash table in this book. The `pages_map_t` is a hash table for storing `page_t` values using the `page_num` as the key. When talking about _persistent_
+hash tables, on the other hand, we have to deal with something that is quite different. The typical manner in which hash tables are implemented in memory is to create an 
+array to hold the values. When the load factor become too high, we'll re-hash the table to a greater array.
+The `pages_map_t` API does just that, the `pagesmap_expand_table()` function does just that, and we spent a lot of Chapter 4 implementing it. 
+
+What is the problem in applying the same approach when we are writing to disk? We can allocate a page to hold the values and double the size whenever the load factor is too
+high, no? That would _work_, if you don't care about performance.
+
+.Extendible hashing is a magic term
+****
+If you are familiar with the term extendible hashing, it is very easy to find a _lot_ of resources on it. If you are trying to find details about on disk hashing structure,
+on the other hand, you're going to be sent into many wild goose chases. 
+Persistent hash table is a term reserved for immutable in memory hash table, for example. And file based hashing will yield results about MD5 and SHA1. 
+
+It was very frustrating to realize that in order to find information about the topic, you need to know what is the right term for it to even show up in searches. 
+****
+
+Consider what would be the impact of extending a hash table that is 4 GB in size, for example? Using typical rehashing techniques, we'll need to write a _lot_ of data, which is 
+a pretty bad idea, all around. The solution is presented in the http://cgi.di.uoa.gr/~ad/M149/p315-fagin.pdf[Extendible Hashing-A Fast Access Method for Dynamic Files] paper 
+from 1979 (although similar solutions date back to 1971, it seems). 
+
+=== Extendible Hashing
+
+The idea is that instead of trying to have a single flat array to hold all the data, we'll have a two tier structure. There is the directory, which we'll first look at to find
+the possible location of a value and then there is the page which contain that value. If you are familiar with B+Trees, this may sound very similar to how they are implemented,
+but unlike B+Trees, there is no possibility of multiple levels, there is only ever the _directory_ and the data. 
+
+As usual with data structures, is is much better to look an image to make things clearer. <<ehash>> shows the structure of an extendible hash. 
+
+[[ehash]
+.An extendible hash structure, showing the directory and 3 pages of values
+images::ehash.png[]
+
+In <<ehash>> you can see directory on the left. That is the key for this data structure. In <<ehash>> we have a directory that contains 4 elements and points to data that is
+found in three separate pages. You'll note that both the directory and the pages has this strange `depth` notation, what is that about? 
+Like any hashing system, we start by taking a key and translating that into a number. We use that number to then lookup the location of the actual value. With extendible 
+hashing, we use the binary nature of the number for our advantage.
+
+Let's say that we want to lookup the key `"abc"` in <<ehash>>. We'll first need to turn that into a number, let's say that the `hash("abc") = 11`, in binary, that means that
+we have a value of `10 11`. With this number, we need to identify the location of the value. The `depth` value on the directory is `2`, which means that we can use the 
+two rightmost bits of the value to find it. In other words, we compute: `num & ((1 << depth) -1)`. 
+
+If you aren't familiar with bit fiddling tricks, this is a way to say: "give me the rightmost `depth` bits from `num`". For the `11` value we have (binary `10 11`) that means
+that we'll get the binary value `11` and the number `3`. If you'll look at <<ehash>> you'll see that the the entry at position `3` points to a page. We can go into that page
+and find all the value whose hash number have the same rightmost significant bits. And inside that page, we can look for the value using more straightforward means. 
+
+On the other hand, if you'll look at the first and second entries on <<ehash>>, both of them point to a page that has a `depth` of `1`. What is that about? 
+
+Extendible hashing works this way. We start with a directory that has a depth of `1` and two branching pages. One for all the values whose hash number is even and one for all 
+the values whose hash number is odd. In other words, one of the pages is for the hash number that ends with `0` and the other for those that end with `1`. At this point, the
+directory and the two pages are all going to be marked with a `depth` of `1`. 
+
+At some point, we'll write enough values to a page that we will fill it to bursting. There is no more _space_ to write. At this point, we'll _double_ the size of the directory
+and _split_ the full page. This is what happened on <<ehash>>. The page with the odd numbers (ending with `1`) became full first and the odd page was split into two. One of
+them for all the values that end with `01` and the other for all the values ending with `11`. The `depth` of the directory is set incremented to `2` and the `depth` of the 
+split pages is also set to `2`. 
+
+What will happen if the even numbers page become full? At this point, we'll need to split this page (one with `00` and the other with `10`), but we'll not need to double the
+size of the directory. This is because the `depth` of the page is less than the `depth` of the directory. https://en.wikipedia.org/wiki/Extendible_hashing[Wikipedia] has 
+great coverage of the algorithm, but I found the Extendible Hashing paper to be very readable. You might also want to look at the
+http://www.csbio.unc.edu/mcmillan/Media/Comp521F14Lecture15.pdf[Hash Based Indexes] presentation, which explain this in detail, as well as some alternatives.
+
+Once I understood how it works, I was amazed how this seemingly simple idea translated the problem from very hard to obvious in retrospect. 
+
+There are other persistent hashing algorithms. We can simply select a fixed number of buckets and proceed from there. That has issues down the road, but it is very similar to
+how an in memory hash table would work. This is also Linear Hashing, which I'm not going to discuss here. There is a good paper comparing Linear Hashing to Extendible Hashing,
+however: https://www.csd.uoc.gr/~hy460/pdf/Performance%20comparison%20of%20extendible%20hashing%20and%20linear%20hashing%20techniques.pdf[Performance comparison of extendible hashing and linear hashing techniques].
+
+Extendible hashing is shown to be faster, but the size of the directory may be a limiting factor, in the paper. This paper was written in 1990, so 30 years ago at the time of 
+this writing. The authors recommended using Linear Hashing when main memory is at a premium. That is 30 years ago, I have to repeat again. This advise is no longer relevant. 
+
+Let's talk about the size of the directory for a bit. 
+We are going to use `uint64_t` page numbers as the values in the directory, which means that a single 8KB page will be able to point to 1,024 pages, representing 8MB of data.
+That means that to compute the size of the directory using this model, we can simply reduce the size of the data by an order of magnitude. A hash table taking 64MB will use
+64KB directory, for example. A hash table with 128GB of data will use a directory with a size of 128MB, etc.
+
+That assumes that we have to think about the directory as an array of `uint64_t`, that isn't necessarily the case. We can set the directory as an array of `uint16_t` values,
+where each directory page will have its own base for the values in it. That means that a 8KB directory page will be able to refer to 32MB of pages holding the actual value.
+It will force us to ensure that for each directory page, all its interior pages must reside within the same 512MB range (so they will share the same base page). Using the 
+128GB example, that will reduce the directory size to only 32MB. 
+Except... the hash tables that I envision are not likely to hit these sizes. 
+
+I talked about the generic data structure up to this point, but what I would like to implement is a lot more focused. I want to build what is essentially a 
+`map<uint64_t,uint64_t>`. In other words, a way to lookup an `uint64_t` by another `uint64_t` key, that is all. We aren't going to need to implement hashing of values, that 
+is the responsibility of the caller, not the hash table. We aren't going ot need to deal with duplicated values, there can be done, after all. 
+
+I expect that we'll mostly store page numbers in the hash table, so using a simple `varint` encoding, so I would expect to be able to store about a thousand key/value pairs
+in a single page. In other words, with an 8KB directory and 8MB of data, we are actually going to hold about 8.2 million key/value pairs in the hash table. If we had a hash
+table that held a _billion_ key/value pairs, we'll need about 8.5 GB of data for the values and 8.5 MB for the directory. A hash table that deals with 100 million entries
+will have a directory that less than a MB in size. 
+
+In short, I don't _mind_ the size of the directory. It is a very reasonable size even if I'm using `uint64_t` array as the internal data structure for the directory up to 
+ridiculous number of entries in the table. And even when dealing with billions of records, a directory that is roughly the size of a single selfie isn't that big of a deal
+in today's world. 
+
+Okay, that is enough theory and discussion, let's settle down and start actually implementing the persistent hash table for Gavran.

@@ -1,24 +1,3 @@
-= Persistent data structures
-
-We have spent _quite_ a bit of time on the foundation of Gavran, how we put bits to the disk in the proper manner, implementing transactions, ensuring that Gavran meets all 
-the ACID properties, etc. We also dealt with some fairly advanced features, from supporting Transparent Data Encryption to implementing log shipping. Having a solid foundation
-is critical for a storage engine and I made the conscious choice to have a strong separation between the data structures that Gavran will offer and _how_ it is implemented.
-
-In some cases, storage engines make no distinction between the layers or have strong correlation between the external interface offered and the internal details of the data store.
-LevelDB, for example, offers a single data structure, a key/value store, which is the only thing that it _can_ really offer, given how it is implemented. Gavran is built to be 
-more generic in nature. That meant that we had to spend a lot more time building infrastructure, but now that we have a robust core, we can move forward with things.
-
-As I'm writing this, the Gavran code base hovers just under 2,500 lines of code (excluding tests), which isn't bad at all, given what we have implemented. 
-Even with just the foundation, there are critical functionalities that are missing. Multi threading support, cross platform support and performance work are just some of the items 
-that pops to mind when I think about the remaining work. Nevertheless, we are going to shift our focus a bit and start building persistent data structures for Gavran. 
-
-So far we have dealt strictly with pages and aside from the free space bitmap we didn't really do anything interesting with them. This part of the book aims to change that. We are
-going to implement data storage containers as well as support for hash indexes and B+Trees. These terms may not mean much to you right now, but they will shortly become much 
-clearer. 
-
-We'll start with the most basic of tasks, storing and retrieving data from the database. What we have done so far is store data in pages and then get them back. That _works_, but
-only as long as we work with page size data. Let's see how we can manage a more robust system.
-
 == Raw data containers
 
 The API we have to deal with data right now in Gavran is fairly poor, in terms of what it can offer us. We have pages, and that is pretty much it. That doesn't work very well when

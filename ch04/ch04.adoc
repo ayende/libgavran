@@ -461,26 +461,26 @@ start with 8 entries by default, we'll increase to 16 when we get to the 7th ent
 Note that since we are actually using `page_t` as our entries, we have to take into account it is somewhat large, on 64 bits, it is going to 
 be 32 bytes.
 
-<<hash_expand_table>> shows how we double the size of the table. We allocate a new buffer, twice as large, iterate over the old hash table using `pagesmap_get_next()`
+<<pagesmap_expand_table>> shows how we double the size of the table. We allocate a new buffer, twice as large, iterate over the old hash table using `pagesmap_get_next()`
 and add to the new hash table using `pagesmap_put_new()`, pretty simple, overall.
 We are using `mem_calloc()` to allocate the memory, but couldn't we use `mem_realloc()` instead, to reallocate the buffer without 
 needing to copy the data gain? The answer is no. Part of the expansion of the hash table means that we need to hash the entries _again_, placing them in 
 new locations, based on the new size.
 
 [source]
-[[hash_expand_table]]
+[[pagesmap_expand_table]]
 .`hashtable.h` - Doubling the size of the hash table
 ----
-include::./code/hashtable.c[tags=hash_expand_table]
+include::./code/hashtable.c[tags=pagesmap_expand_table]
 ----
 
-There are a few interesting implications to the way we built `hash_expand_table()`. First, any `pagesmap_put_new()` may cause the table to shift, that is why 
+There are a few interesting implications to the way we built `pagesmap_expand_table()`. First, any `pagesmap_put_new()` may cause the table to shift, that is why 
 we send an indirect pointer to the function. 
 You cannot mix `pagesmap_get_next()` and `pagesmap_put_new()`, iteration and mutations generally don't mix with one another.
 
 Finally, let's look at `pagesmap_get_next()`, shown in <<pagesmap_get_next>>.
 The implementation simple scans through the table, but we use the externally provided `state` variable to hold our state between calls.
-We expect `pagesmap_get_next()` to be used as it is used in <<hash_expand_table>>. Initialize the `iter_state` value to `0` and call `pagesmap_get_next()` until it returns `false`. 
+We expect `pagesmap_get_next()` to be used as it is used in <<pagesmap_expand_table>>. Initialize the `iter_state` value to `0` and call `pagesmap_get_next()` until it returns `false`. 
 
 The hash table implementation we have here is a pretty basic one, intentionally. You can see more options on how I could have implemented it in 
 https://www.amazon.com/dp/20/B07NKYSSR1[The Joys of Hashing], but the idea is to get this working properly and fix any performance issues later. That said, I don't expect to

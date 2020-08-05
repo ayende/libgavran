@@ -95,3 +95,18 @@ uint32_t varint_get_length(uint64_t n);
 uint8_t *varint_encode(uint64_t n, uint8_t *buf);
 uint8_t *varint_decode(uint8_t *buf, uint64_t *value);
 // end::varint_api[]
+
+// tag::hash_api[]
+typedef struct hash_val {
+  uint64_t hash_id;
+  uint64_t key;
+  uint64_t val;
+  bool has_val;
+  uint8_t padding[7];
+} hash_val_t;
+
+result_t hash_create(txn_t *tx, uint64_t *hash_id);
+result_t hash_set(txn_t *tx, hash_val_t *set, hash_val_t *old);
+result_t hash_get(txn_t *tx, hash_val_t *kvp);
+result_t hash_del(txn_t *tx, hash_val_t *del);
+// end::hash_api[]

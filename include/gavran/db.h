@@ -70,8 +70,16 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_metadata          = 2,
   page_flags_free_space_bitmap = 3,
   page_flags_overflow          = 4,
-  page_flags_container         = 5,
+  page_flags_hash              = 5,
+  page_flags_container         = 6,
 } page_flags_t;
+
+typedef struct hash_page {
+  page_flags_t page_flags;
+  uint8_t depth;
+  uint16_t number_of_entries;
+  uint8_t _padding[28];
+} hash_page_t;
 
 // tag::container_page_t[]
 typedef struct container_page {
@@ -132,6 +140,7 @@ typedef struct page_metadata {
     free_space_bitmap_heart_t free_space;
     overflow_page_t overflow;
     container_page_t container;
+    hash_page_t hash;
   };
 } page_metadata_t;
 

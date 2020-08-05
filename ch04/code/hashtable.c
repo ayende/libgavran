@@ -1,8 +1,8 @@
 #include <gavran/internal.h>
 #include <string.h>
 
-// tag::hash_expand_table[]
-static result_t hash_expand_table(pages_map_t **state_ptr) {
+// tag::pagesmap_expand_table[]
+static result_t pagesmap_expand_table(pages_map_t **state_ptr) {
   pages_map_t *state           = *state_ptr;
   size_t new_number_of_entries = state->number_of_buckets * 2;
   size_t new_size =
@@ -22,12 +22,12 @@ static result_t hash_expand_table(pages_map_t **state_ptr) {
   done = 1;
   return success();
 }
-// end::hash_expand_table[]
+// end::pagesmap_expand_table[]
 
 // tag::pagesmap_put_new[]
 result_t pagesmap_put_new(pages_map_t **table_p, page_t *page) {
   if ((*table_p)->resize_required) {
-    ensure(hash_expand_table(table_p));
+    ensure(pagesmap_expand_table(table_p));
   }
   pages_map_t *state  = *table_p;
   uint64_t page_num   = page->page_num;
