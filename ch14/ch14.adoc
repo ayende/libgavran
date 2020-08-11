@@ -72,11 +72,11 @@ but unlike B+Trees, there is no possibility of multiple levels, there is only ev
 
 As usual with data structures, is is much better to look an image to make things clearer. <<ehash>> shows the structure of an extendible hash. 
 
-[[ehash]
+[[ehash]]
 .An extendible hash structure, showing the directory and 3 pages of values
-images::ehash.png[]
+image::ehash.png[]
 
-In <<ehash>> you can see directory on the left. That is the key for this data structure. In <<ehash>> we have a directory that contains 4 elements and points to data that is
+In <<ehash>> you can see directory on the left. That is the key for this data structure. We have a directory that contains 4 elements and points to data that is
 found in three separate pages. You'll note that both the directory and the pages has this strange `depth` notation, what is that about? 
 Like any hashing system, we start by taking a key and translating that into a number. We use that number to then lookup the location of the actual value. With extendible 
 hashing, we use the binary nature of the number for our advantage.
@@ -85,15 +85,16 @@ Let's say that we want to lookup the key `"abc"` in <<ehash>>. We'll first need 
 we have a value of `10 11`. With this number, we need to identify the location of the value. The `depth` value on the directory is `2`, which means that we can use the 
 two rightmost bits of the value to find it. In other words, we compute: `num & ((1 << depth) -1)`. 
 
-If you aren't familiar with bit fiddling tricks, this is a way to say: "give me the rightmost `depth` bits from `num`". For the `11` value we have (binary `10 11`) that means
-that we'll get the binary value `11` and the number `3`. If you'll look at <<ehash>> you'll see that the the entry at position `3` points to a page. We can go into that page
+If you aren't familiar with bit fiddling tricks, this is a way to say: give me the rightmost `depth` bits from `num`. Let's say that we have `depth = 2` and `num = 9`. 
+The binary representation of `9` is `10 01`. Applying the formula above, we'll get the rightmost bits and have `01` in binary representation, or the number `1`.
+If you'll look at <<ehash>> you'll see that the the entry at position `1` points to a page. We can go into that page
 and find all the value whose hash number have the same rightmost significant bits. And inside that page, we can look for the value using more straightforward means. 
 
-On the other hand, if you'll look at the first and second entries on <<ehash>>, both of them point to a page that has a `depth` of `1`. What is that about? 
+On the other hand, if you'll look at the first and second entries on <<ehash>>, both of them point to a page that has a `depth` of `1`. Why the difference?
 
-Extendible hashing works this way. We start with a directory that has a depth of `1` and two branching pages. One for all the values whose hash number is even and one for all 
-the values whose hash number is odd. In other words, one of the pages is for the hash number that ends with `0` and the other for those that end with `1`. At this point, the
-directory and the two pages are all going to be marked with a `depth` of `1`. 
+Extendible hashing works in the following manner. We start with a directory that has a depth of `1` and two branching pages. One for all the values whose hash number is even 
+and one for all  the values whose hash number is odd. In other words, one of the pages is for the hash number that ends with `0` and the other for those that end with `1`. 
+At this point, the directory and the two pages are all going to be marked with a `depth` of `1`. 
 
 At some point, we'll write enough values to a page that we will fill it to bursting. There is no more _space_ to write. At this point, we'll _double_ the size of the directory
 and _split_ the full page. This is what happened on <<ehash>>. The page with the odd numbers (ending with `1`) became full first and the odd page was split into two. One of
@@ -111,7 +112,7 @@ There are other persistent hashing algorithms. We can simply select a fixed numb
 how an in memory hash table would work. This is also Linear Hashing, which I'm not going to discuss here. There is a good paper comparing Linear Hashing to Extendible Hashing,
 however: https://www.csd.uoc.gr/~hy460/pdf/Performance%20comparison%20of%20extendible%20hashing%20and%20linear%20hashing%20techniques.pdf[Performance comparison of extendible hashing and linear hashing techniques].
 
-Extendible hashing is shown to be faster, but the size of the directory may be a limiting factor, in the paper. This paper was written in 1990, so 30 years ago at the time of 
+Extendible hashing is shown to be faster, but the size of the directory may be a limiting factor in the paper. This paper was written in 1990, so 30 years ago at the time of 
 this writing. The authors recommended using Linear Hashing when main memory is at a premium. That is 30 years ago, I have to repeat again. This advise is no longer relevant. 
 
 Let's talk about the size of the directory for a bit. 
@@ -127,7 +128,8 @@ Except... the hash tables that I envision are not likely to hit these sizes.
 
 I talked about the generic data structure up to this point, but what I would like to implement is a lot more focused. I want to build what is essentially a 
 `map<uint64_t,uint64_t>`. In other words, a way to lookup an `uint64_t` by another `uint64_t` key, that is all. We aren't going to need to implement hashing of values, that 
-is the responsibility of the caller, not the hash table. We aren't going ot need to deal with duplicated values, there can be done, after all. 
+is the responsibility of the caller, not the hash table. Two keys that map to the same hash cannot happen, since we are going to take `uint64_t` as the key and treat it as 
+if it was already hashed. 
 
 I expect that we'll mostly store page numbers in the hash table, so using a simple `varint` encoding, so I would expect to be able to store about a thousand key/value pairs
 in a single page. In other words, with an 8KB directory and 8MB of data, we are actually going to hold about 8.2 million key/value pairs in the hash table. If we had a hash
@@ -139,3 +141,364 @@ ridiculous number of entries in the table. And even when dealing with billions o
 in today's world. 
 
 Okay, that is enough theory and discussion, let's settle down and start actually implementing the persistent hash table for Gavran.
+
+=== Implementing a persistent hash table
+
+The first thing that I want to discuss is the actual API that we'll provide for working with persistent hash tables. You can see that in <<hash-api>>.
+
+[source]
+[[hash-api]]
+.`gavran/db.h` - The API we'll use to work with hash tables in Gavran
+----
+include::../include/gavran/db.h[tags=hash_api]
+----
+
+There are a few things that we need to discuss about this API. You can see that we're going to allow to create and drop a hash table. You'll usually only create such a hash
+table once and keep it for very long time. This is similar to tables in a relational database, you tend to _not_ drop them on a whim. In order to reference a particular
+hash table, you'll need its `hash_id`, which is passed via `hash_val_t` to all the operations that we can do on the hash.
+The rest of the API consists of the usual CRUd operations and not really interesting in terms of design.
+
+[TIP]
+.The structure of a hash page
+====
+An extendible hash table is composed of two aspects. The directory, which we'll implement using an array of `uint64_t`. But what about the hash pages? These we are going to
+implement in a very different manner. For now, I'm going to hide their actual usage behind internal API, but I'll discuss how they are built in detail later in the chapter.
+====
+
+We'll start by looking at how we create a new hash table, which you can see in <<hash_create>>. 
+
+[source]
+[[hash_create]]
+.`hash.c` - Creating a new hash table
+----
+include::./code/hash.c[tags=hash_create]
+----
+
+There isn't _much_ being done in <<hash_create>>. We allocate a page, mark is as a hash page using `page_flags_hash` and set the `hash_id` to be the newly allocated page number.
+In other words, we use the page number of the allocated page as the `hash_id` of the hash table. We also create a hash _page_, and not a directory. But the whole _point_ is to
+use a directory. What is going on here?
+
+An extendible hash table requires a minimum of three pages (24KB) to work. One page for the directory, one for the even keys and one for the odd keys. That is at `depth` of `1`,
+of course. We expect to be able to fit about a thousand entires into a single page, and it seems a shame to waste three pages upfront. So I'm going to start the hash table as a
+single hash page. We'll write to this page until we are no longer able to and then we'll split it, turning the original page into the directory. You can see how we can read from
+the hash table in <<hash_get>>
+
+[source]
+[[hash_get]]
+.`hash.c` - Reading a value from the hash table
+----
+include::./code/hash.c[tags=hash_get]
+----
+
+If we have a single page, we'll read it directly from the page. But if we have a directory, we'll use `KEY_TO_BUCKET()` to get the index of the bucket where the page number of
+the key lives. Then we'll just check this page for the value. The fact that we can find the exact page we need in a single check is the most important aspect of the hash table.
+
+[IMPORTANT]
+.Why are we permuting the key?
+====
+In <<hash_get>> you can see that we call `hash_permute_key()` as one of our first steps. Why is that? 
+The extendible hash is using the lowest bits in the key to find the relevant page. But what if we are storing values that have a pattern? Consider the case of storing
+offsets into a file that are 8KB apart. The keys we'll use are `[0,8092,16384,24576]`. All of these values have _12_ lower zero bits. Let's assume that we have a whole
+lot of them. That means that we'll need to split the directory 12 times before we can place them in different pages. 
+
+In other words, if we'll store a few thousand such values, 
+which should be stored in just 3 pages (two for the hash pages, one for the directory). But because of the directory splitting, we'll need to place them in no less than 
+4096 separate pages. That is the difference between 24 KB and 32 MB.
+
+Using the `hash_permute_key()` will mix the bits in the key in such a way that such keys will lose their pattern and become uniformly distributed. Here are the permuted
+values:
+
+* 0 -> 0
+* 8192 -> 7383475855875536826
+* 16384 -> 14766951711751073653
+* 24576 -> 17372031019375746200
+
+Just looking whatever the number is even or odd will tell you that we have good distribution of value in this case. I've taken the `hash_permute_key()` implementation
+from https://gist.github.com/degski/6e2069d6035ae04d5d6f64981c995ec2[this Gist]. You can read more about is in the 
+https://nullprogram.com/blog/2018/07/31/[Prospecting for Hash Functions] post. 
+====
+
+In the vast majority of cases, the directory page is going to be cached in memory, so we'll have at worst a single disk access. In practice, given the expected size of the table
+I'll expect that the entire table will be in memory. That means that while we are working on a persistent data structure, we can usually consider the cost of an in memory mode.
+The costs we have here are fairly negligible. Permuting the hash key and then doing a single lookup into the directory before jumping directly to the relevant page. We'll see 
+how we deal with the data _inside_ the page shortly. 
+
+=== Writing a value to the hash table
+
+I now want to turn to a much more complex scenario, how do we put an entry into the hash table? Let's look at <<hash_set>> to start investigating this process.
+
+[source]
+[[hash_set]]
+.`hash.c` - Adding (or updating) a value in the hash table
+----
+include::./code/hash.c[tags=hash_set]
+----
+<1> If we are still working on a small hash table, we can use the `hash` page directly, without any directory.
+<2> Find the page that we should be putting the new entry into using the directory.
+<3> Add the new entry to the matching page. This can fail if the page is full.
+<4> If we set the entry successfully, check if this is a new entry or an update to an existing one and update the global `number_of_entires` on the hash table.
+<5> If we can't set the entry, that means that the page is full and we need to split it.
+
+In <<hash_set>> we have to deal with a few different scenarios. If the hash table is small and can fit on a single page, we can use that directly, no additional work is required.
+If the hash table is big enough to have a directory, we find the page that would hold the new entry and place it there. If we were able to place the entry in its page, we check
+if this is an update or a new value, and set the `number_of_entries` on the hash table accordingly.
+
+We may fail to add the value to the page, however. This can be when the page is full. At this point, we need to _split_ the page and increase the size of the hash table. As you
+can imagine, this is one of the more interesting pieces of the hash table. Before we get there, let's see how the easy parts go. <<hash_set_small>> shows how we add an item to
+a small hash table.
+
+[source]
+[[hash_set_small]]
+.`hash.c` - Adding an item to a small hash table or creating a directory 
+----
+include::./code/hash.c[tags=hash_set_small]
+----
+
+The `hash_set_small()` isn't doing much, simply adding the item to the page using `hash_set_in_page()`. The interesting part is what happens when we have no more room in the page.
+At this point, we need to move from a single page to a real table, with a directory. This is done in `hash_create_directory()`, shown in <<hash_create_directory>>.
+Once that directory is created, we call `hash_set()` again to add the value into the newly created directory.
+
+[source]
+[[hash_create_directory]]
+.`hash.c` - Creating a directory from an existing page
+----
+include::./code/hash.c[tags=hash_create_directory]
+----
+
+The majority of the work in `hash_create_directory()` is done by `hash_split_page_entries()`, but there are some interesting pieces in it. When we split the current page, we are
+going to create two new pages that will have some of the data that was previously in the page. Then we allocate a new page and set it as a directory for the newly allocated pages.
+We _free_ the existing page and then set the `hash_id` to point to the new directory page. 
+
+[IMPORTANT]
+.The `hash_id` is not a stable value
+====
+Because the directory may need to grow and because we use `hash_id` currently as the page number of a single hash or a directory, that means that whenever we create or grow the 
+directory, the `hash_id` will change. 
+
+There are ways to avoid that, actually. We could add some indirection to the `hash_id` or attempt to reuse the pages and leave a marker pointer or any number of other alternatives.
+I chose to simply allow the `hash_id` to change whenever the directory is touched because that is the simplest mode for writing the hash table. This is going to make _working_ 
+with the hash table harder, however.
+
+We are still at a _very_ low level point in the API and we'll provide a much nicer interface down the line, so I'm not going to worry too much about the ergonomics of the API at
+this point.
+====
+
+Let's look into how we split a hash page into two separate pages. This is a fundamental operation for the extendible hash table and what allows us to easily expand the size of 
+the hash table without expensive operations. The idea is that given a single page, we'll end up with two pages that contain some of its entries. So the amount of changes when we
+hit a page full is bounded. You can see how this works in <<hash_split_page_entries>>.
+
+[source]
+[[hash_split_page_entries]]
+.`hash.c` - Splitting a hash page
+----
+include::./code/hash.c[tags=hash_split_page_entries]
+----
+
+We allocate two pages in <<hash_split_page_entries>> and set them as `hash` pages with the provided depth. Then we iterate over the existing page and send the entries to the left
+or right pages, depending on the relevant bit. This is important, because assuming we have uniform distribution (which is the point of `hash_permute_key()`), we can assume that 
+about half the entires will go left and half will go right.
+We don't _rely_ on that. This is why after the `hash_create_directory()` we call to `hash_set()` again, which may split the table _again_ if the destination page is still too full.
+
+Finally, we set the page numbers in the `pages` array. When called from `hash_create_directory()`, we simply pass the buffer that we have for the directory directly. So the call 
+to `hash_split_page_entries()` modify it directly. This is possible because there is nothing in the directory. We'll need to do better than that when we split a page on a full
+directory. 
+
+We already saw where this happen, in `hash_set()` if we have a directory already but the page we want to add to is too full. At this point, we'll call to `hash_split_page()` to
+split the page (and potentially increase the size of the directory). We can see how this works in <<hash_split_page>>.
+
+[source]
+[[hash_split_page]]
+.`hash.c` - Splitting a hash page
+----
+include::./code/hash.c[tags=hash_split_page]
+----
+
+The `hash_split_page()` function starts by testing if the page we want to split has the same depth as the directory. If that is the case, we'll need to double the size of the
+directory. But if the depth of the page we are splitting is smaller than the depth of the directory, it means that we can simply update the pointers in the directory and we
+don't need to change the directory size. 
+
+The most interesting piece of code in <<hash_split_page>> is the way we update the directory pointers. We first call to `hash_split_page_entries()` and pass it the page we
+want to split as well as a small array to hold the ids of the new pages. The code in the `for` loop find all the locations that we need to update in the directory, but it 
+may not be obvious what is going on there.
+
+Let's assume that we have a directory with a depth of 4, so the size of the directory is 16. We now need to split a page whose `depth` used to be 1. We compute the `bit`, which
+is simply the size of the directory at that particular depth. However, the directory right now is of size 16, so we need to update multiple locations in the directory. We start
+from the lowest location that the key can be placed on and then jump `bit` positions each time. When the `depth` started as 1, then `bit` will be `4` (1 << (1+1) == 4). That 
+means that we'll update the entries from the first possible location of the key to any of the locations.
+
+Let's assume that our key is `16384` and the result of `hash_permute_key()` is `14766951711751073653`. Masking that with `(bit-1)` gives us a value of 1. So we'll then scan
+through the directory and update the following locations: 1, 5, 11, 15.
+On each position in the directory we update, we need to check which page we should place there, whatever it should be the left or right pages from the `hash_split_page_entries()`
+call. We determine that by checking the relevant `depth` bit in the index. 
+I think I mentioned before how _elegant_ extendible hash table are, didn't it? It doesn't take a lot of code but it result in an amazing behavior. 
+
+The final stage in `hash_split_page()` is to free the page we split and we are ready for a new call to `hash_set()` that will use the modified directory. Again, in some pathological
+cases, we may need multiple `hash_split_page()` rounds to make sure that we have enough space for a new value, but those should be _very_ rare.
+
+The last part that we still need to look at with `hash_set()` is how we expand the size of the directory. This is done by `hash_expand_directory()` and is shown in 
+<<hash_expand_directory>>.
+
+[source]
+[[hash_expand_directory]]
+.`hash.c` - Doubling the size of the directory
+----
+include::./code/hash.c[tags=hash_expand_directory]
+----
+
+In `hash_expand_directory()` we start by allocating a new directory, twice as large (in pages) as the old one. And then we copy the old directory to the new buffer _twice_.
+This means that we doubled the size of the directory, but we didn't modify any of the mapping. That part is left for the caller in `hash_split_page()`. 
+
+[NOTE]
+.We _always_ allocate a new directory
+====
+We'll always allocate a new directory in `hash_expand_directory()`. There are many cases (until the hash table reach 8MB in size) that we could simply
+expand the table in place, since we already have the space in the page allocated to the hash table.
+
+I chose not to do that to ensure that we'll always change the `hash_id`. If this is something that happens often, we'll know that we need to deal with it. Otherwise,
+we may accidentally assume that the `hash_id` is stable after calls, which will be _usually_ true, until we had a bad bug. Start as you mean to continue, basically.
+====
+
+We have now explored all the pieces of adding a value to the hash table, let's look at the other side now, how can we _delete_ a value from the table?
+
+=== Deleting a value from the hash table
+
+Deleting a value from the hash table is very similar in concept to adding one. When adding a new value, we had to handle a full page, which meant that we had to split it.
+When deleting an item, we need to consider how to _merge_ pages. We don't want to be too eager about it, otherwise certain workloads will cause us to do splits and merges
+often. On the other hand, we want to be able to merge the pages (and reduce the depth of the directory) when we delete data to release the space we allocated to the table.
+
+Deleting a value from the hash table stats in `hash_del()`, shown in <<hash_del>>.
+
+[source]
+[[hash_del]]
+.`hash.c` - Deleting an item from the hash table
+----
+include::./code/hash.c[tags=hash_del]
+----
+
+The structure of the code in <<hash_del>> should be familiar by now. We have one part that handles the case where we have a single page in the hash table and we have the
+other case where we have a directory in place. In the first case, we can remove the value directly using `hash_remove_from_page()` while in the later case, we have to 
+first find the appropriate hash page and then call `hash_remove_from_page()` on it.
+
+[QUESTION]
+.Does the single page `hash` page optimization pay off?
+====
+In each of the high level hash table functions so far, we have to deal with two cases. One where the hash table is on a single page and we skip using a directory and one
+where we have a directory and we need to jump to the actual `hash` page. 
+That adds some non negligible amount of work and complexity to all of those function. The question is, is it worth it?
+
+I think that it is worthwhile to do so. A single hash table page should contain between 3,500 - 1,000 entries, depending on the exact values that we'll store in the hash
+table. That is big enough that many use cases will be able to use just a single page and benefit from the simpler code structure and reduction in space usage.
+====
+
+The most interesting thing in `hash_del()` is the very last call, `hash_maybe_merge_pages()`. Just like we have to handle page splitting when we add an item to the table, we
+also have to deal with the other side, merging of pages when there isn't enough data in them. You can see how that is implemented in <<hash_maybe_merge_pages>>.
+
+[source]
+[[hash_maybe_merge_pages]]
+.`hash.c` - Checking if we can merge the page with its sibling after a delete
+----
+include::./code/hash.c[tags=hash_maybe_merge_pages]
+----
+<1> We check if the page we deleted from and its sibling (the page that is one bit off from the current page) _together_ have will fill less than 75% of a single page.
+<2> If we have just two pages in the hash table, we can drop down to a single `hash` page, instead of using a directory.
+<3> Merge the two pages into a single one and update the directory.
+<4> Shrink the directory if we can.
+
+In <<hash_maybe_merge_pages>> we start by checking the _sibling_ page. That is the page that is off by one bit from the page we just deleted an entry from. The sibling page
+is the target for merging. We check the used size on the page and its sibling and if they are more than 75% of a single page, we do nothing. Splitting and merging pages is 
+not something that we want to do casually, so we give ourselves some buffer before we'll trigger a merge. 
+
+Once we have determine that we have a good candidate for merging, we check the size of the hash table. If we are merging the last two pages, then we want to drop down to a 
+single page `hash`, instead of using a directory. This is handled in `hash_convert_directory_to_hash()` and shown in <<hash_convert_directory_to_hash>>.
+
+[source]
+[[hash_convert_directory_to_hash]]
+.`hash.c` - Merging the last two pages in a directory into a single `hash` page
+----
+include::./code/hash.c[tags=hash_convert_directory_to_hash]
+----
+
+In <<hash_convert_directory_to_hash>> we wipe the directory page (and its metadata) and turn that into a `hash` page. Then we start iterating over both of the pages we want
+to merge and add them to the new `hash` page. We finish the function by freeing both pages while the directory page remains in use, but it is not have been recycled to be a 
+`hash` page. 
+In other words, we have implemented both grown and shrink on the table so we can grow from a single `hash` page to a directory and then shrink back to a single `hash`.
+The process for merging two pages while still using the directory is very similar and can be seen in <<hash_merge_pages>>.
+
+[TIP]
+.Locality of reference in the hash table
+====
+Throughout this chapter, you might want to pay attention to the calls to `txn_allocate_page()`. In particular, the last argument we pass to it is a hint on where we would
+_like_ to have this page. We talked about this when we built the function in Chapter 5 but now you can see it in action. Aside from the first call to `txn_allocate_page()`
+in `hash_create()`, we always ask the lower levels of the API to allocate a page nearby the directory page or the current `hash` page. 
+
+That means that most of the time, the pages are going to be nearby and can benefit from coarser grained reads from disk as well as have the chance to trigger read ahead 
+optimizations by the operating system. 
+====
+
+[source]
+[[hash_merge_pages]]
+.`hash.c` - Merging two pages into a single one and updating the directory mapping
+----
+include::./code/hash.c[tags=hash_merge_pages]
+----
+<1> The actual merge is done inside `hash_merge_pages_work()`.
+<2> Update the indexes in the directory to point to the new page
+<3> Release the old pages, now no longer needed.
+
+In <<hash_merge_pages>> we allocate a new page to hold the combined entries from the pages we merge. Note that the `depth` of the new page is the _minimum_ `depth` from both
+pages. We call to `hash_merge_pages_work()` to do the actual work of merging the value and then we need to update the references in the directory. This is just the inverse
+of the work we have done in `hash_split_page()` and follow the same principals.
+
+The only thing that we still need to discuss is how to handle the process of shrinking the hash table directory. Let's look at the code in <<hash_maybe_shrink_directory>> and 
+then we'll talk about how it works. 
+
+[source]
+[[hash_maybe_shrink_directory]]
+.`hash.c` - Checking if we can shrink the directory and shrink it if we can
+----
+include::./code/hash.c[tags=hash_maybe_shrink_directory]
+----
+<1> Early exit if we found a `hash` page whose `depth` equals to the current global `depth`, indicating that we can't shrink the directory.
+
+In <<hash_maybe_shrink_directory>> we start by scanning the metadata of all the pages in the directory. Note that we only touch the _metadata_ of the pages and that we have
+set things up so it is _very_ likely that the pages are clustered together and reading a single metadata page will net us many metadata entries in a single read from the disk
+(if the page isn't already in memory).
+
+We check the `depth` of all the pages in the hash table and if _all_ of them are below the global `depth` (which is stored in the _directory_ metadata), we can shrink the table.
+That is done by allocating a new directory page and copying just half of the directory over to the new page. The `hash_merge_pages()` call has already set things up so both halves of
+the directory are identical at this point. 
+
+We _could_ try to avoid allocating a new page on the directory shrinking, but the same logic that made me do it always on expansion holds here as well. I want to make sure that 
+calling code is ready for the `hash_id` to change.
+
+=== Iterating over the entries
+
+Iteration over the the hash table turns out to be surprisingly tricky. If we have a single page, we already saw that it is a simple matter of calling to `hash_page_get_next()`,
+even if we didn't look into how that is implemented yet. But when we have a directory, we have to deal with a problem. The directory can contain multiple references to the same
+page. If you'll look at <<ehash>>, you can visualize the problem easily. We want to get every entry in the hash table _once_, but if we simply scan through the directory we'll
+encounter some pages more than once and may return duplicated results. In order to handle this, the `hash_get_next()` function accepts a `pages_map_t` argument that will hold
+the pages that were visited in previous calls to the function. You can see how that looks in <<hash_get_next>>.
+
+[source]
+[[hash_get_next]]
+.`hash.c` - Checking if we can shrink the directory and shrink it if we can
+----
+include::./code/hash.c[tags=hash_get_next]
+----
+
+Iterating over a single `hash` page is easy enough. We'll see exactly how that works later in this chapter. The most interesting parts of this function is how we handle iteration
+in the directory. Between invocations of `hash_get_next()` we remember the page that we were last iterating using the `it\->key`. 
+
+There is a small trick here. We require that the  `hash_val_t` we accept in this method will be zeroed on the first call (except for the `hash_id`, of course). 
+When we permute a zero, we'll accept a zero. So the first call will always go to index `0`, which is exactly what we want. There is also the `iter_state` we have in `hash_val_t`,
+which is used to remember the iteration position _inside_ a page. 
+
+Once we are done scanning a page, we'll add it to the `state` pages map and run through the directory, finding the next page that we haven't seen. It is the caller's responsibility
+to create and destroy the page map for the call. 
+
+This is almost all of it, we have implemented an extendible hash table that can manage to store `uint64_t` keys and values. It knows how to expand and contract and will allow us 
+to find values with an `O(1)` complexity. We are able to iterate over the values, delete, create and set them. What we are missing, however, is everything about how we handle the
+data _inside_ the page. So far we dealt exclusively with the directory and how the extendible hash table work. All the work about the page itself has been hidden behind our API. 
+
+=== The structure of a `hash` page
+

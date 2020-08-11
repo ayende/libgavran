@@ -13,6 +13,10 @@ static result_t txn_get_number_of_pages(
     case page_flags_hash:
       *number_of_pages = 1;
       return success();
+    case page_flags_hash_directory:
+      uint32_t buckets = metadata->hash_directory.number_of_buckets;
+      *number_of_pages = TO_PAGES(buckets * sizeof(uint64_t));
+      return success();
     case page_flags_overflow:
       *number_of_pages = metadata->overflow.number_of_pages;
       return success();

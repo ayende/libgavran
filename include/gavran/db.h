@@ -70,15 +70,26 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_metadata          = 2,
   page_flags_free_space_bitmap = 3,
   page_flags_overflow          = 4,
-  page_flags_hash              = 5,
-  page_flags_container         = 6,
+  page_flags_hash_directory    = 5,
+  page_flags_hash              = 6,
+  page_flags_container         = 7,
 } page_flags_t;
+
+typedef struct hash_page_directory {
+  page_flags_t page_flags;
+  uint8_t depth;
+  uint8_t padding[2];
+  uint32_t number_of_buckets;
+  uint64_t number_of_entries;
+  uint8_t padding2[16];
+} hash_page_directory_t;
 
 typedef struct hash_page {
   page_flags_t page_flags;
   uint8_t depth;
   uint16_t number_of_entries;
-  uint8_t _padding[28];
+  uint16_t bytes_used;
+  uint8_t _padding[26];
 } hash_page_t;
 
 // tag::container_page_t[]
@@ -141,6 +152,7 @@ typedef struct page_metadata {
     overflow_page_t overflow;
     container_page_t container;
     hash_page_t hash;
+    hash_page_directory_t hash_dir;
   };
 } page_metadata_t;
 
@@ -331,7 +343,7 @@ result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
 // tag::container_api[]
 // create / delete container
 result_t container_create(txn_t *tx, uint64_t *container_id);
-result_t container_destroy(txn_t *tx, uint64_t container_id);
+result_t container_drop(txn_t *tx, uint64_t container_id);
 
 typedef struct container_item {
   uint64_t container_id;
@@ -348,3 +360,24 @@ result_t container_item_del(txn_t *tx, container_item_t *item);
 // iteration
 result_t container_get_next(txn_t *tx, container_item_t *item);
 // end::container_api[]
+
+// tag::hash_api[]
+typedef struct hash_val {
+  uint64_t hash_id;
+  uint64_t key;
+  uint64_t val;
+  bool has_val;
+  bool hash_id_changed;
+  uint8_t padding[2];
+  uint32_t iter_state;
+} hash_val_t;
+
+result_t hash_create(txn_t *tx, uint64_t *hash_id);
+result_t hash_drop(txn_t *tx, uint64_t hash_id);
+
+result_t hash_set(txn_t *tx, hash_val_t *set, hash_val_t *old);
+result_t hash_get(txn_t *tx, hash_val_t *kvp);
+result_t hash_del(txn_t *tx, hash_val_t *del);
+result_t hash_get_next(
+    txn_t *tx, pages_map_t **state, hash_val_t *it);
+// end::hash_api[]
