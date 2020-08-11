@@ -43,8 +43,8 @@ result_t hash_create(txn_t* tx, uint64_t* hash_id) {
 // end::hash_create[]
 
 // tag::hash_get_from_page[]
-static result_t hash_get_from_page(txn_t* tx, page_t* p,
-    page_metadata_t* metadata, uint64_t hashed_key, hash_val_t* kvp) {
+static bool hash_get_from_page(page_t* p, page_metadata_t* metadata,
+    uint64_t hashed_key, hash_val_t* kvp) {
   hash_bucket_t* buckets = p->address;
   uint64_t location =
       (hashed_key >> metadata->hash.depth) % BUCKETS_IN_PAGE;
@@ -56,15 +56,13 @@ static result_t hash_get_from_page(txn_t* tx, page_t* p,
       uint64_t k, v;
       cur = varint_decode(varint_decode(cur, &k), &v);
       if (k == kvp->key) {
-        kvp->val     = v;
-        kvp->has_val = true;
-        return success();
+        kvp->val = v;
+        return true;
       }
     }
     if (buckets[idx].overflowed == false) break;
   }
-  kvp->has_val = false;
-  return success();
+  return false;
 }
 // end::hash_get_from_page[]
 
@@ -86,19 +84,20 @@ static bool hash_page_get_next(page_t* p, hash_val_t* it) {
       return false;
     }
   }
-  char* start = buckets[idx].data + offset;
-  char* end = varint_decode(varint_decode(start, &it->key), &it->val);
+  uint8_t* start = buckets[idx].data + offset;
+  uint8_t* end =
+      varint_decode(varint_decode(start, &it->key), &it->val);
   it->has_val    = true;
   it->iter_state = (uint32_t)(
-      idx * sizeof(hash_bucket_t) + offset + (end - start));
+      idx * sizeof(hash_bucket_t) + offset + (size_t)(end - start));
   return true;
 }
 // end::hash_page_get_next[]
 
 // tag::hash_append_to_page[]
 static bool hash_append_to_page(hash_bucket_t* buckets,
-    page_metadata_t* metadata, uint64_t hashed_key, uint64_t key,
-    uint8_t* buffer, size_t size) {
+    page_metadata_t* metadata, uint64_t hashed_key, uint8_t* buffer,
+    size_t size) {
   uint64_t location =
       (hashed_key >> metadata->hash.depth) % BUCKETS_IN_PAGE;
   for (size_t i = 0; i < HASH_OVERFLOW_CHAIN_SIZE; i++) {
@@ -130,8 +129,8 @@ static void hash_remove_in_bucket(hash_bucket_t* bucket,
 }
 
 static bool hash_try_update_in_page(hash_bucket_t* bucket,
-    page_metadata_t* metadata, char* start, char* cur, char* buffer,
-    uint8_t size) {
+    page_metadata_t* metadata, uint8_t* start, uint8_t* cur,
+    uint8_t* buffer, uint8_t size) {
   // same size, can just overwrite
   if ((cur - start) == size) {
     memcpy(start, buffer, size);
@@ -190,7 +189,7 @@ static bool hash_set_in_page(page_t* p, page_metadata_t* metadata,
   }
   // we now call it _knowing_ the value isn't here
   return hash_append_to_page(
-      buckets, metadata, hashed_key, set->key, buffer, size);
+      buckets, metadata, hashed_key, buffer, size);
 }
 // end::hash_set_in_page[]
 
@@ -254,7 +253,7 @@ static bool hash_remove_from_page(page_t* p,
       if (k == del->key) {
         del->has_val = true;
         del->val     = v;
-        hash_remove_in_bucket(buckets + idx, start, &end, cur);
+        hash_remove_in_bucket(buckets + idx, start, end, cur);
         metadata->hash.number_of_entries--;
         metadata->hash.bytes_used -= (uint16_t)(cur - start);
 
@@ -278,7 +277,7 @@ result_t hash_get(txn_t* tx, hash_val_t* kvp) {
   uint64_t hashed_key = hash_permute_key(kvp->key);
   ensure(txn_get_page_and_metadata(tx, &p, &metadata));
   if (metadata->common.page_flags == page_flags_hash) {
-    ensure(hash_get_from_page(tx, &p, metadata, hashed_key, kvp));
+    kvp->has_val = hash_get_from_page(&p, metadata, hashed_key, kvp);
   } else {
     uint64_t index =
         KEY_TO_BUCKET(hashed_key, metadata->hash_dir.depth);
@@ -287,8 +286,8 @@ result_t hash_get(txn_t* tx, hash_val_t* kvp) {
     page_t hash_page  = {.page_num = buckets[index]};
     page_metadata_t* hash_metadata;
     ensure(txn_get_page_and_metadata(tx, &hash_page, &hash_metadata));
-    ensure(hash_get_from_page(
-        tx, &hash_page, hash_metadata, hashed_key, kvp));
+    kvp->has_val = hash_get_from_page(
+        &hash_page, hash_metadata, hashed_key, kvp);
   }
   return success();
 }
@@ -296,7 +295,7 @@ result_t hash_get(txn_t* tx, hash_val_t* kvp) {
 
 // tag::hash_split_page_entries[]
 static result_t hash_split_page_entries(
-    txn_t* tx, page_t* existing, uint32_t depth, uint64_t pages[2]) {
+    txn_t* tx, page_t* existing, uint8_t depth, uint64_t pages[2]) {
   page_t l = {.number_of_pages = 1}, r = {.number_of_pages = 1};
   page_metadata_t *l_metadata, *r_metadata;
   ensure(txn_allocate_page(tx, &l, &l_metadata, existing->page_num));
@@ -323,8 +322,7 @@ static result_t hash_split_page_entries(
 // tag::hash_create_directory[]
 static result_t hash_create_directory(txn_t* tx, page_t* existing,
     page_metadata_t* metadata, hash_val_t* set) {
-  uint64_t number_of_entries = metadata->hash.number_of_entries;
-  page_t dir                 = {.number_of_pages = 1};
+  page_t dir = {.number_of_pages = 1};
   page_metadata_t* dir_metadata;
   ensure(
       txn_allocate_page(tx, &dir, &dir_metadata, existing->page_num));
@@ -344,7 +342,7 @@ static result_t hash_create_directory(txn_t* tx, page_t* existing,
 // tag::hash_expand_directory[]
 static result_t hash_expand_directory(
     txn_t* tx, page_t* dir, page_metadata_t** dir_metadata) {
-  uint64_t cur_buckets = (*dir_metadata)->hash_dir.number_of_buckets;
+  uint32_t cur_buckets = (*dir_metadata)->hash_dir.number_of_buckets;
   page_t new           = {.number_of_pages =
                     TO_PAGES(cur_buckets * 2 * sizeof(uint64_t))};
   page_metadata_t* new_metadata;
@@ -380,7 +378,7 @@ static result_t hash_split_page(txn_t* tx, page_t* page,
   uint64_t pages[2];
   ensure(hash_split_page_entries(
       tx, page, metadata->hash.depth + 1, pages));
-  uint32_t bit      = 1 << metadata->hash.depth + 1;
+  uint32_t bit      = 1 << (metadata->hash.depth + 1);
   uint64_t* buckets = dir.address;
   for (size_t i = hash_permute_key(set->key) & (bit - 1);
        i < dir_metadata->hash_dir.number_of_buckets; i += bit) {
@@ -395,12 +393,12 @@ static result_t hash_split_page(txn_t* tx, page_t* page,
 static result_t hash_set_small(txn_t* tx, page_t* p,
     page_metadata_t* metadata, uint64_t hashed_key, hash_val_t* set,
     hash_val_t* old) {
-  ensure(txn_modify_page(tx, &p));
+  ensure(txn_modify_page(tx, p));
   ensure(txn_modify_metadata(tx, set->hash_id, &metadata));
-  if (hash_set_in_page(&p, metadata, hashed_key, set, old)) {
+  if (hash_set_in_page(p, metadata, hashed_key, set, old)) {
     return success();
   }
-  ensure(hash_create_directory(tx, &p, metadata, set));
+  ensure(hash_create_directory(tx, p, metadata, set));
   ensure(hash_set(tx, set, old));
   return success();
 }
@@ -439,8 +437,7 @@ result_t hash_set(txn_t* tx, hash_val_t* set, hash_val_t* old) {
   }
   // <5>
   set->hash_id_changed = true;
-  ensure(
-      hash_split_page(tx, &set->hash_id, &hash_page, hash_metadata));
+  ensure(hash_split_page(tx, &hash_page, hash_metadata, set));
   ensure(hash_set(tx, set, old));
   return success();
 }
@@ -459,7 +456,7 @@ static result_t hash_maybe_shrink_directory(txn_t* tx, page_t* dir,
       return success();  // the depth is needed, cannot shrink
     }
   }
-  uint64_t bucket_count = metadata->hash_dir.number_of_buckets / 2;
+  uint32_t bucket_count = metadata->hash_dir.number_of_buckets / 2;
   page_t new_dir        = {
       .number_of_pages = TO_PAGES(bucket_count * sizeof(uint64_t))};
   page_metadata_t* new_dir_metadata;
@@ -478,7 +475,7 @@ static result_t hash_maybe_shrink_directory(txn_t* tx, page_t* dir,
 // end::hash_maybe_shrink_directory[]
 
 // tag::hash_convert_directory_to_hash[]
-bool hash_merge_pages_work(page_t* p1, page_t* p2, page_t* dst,
+static bool hash_merge_pages_work(page_t* p1, page_t* p2, page_t* dst,
     page_metadata_t* dst_metadata, uint64_t* hashed_key) {
   hash_val_t it = {0};
   while (hash_page_get_next(p1, &it)) {
@@ -489,15 +486,14 @@ bool hash_merge_pages_work(page_t* p1, page_t* p2, page_t* dst,
   memset(&it, 0, sizeof(hash_val_t));
   while (hash_page_get_next(p2, &it)) {
     *hashed_key = hash_permute_key(it.key);
-    if (!hash_set_in_page(dst, dst_metadata, *hashed_key, &it, 0)))
-    return false;
+    if (!hash_set_in_page(dst, dst_metadata, *hashed_key, &it, 0))
+      return false;
   }
   return true;
 }
 static result_t hash_convert_directory_to_hash(txn_t* tx,
-    page_t* page, page_metadata_t* metadata,
-    uint64_t sibling_page_num, page_metadata_t* sibling_metadata,
-    page_t* dir, page_metadata_t* dir_metadata) {
+    page_t* page, uint64_t sibling_page_num, page_t* dir,
+    page_metadata_t* dir_metadata) {
   memset(dir->address, 0, PAGE_SIZE);
   memset(dir_metadata, 0, sizeof(page_metadata_t));
   dir_metadata->hash.page_flags = page_flags_hash;
@@ -563,15 +559,15 @@ static result_t hash_maybe_merge_pages(txn_t* tx, uint64_t index,
   }
   // <2>
   if (dir_metadata->hash_dir.number_of_buckets == 2) {
-    ensure(hash_convert_directory_to_hash(tx, page, metadata,
-        buckets[sibling_index], sibling_metadata, dir, dir_metadata));
+    ensure(hash_convert_directory_to_hash(
+        tx, page, buckets[sibling_index], dir, dir_metadata));
     return success();
   }
   // <3>
   ensure(hash_merge_pages(tx, page, metadata, buckets[sibling_index],
       sibling_metadata, dir, dir_metadata));
 
-  //<4>
+  // <4>
   ensure(hash_maybe_shrink_directory(tx, dir, dir_metadata, del));
   return success();
 }
