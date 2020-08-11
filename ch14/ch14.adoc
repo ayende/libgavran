@@ -502,3 +502,253 @@ data _inside_ the page. So far we dealt exclusively with the directory and how t
 
 === The structure of a `hash` page
 
+Up until now, we look at the hash table from a high vantage point. We looked at the directory and how we manage the pages inside the table. In this section, I want to dive into the
+structure of the data inside a `hash` page. The extendible hash table we build here hold entries of `uint64_t` keys and values. Using the most naive option, each entry would then
+cost us 16 bytes to hold. In other words, a single `hash` page would be able to store up to 512 entries. 
+
+You might have noticed earlier in this chapter that I kept referring to the `hash` pages as capable of holding much more than that, but I didn't give an exact number. This is because
+we aren't going to store the entry data as is. We are going to use `varint` encoding for this purpose. This is a common encoding format for integers that allow us to pack small
+integers with high degree of efficiency. The idea is that we can write an `int64_t` in far fewer bytes. The `varint` encoding is _really_ common and is used in many scenarios.
+You can https://developers.google.com/protocol-buffers/docs/encoding[read more about the `varint` encoding] if you are unfamiliar with it. 
+The API Gavran uses for working with them is shown in <<varint_api>>.
+
+[source]
+[[varint_api]]
+.`gavran/internal.h` - Variable length integers API
+-----
+include::../include/gavran/internal.h[tags=varint_api]
+-----
+
+The `varint_encode()` function return the pointer it received _after_ the write of the number they got. The same is the case for `varint_decode()`. I'm not going to dive into 
+the actual implementation. You can check the source code for that or read about the encoding format. What is important to understand about `varint` is that instead of taking 8 bytes
+to store an `uint64_t` we encode the data so it will take between 1 - 10 bytes. The size of the encoded `varint` depends on the value we encode. The bigger the value, the more bytes
+we need to encode the number. Note that we'll only cross the 8 bytes threshold if the value is larger than `72,057,594,037,927,936` so up until that point, this is an absolute win.
+
+The `varint` encoding allows us to store the entries in a far more efficient manner, but it come with a different problem. Now that the size of the data isn't fixed, how can we find
+where the relevant entry is. If we were storing the entries in the page as is, we could treat the page as an array with 512 elements and index into that directly using the provided
+key. We already saw how well that works when we built the `pages_map_t` API.  How would we deal with the problem when working with variable size data?
+Let's take a look at <<hash-page>> which shows the structure of a `hash` page.
+
+[[hash-page]]
+.The internal structure of a `hash` page
+image::hash-page.png[]
+
+The `hash` page is divided into buckets that are 64 bytes each. For an 8KB page, that means that we have 128 buckets inside the page. For each page, we have 1 byte header and 63
+bytes that can hold data. we utilize the `hash_bucket_t` to work with each bucket, shown on <<hash_page_decl>>. 
+
+[source]
+[[hash_page_decl]]
+.`hash.c` - Declarations used when working with the internal structure of a `hash` page
+----
+include::./code/hash.c[tags=hash_page_decl]
+----
+<1> Whatever this bucket is part of an overflow chain, using a single bit field.
+<2> The number of bytes used in this bucket, stored as a 7 bits field number (range of 1 .. 128).
+
+The code in <<hash_page_decl>> is interesting because it is using bit fields. Those are instructions to the C compiler that the fields in the index take _less_ than a single byte.
+We use this to make sure that the header will only use a single byte, leaving the `data` field with 63 bytes for us to work with.
+
+.Why use 64 bytes size for the hash buckets?
+****
+In most modern processors, the cache line size is going to be 64 bytes in size. I'm not going to go into details about cache lines but you might find this
+https://meribold.org/2017/10/20/survey-of-cpu-caches/[Survery of CPU Caches] to be an interesting read. What is important to understand about the CPU will not go to memory every
+time we need to read some data, it will load that into its cache (L1, L2, etc). The topic is _quite_ complex, so I'll leave it at that.
+
+The majority of the cost is fetching the data from RAM to the CPU cache, multiple accesses on the same cache line is going to be effectively free. For that reason, having a 64 bytes
+bucket (which is also aligned on 64 bytes boundary) means that each bucket is going to be its own cache line and multiple operations on that are going to enjoy very high speed.
+
+Beyond that, in some cases we will want to access the buckets in a sequential order (when we handle overflows). This will also benefit greatly from the read ahead optimizations
+done by the CPU because we use a very predictable pattern.
+****
+
+I think that the best place to start showing how the data is stored in a `hash` page is to see how we _read_ the data back. This is because the read doesn't have to deal with
+any of the complexities we have to work with when writing an entry to the page. You can see how that works in <<hash_get_from_page>>.
+
+[source]
+[[hash_get_from_page]]
+.`hash.c` - Get an entry from a `hash` page
+----
+include::./code/hash.c[tags=hash_get_from_page]
+----
+
+In <<hash_get_from_page>> we start by computing the initial bucket location. This is done by simply stripping `depth` bits from the `hashed_key` and using that to index into
+the `buckets`' array. This is fairly standard behavior for a hash table and we saw very similar code in the page map. What is interesting is what we do in each bucket. We 
+scan through the bucket's data (from the start to `bytes_used`) and call `varint_decode()` twice. Once to get the entry's key and once for the entry's value. We compare the 
+key from the entry to the expected key and decide we have a match or not.
+
+If we read all the entries from a bucket and didn't find the key, we have to make a choice. Should we continue to scan the _next_ bucket, to see if we had an overflow and had
+to move the entry from its native position to another one? 
+If the bucket we scan is marked as an overflow one, we will go ahead and scan the next bucket in line. Note that the `idx` variable may wrap to the beginning of the `buckets`
+array if we are starting near the end of the array.
+
+Another important consideration is that we'll only allow to scan up to `HASH_OVERFLOW_CHAIN_SIZE` buckets (which is set to 16). That means that we'll scan at most 1KB in 
+the page if we can't find the value. The way we setup the structure of the `hash` page, we will compute the index from the `hashed_key` (excluding the `depth` bits, which are
+identical for all the entries in the page). That gives us the ideal location for the entry, but we allow it to be shifted by up to 16 buckets from that position. If the entry
+cannot be found within that range, it means that it isn't on the page at all and we can say that the value isn't in the hash table.
+
+Iterating over the values in the `hash` page also take advantage of the buckets in the page, as you can see in <<hash_page_get_next>>. 
+
+[source]
+[[hash_page_get_next]]
+.`hash.c` - Iterating over all the entries in the `hash` page
+----
+include::./code/hash.c[tags=hash_page_get_next]
+----
+
+The idea in <<hash_page_get_next>> is that this is a function that is going to be called multiple times. We use the `iter_state` field in the `hash_val_t` to hold the state
+of the iteration in the page between invocations of `hash_page_get_next()`. The `iter_state` holds the position of the _next_ byte that we need to read. We make sure that it
+will always skip the header byte and we run through all the bytes used by the bucket. We continue to do so until we run out of buckets in the page. 
+
+In <<hash_get_next>>, where we iterate over the whole hash table, you can see that we set the `iter_state` to zero when we move between pages. That ensure that we scan through
+each page from the start all the way to the end.
+
+Now that we understand how the data is structured on a `hash` page, let's see how we _add_ the entries to the page.
+
+=== Adding an entry to a `hash` page
+
+The API we provide to add an entry to a page is the `hash_set_in_page()`, shown in <<hash_set_in_page>>. This function has to deal with adding an item to the page or updating
+an existing value. 
+
+[source]
+[[hash_set_in_page]]
+.`hash.c` - Adding a new entry or updating an existing entry in the `hash` page
+----
+include::./code/hash.c[tags=hash_set_in_page]
+----
+
+We start `hash_set_in_page()` by encoding the key and the value into a buffer. We use a `20` character buffer because that is the maximum number of bytes that two `uint64_t` 
+values will take. Most often, the actual used buffer is going to be much smaller. We then scan the page to see if there is already an entry with the provided key. This is 
+similar to the code in `hash_get_from_page()` code. We also check if the existing value and the new value are the same, in which case we have to do nothing and can return
+immediately.
+
+If the entry we found has a different value, we call to `hash_try_update_in_page()` to complete the update. Note that this may _fail_, if the new entry is larger than the 
+previous one and there is no more space in the page.
+If we scanned through the possible buckets in the page and couldn't find the entry, we can append it to the page using `hash_append_to_page()`, certain that it is a new value.
+
+Let's look first in more depth into `hash_try_update_in_page()`, to see how we are trying to update the value. You can see the code in <<hash_try_update_in_page>>.
+
+[source]
+[[hash_try_update_in_page]]
+.`hash.c` - Updating an existing entry's value inside 
+----
+include::./code/hash.c[tags=hash_try_update_in_page]
+----
+
+If the size of the old entry and the size of the entry match, we can simply overwrite the old entry and be done with it. That is the simplest scenario and the first that we
+handle in `hash_try_update_in_page()`. If that isn't the case, we call to `hash_remove_in_bucket()` to remove the entry from the bucket. We do that using `memmove()` by overwriting
+the range of the old entry and updating the `bytes_used` on the bucket. 
+
+We then attempt to add the new entry buffer to the same bucket. This may fail, because the bucket it full. If that is the case, we exit the function and the caller will then
+proceed to call to `hash_append_to_page()`. It is important to understand that the `hash_try_update_in_page()` will _remove_ the old entry in all cases, so failure to add the new
+entry will have the side affect of removing the old one. Then we handle all the rest of the work needed to handle appending the new entry in `hash_append_to_page()`. You can see
+the code for appending a new entry to the page in <<hash_append_to_page>>.
+
+[source]
+[[hash_append_to_page]]
+.`hash.c` - Append a (known new) entry into the page, marking overflow buckets as needed
+----
+include::./code/hash.c[tags=hash_append_to_page]
+----
+
+The code in <<hash_append_to_page>> is where the most interesting work of the `hash` page is happening. There isn't a lot of code, but it does have some interesting aspects. Let's
+look into that in detail.
+
+We start from the ideal bucket location for the value and we check if we can place the value there. If the bucket is too full, we mark it as an overflow bucket and check the next 
+bucket in line. The reason we need to mark the bucket as overflow is so operations such as `hash_get_from_page()` and `hash_set_in_page()` will know how far to scan. It is important
+to note that the size of the `HASH_OVERFLOW_CHAIN_SIZE` means that we may place an entry a maximum of 512 bytes from its ideal location. If all the buckets in the allowed range are
+full, we fail the append operation and return `false`. Remember that if we had an existing value before the call, it has been removed. 
+
+We saw what happens when the `hash_set_in_page()` function returns false in <<hash_set>>. If we fail to place the value in the page, we'll split the page and try again to set the 
+entry after the split. 
+
+.Why do we need the `HASH_OVERFLOW_CHAIN_SIZE` limit?
+****
+The `HASH_OVERFLOW_CHAIN_SIZE` is set to `16` and it used to limit the number of overflow offset in the `hash` page. In other words, it it used to control how far from its ideal
+bucket will we allow a value to be placed. The idea with this value is that it controls the space vs. time tradeoff in the `hash` page. The bigger the value, the more chance
+we have to find a bucket with enough space to place the entry.
+However, the bigger the value, the more memory we have to scan to _find_ the value. 
+
+I run tests to find the sweet spot for this value. When setting the chain size to 1, the time it took to find a value was 0.54 μs per operation, but the size of the hash table
+with a million entries was 147MB. This is fairly obvious. As soon as a single bucket is full, we'll need to split the page. 
+
+On the other hand, when setting the maximum size of the chain to be 128 (the maximum number of buckets in the page) the size of the hash set was 32MB, but the time to search 
+soared to 0.77 μs per operation. In this case, we'll scan the _entire_ page to find if the value is there or not. It may seem like a silly issue, but scanning 8KB to find a value
+can be quite expensive.
+
+When using a chain size of 8, the size of the hash table was 36MB, but the cost in time was 0.32 μs per operation, _less_ than when we had a chain size of 1. Probably because we 
+have almost as good locality of reference as we have when we can the whole page. 
+
+What is probably the _ideal_ value is 16. The size of the data is 32.2MB and the operation speed is 0.33 μs per operation. I'm mentioning these numbers because this is probably
+something that we may want to pay attention to when we get to writing benchmarks for Gavran. 
+****
+
+=== Deleting a value from a `hash` page
+
+Deleting a value from a `hash` page should be easy. We already saw how that works in <<hash_try_update_in_page>>, using the `hash_remove_in_bucket()` function. The problem with
+relying on `hash_remove_in_bucket()` alone is that it will not shorten the overflow chains. That means that if we had a nearly full page and we start removing entries, we'll not
+move the existing entries to their ideal bucket and have to still scan through more of the page to find the values. 
+
+The code for handling deletions in a page is shown on <<hash_remove_from_page>>. It follow the same pattern of `hash_set_in_page()` and should be quite familiar by now.
+
+[source]
+[[hash_remove_from_page]]
+.`hash.c` - Deleting an entry from a `hash` page and compacting the page if needed
+----
+include::./code/hash.c[tags=hash_remove_from_page]
+----
+
+We scan through the buckets where our entry may reside and if we find it, we call to `hash_remove_in_bucket()` to do the actual removal. The interesting bit about this code is
+that if the bucket that we removed an entry from is an overflow bucket, we need to scan the _next_ buckets to see if we can move entries that are outside their ideal location 
+to their proper place. This is done in `hash_compact_buckets()`, shown in <<hash_compact_buckets>>.
+
+[source]
+[[hash_compact_buckets]]
+.`hash.c` - Compacting the buckets on a page, placing entries in their ideal location if we can
+----
+include::./code/hash.c[tags=hash_compact_buckets]
+----
+
+We start `hash_compact_buckets()` by scanning from the current bucket forward, and trying to find how many overflow buckets we have to deal with. Remember that we start from
+a bucket that we just removed an item from, so we need to scan a maximum of 16 buckets forward, since that is the maximum distance that a value from that location can be placed on.
+
+We then start from the furthermost bucket from our original page and see if it has any entries that should reside in a previous page. If we were unable to move an entry from the 
+bucket to the previous location, we can't cut the overflow chain, but we still want to move the entries as far back as we can, to reduce the overhead when we scan for entries.
+
+The reason we start with the furthermost overflowed bucket is that we can remove the `overflowed` marker from a bucket if we removed all the entries that don't belong to the
+_next_ bucket _and_ the next bucket isn't marked as `overflowed` as well. If the next bucket is also overflowing, there may be shifted entries that exists in buckets beyond the 
+range that we are scanning. 
+
+Unfortunately, this is pretty complex, and I was unable to reduce the complexity further than what is shown in <<hash_compact_buckets>>. The good news is that this is limited to
+a single page and the complexity doesn't leak out to the rest of the code.
+
+=== Dropping a hash table
+
+The last step that we need to handle before we can call a close to our chapter on hash tables is how we'll deal with _dropping_ the hash table. How can we make sure that all 
+the data that is held by the hash table is released and all resources are freed. As usual, we have to consider two separate scenarios. The first is when we have just a single
+`hash` page, in which case we can simply free it directly. But what happens when we want to drop a hash table that has a directory and multiple `hash` pages? You can see
+the `hash_drop()` implementation in <<hash_drop>>.
+
+[source]
+[[hash_drop]]
+.`hash.c` - Dropping a hash table and releasing all the pages associated with it
+----
+include::./code/hash.c[tags=hash_drop]
+----
+
+For a directory, we can simply iterate over the pages in the directory and release them one at a time. The only interesting thing we have to deal with in this case it to make sure 
+that we aren't going to release the same page twice. We handle that by using a `pages_map_t` to hold the pages we already freed. 
+
+.It is probably okay to free twice
+****
+I'm avoiding calling `txn_free_page()` twice on the same page because it isn't the right thing to do, but with our current implementation, freeing a page will have the following
+affects:
+
+* The page and its metadata will be zeroed.
+* The page will be marked as free in the free space bitmap.
+
+We are fine with both of those things happening multiple times, since the end result is going to be identical. I'm avoiding doing this because this is our _current_ implementation
+and I don't want to create subtle dependencies between pieces of our code.
+****
+
+With the `hash_drop()` explored, we are done. We have a persistent hash table that will work with our transactional storage, we can create and drop it, add and remove values and
+everything will just work. Or at least, so I assume. We still need to write some tests to verify this...

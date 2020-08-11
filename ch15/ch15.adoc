@@ -107,20 +107,7 @@ We are making sure that our accesses are either properly aligned or going throug
 ****
 
 Once we have the index where the position of the value will go, we need to put the value itself in its place. Beside the item's value, we also need to keep its 
-size. We handle that using `varint`. This is a common encoding format for integers that allow us to pack small integers with high degree of efficiency. The idea
-is that we can write an `int64_t` in far fewer bytes. In this case, the size of the page is 8192 bytes, which means that at most, we'll use two bytes to store 
-the length of an item. Varints are _really_ common in many scenarios, and https://developers.google.com/protocol-buffers/docs/encoding[read more about them] if
-you are unfamiliar with them. The API Gavran uses for working with them is shown in <<varint_api>>.
-
-[source]
-[[varint_api]]
-.`gavran/internal.h` - Variable length integers API
------
-include::../include/gavran/internal.h[tags=varint_api]
------
-
-The `varint_encode()` function return the pointer it received _after_ the write of the number they got. In other words, we write the length of the value, then we return
-from `container_add_item_to_page()` the location to write the value itself in `ptr`. 
+size. We handle that using `varint`, which we covered in the last chapter. 
 The last action of `container_add_item_to_page()` is to record the position of the item in the `positions` array and then compute the new `item_id`. 
 
 The `item_id` computation is interesting. We use the `page_num` and the `index` to generate the `item_id`. Let's dig deeper into what is going on in the last 
