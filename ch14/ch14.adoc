@@ -596,8 +596,8 @@ include::./code/hash.c[tags=hash_page_get_next]
 ----
 
 The idea in <<hash_page_get_next>> is that this is a function that is going to be called multiple times. We use the `iter_state` field in the `hash_val_t` to hold the state
-of the iteration in the page between invocations of `hash_page_get_next()`. The `iter_state` holds the position of the _next_ byte that we need to read. We make sure that it
-will always skip the header byte and we run through all the bytes used by the bucket. We continue to do so until we run out of buckets in the page. 
+of the iteration in the page between invocations of `hash_page_get_next()`. The `iter_state` holds the position of the _next_ byte that we need to read.
+We continue to do so until we run out of buckets in the page. 
 
 In <<hash_get_next>>, where we iterate over the whole hash table, you can see that we set the `iter_state` to zero when we move between pages. That ensure that we scan through
 each page from the start all the way to the end.

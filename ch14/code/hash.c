@@ -4,7 +4,7 @@
 #include <gavran/db.h>
 #include <gavran/internal.h>
 
-#define KEY_TO_BUCKET(num, depth) (num & ((1 << depth) - 1))
+#define KEY_TO_BUCKET(num, depth) (num & ((1UL << depth) - 1))
 
 // tag::hash_page_decl[]
 #define HASH_BUCKET_DATA_SIZE (63)
@@ -24,7 +24,7 @@ static_assert(sizeof(hash_bucket_t) == 64, "Bad size");
 
 // Taken from:
 // https://gist.github.com/degski/6e2069d6035ae04d5d6f64981c995ec2#file-invertible_hash_functions-hpp-L43
-static inline uint64_t hash_permute_key(uint64_t x) {
+implementation_detail uint64_t hash_permute_key(uint64_t x) {
   x = ((x >> 32) ^ x) * 0xD6E8FEB86659FD93;
   x = ((x >> 32) ^ x) * 0xD6E8FEB86659FD93;
   x = ((x >> 32) ^ x);
@@ -67,7 +67,8 @@ static bool hash_get_from_page(page_t* p, page_metadata_t* metadata,
 // end::hash_get_from_page[]
 
 // tag::hash_page_get_next[]
-static bool hash_page_get_next(page_t* p, hash_val_t* it) {
+implementation_detail bool hash_page_get_next(
+    page_t* p, hash_val_t* it) {
   hash_bucket_t* buckets = p->address;
   uint64_t idx           = it->iter_state / sizeof(hash_bucket_t);
   if (idx >= BUCKETS_IN_PAGE) {
@@ -75,10 +76,9 @@ static bool hash_page_get_next(page_t* p, hash_val_t* it) {
     return false;
   }
   uint16_t offset = it->iter_state % sizeof(hash_bucket_t);
-  if (offset == 0) offset++;  // skip the first header byte
   while (offset >= buckets[idx].bytes_used) {
     idx++;
-    offset = 1;
+    offset = 0;
     if (idx >= BUCKETS_IN_PAGE) {
       it->has_val = false;
       return false;
@@ -87,9 +87,14 @@ static bool hash_page_get_next(page_t* p, hash_val_t* it) {
   uint8_t* start = buckets[idx].data + offset;
   uint8_t* end =
       varint_decode(varint_decode(start, &it->key), &it->val);
-  it->has_val    = true;
-  it->iter_state = (uint32_t)(
-      idx * sizeof(hash_bucket_t) + offset + (size_t)(end - start));
+  it->has_val   = true;
+  uint32_t size = (uint32_t)(end - start);
+  if (size + offset == buckets[idx].bytes_used) {
+    it->iter_state = (uint32_t)((idx + 1) * sizeof(hash_bucket_t));
+  } else {
+    it->iter_state =
+        (uint32_t)(idx * sizeof(hash_bucket_t) + offset + size);
+  }
   return true;
 }
 // end::hash_page_get_next[]
@@ -204,6 +209,7 @@ static void hash_compact_buckets(
   }
   while (max_overflow--) {
     uint64_t idx = (start_idx + max_overflow) % BUCKETS_IN_PAGE;
+
     uint8_t* end = buckets[idx].data + buckets[idx].bytes_used;
     uint8_t* cur = buckets[idx].data;
     bool remove_overflow = buckets[idx].overflowed == false;
@@ -223,7 +229,8 @@ static void hash_compact_buckets(
           size);
       buckets[k_idx].bytes_used += size;
       hash_remove_in_bucket(buckets + idx, start, end, cur);
-      end -= size;
+      end -= size;  // we remove the current value and moved mem
+      cur = start;  // over it, so we need to continue from prev start
     }
     // can remove prev overflow? only if current has no overflow or
     // not part of overflow chain that may go further
@@ -301,7 +308,7 @@ static result_t hash_split_page_entries(
   ensure(txn_allocate_page(tx, &l, &l_metadata, existing->page_num));
   ensure(txn_allocate_page(tx, &r, &r_metadata, existing->page_num));
   hash_val_t it               = {0};
-  uint64_t mask               = 1 << depth;
+  uint64_t mask               = 1 << (depth - 1);
   l_metadata->hash.page_flags = page_flags_hash;
   l_metadata->hash.depth      = depth;
   memcpy(r_metadata, l_metadata, sizeof(page_metadata_t));
@@ -354,6 +361,7 @@ static result_t hash_expand_directory(
 
   memcpy(new_metadata, *dir_metadata, sizeof(page_metadata_t));
   new_metadata->hash_dir.depth++;
+  new_metadata->hash_dir.number_of_buckets *= 2;
   ensure(txn_free_page(tx, dir));
   memcpy(dir, &new, sizeof(page_t));
   *dir_metadata = new_metadata;
@@ -378,7 +386,7 @@ static result_t hash_split_page(txn_t* tx, page_t* page,
   uint64_t pages[2];
   ensure(hash_split_page_entries(
       tx, page, metadata->hash.depth + 1, pages));
-  uint32_t bit      = 1 << (metadata->hash.depth + 1);
+  uint32_t bit      = 1 << metadata->hash.depth;
   uint64_t* buckets = dir.address;
   for (size_t i = hash_permute_key(set->key) & (bit - 1);
        i < dir_metadata->hash_dir.number_of_buckets; i += bit) {
@@ -519,7 +527,7 @@ static result_t hash_merge_pages(txn_t* tx, page_t* page,
       tx, &merged, &merged_metadata, sibling_page_num));
   merged_metadata->hash.page_flags = page_flags_hash;
   merged_metadata->hash.depth =
-      MIN(metadata->hash.depth, sibling_metadata->hash.depth);
+      MIN(metadata->hash.depth, sibling_metadata->hash.depth) - 1;
   page_t sibling = {.page_num = sibling_page_num};
   ensure(txn_get_page(tx, &sibling));
   // <1>
@@ -528,7 +536,7 @@ static result_t hash_merge_pages(txn_t* tx, page_t* page,
       page, &sibling, &merged, merged_metadata, &hashed_key));
   // <2>
   uint64_t* buckets = dir->address;
-  size_t bit        = (uint64_t)1 << merged_metadata->hash.depth;
+  size_t bit        = 1UL << merged_metadata->hash.depth;
   for (size_t i = hashed_key & (bit - 1);
        i < dir_metadata->hash_dir.number_of_buckets; i += bit) {
     buckets[i] = merged.page_num;
@@ -545,7 +553,7 @@ static result_t hash_maybe_merge_pages(txn_t* tx, uint64_t index,
     page_t* page, page_metadata_t* metadata, page_t* dir,
     page_metadata_t* dir_metadata, hash_val_t* del) {
   uint64_t sibling_index =
-      index ^ ((uint64_t)1 << (metadata->hash.depth - 1));
+      index ^ (1UL << (metadata->hash.depth - 1));
   page_metadata_t* sibling_metadata;
   uint64_t* buckets = dir->address;
 
@@ -592,7 +600,8 @@ result_t hash_del(txn_t* tx, hash_val_t* del) {
   page_metadata_t* hash_metadata;
   ensure(txn_modify_page(tx, &hash_page));
   ensure(txn_modify_metadata(tx, hash_page.page_num, &hash_metadata));
-  if (!hash_remove_from_page(&p, metadata, hashed_key, del)) {
+  if (!hash_remove_from_page(
+          &hash_page, hash_metadata, hashed_key, del)) {
     return success();  // entry does not exists
   }
   metadata->hash_dir.number_of_entries--;
@@ -628,8 +637,8 @@ result_t hash_get_next(
         return success();
       }
       hash_page.page_num = buckets[index];
-      if (pagesmap_lookup(*state, &hash_page))
-        continue;  // already done with this page
+      if (pagesmap_lookup(*state, &hash_page) == false)
+        break;  // didn't see this page, yet
     } while (true);
   } while (true);
   return success();
