@@ -21,38 +21,40 @@ result_t container_create(txn_t *tx, uint64_t *container_id) {
   page_metadata_t *metadata;
   ensure(txn_allocate_page(tx, &p, &metadata, 0));
   metadata->container.page_flags = page_flags_container;
-  metadata->container.alloc_id   = 0;
   metadata->container.floor      = sizeof(uint16_t);
-  metadata->container.ceiling    = PAGE_SIZE - size;
-  metadata->container.free_space = PAGE_SIZE - size - sizeof(int16_t);
+  metadata->container.ceiling    = PAGE_SIZE;
+  metadata->container.free_space = PAGE_SIZE - sizeof(int16_t);
+
+  ensure(hash_create(tx, &metadata->container.free_list_id));
 
   *container_id = p.page_num;
   return success();
 }
 // end::container_create[]
 
-static result_t container_allocate_new_page(txn_t *tx,
-    uint64_t container_id, uint64_t previous, uint64_t *page_num) {
+static result_t container_allocate_new_page(
+    txn_t *tx, uint64_t container_id, uint64_t *page_num) {
   page_t p = {.number_of_pages = 1};
   page_metadata_t *metadata;
-  ensure(txn_allocate_page(tx, &p, &metadata, previous));
-  page_metadata_t *prev_metadata;
-  ensure(txn_modify_metadata(tx, previous, &prev_metadata));
-  assert(prev_metadata->common.page_flags == page_flags_container);
+  ensure(txn_allocate_page(tx, &p, &metadata, container_id));
   page_metadata_t *header_metadata;
   ensure(txn_modify_metadata(tx, container_id, &header_metadata));
 
-  metadata->container.page_flags = page_flags_container;
-  metadata->container.prev       = previous;
-  metadata->container.next       = prev_metadata->container.next;
-  metadata->container.floor      = 0;
-  metadata->container.ceiling    = PAGE_SIZE;
-  metadata->container.free_space = PAGE_SIZE;
-  metadata->container.next_allocation_at =
-      header_metadata->container.next_allocation_at;
-  header_metadata->container.next_allocation_at = p.page_num;
-  prev_metadata->container.next                 = p.page_num;
-  *page_num                                     = p.page_num;
+  metadata->container.page_flags  = page_flags_container;
+  metadata->container.prev        = container_id;
+  metadata->container.next        = header_metadata->container.next;
+  metadata->container.floor       = 0;
+  metadata->container.ceiling     = PAGE_SIZE;
+  metadata->container.free_space  = PAGE_SIZE;
+  header_metadata->container.next = p.page_num;
+
+  hash_val_t set = {
+      .hash_id = header_metadata->container.free_list_id,
+      .key     = p.page_num,
+      .val     = 0};
+  ensure(hash_set(tx, &set, 0));
+
+  *page_num = p.page_num;
   return success();
 }
 
@@ -112,20 +114,20 @@ static result_t container_page_can_fit_item_size(txn_t *tx,
   return success();
 }
 
-static result_t container_close_full_page_if_needed(
-    txn_t *tx, page_metadata_t *metadata, uint64_t old_previous) {
-  if (metadata->container.free_space > 256) return success();
-  // the page has < ~3% free space, and didn't fit the current
-  // value good indication tha it won't fit _new_ values, let's
-  // remove it from the allocation chain
-  if (old_previous) {
-    page_metadata_t *prev_metadata;
-    ensure(txn_modify_metadata(tx, old_previous, &prev_metadata));
-    prev_metadata->container.next_allocation_at =
-        metadata->container.next_allocation_at;
+static result_t container_remove_full_pages(
+    txn_t *tx, uint64_t container_id, pages_map_t *to_remove) {
+  if (!to_remove) return success();
+  size_t iter_state = 0;
+  page_t *p;
+  page_metadata_t *header_metadata;
+  ensure(txn_modify_metadata(tx, container_id, &header_metadata));
+  while (pagesmap_get_next(to_remove, &iter_state, &p)) {
+    hash_val_t del = {
+        .hash_id = header_metadata->container.free_list_id,
+        .key     = p->page_num};
+    ensure(hash_del(tx, &del));
+    header_metadata->container.free_list_id = del.hash_id;
   }
-  ensure(txn_modify_metadata(tx, next_alloc, &metadata));
-  metadata->container.next_allocation_at = 0;
   return success();
 }
 
@@ -135,32 +137,40 @@ static result_t container_find_small_space_to_allocate(txn_t *tx,
     uint64_t *page_num) {
   page_metadata_t *header_metadata;
   ensure(txn_get_metadata(tx, container_id, &header_metadata));
-  uint64_t next_alloc = header_metadata->container.next_allocation_at;
-  uint64_t prev_page  = 0;
-  do {
+  pages_map_t *pages;
+  ensure(pagesmap_new(8, &pages));
+  defer(free, pages);
+  pages_map_t *to_remove = 0;
+  defer(free, to_remove);
+  hash_val_t it = {
+      .hash_id = header_metadata->container.free_list_id};
+  *page_num = 0;
+  while (true) {
+    ensure(hash_get_next(tx, &pages, &it));
+    if (it.has_val == false) break;
     page_metadata_t *metadata;
-    ensure(txn_get_metadata(tx, next_alloc, &metadata));
+    ensure(txn_get_metadata(tx, it.key, &metadata));
     assert(metadata->common.page_flags == page_flags_container);
     bool has_enough_space;
     ensure(container_page_can_fit_item_size(
-        tx, next_alloc, metadata, required_size, &has_enough_space));
+        tx, it.key, metadata, required_size, &has_enough_space));
     if (has_enough_space) {
-      *page_num = page_num;
-      return success();
-    }
-    if (metadata->container.next_allocation_at == 0 ||
-        metadata->container.next_allocation_at == next_alloc ||
-        metadata->container.next_allocation_at == container_id)
+      *page_num = it.key;
       break;
-    uint64_t old_previous = prev_page;
-    prev_page             = next_alloc;
-    next_alloc            = metadata->container.next_allocation_at;
-    ensure(container_close_full_page_if_needed(
-        tx, metadata, old_previous));
-  } while (next_alloc);
-  // couldn't find enough space anywhere, need to allocate a new one
-  ensure(container_allocate_new_page(
-      tx, container_id, next_alloc, page_num));
+    }
+    if (metadata->container.free_space >= 256) continue;
+    // has less than 3% available, can remove from the list...
+    if (!to_remove) {
+      ensure(pagesmap_new(8, &to_remove));
+    }
+    page_t p = {.page_num = it.key};
+    ensure(pagesmap_put_new(&to_remove, &p));
+  }
+  ensure(container_remove_full_pages(tx, container_id, to_remove));
+  if (!*page_num) {
+    // couldn't find enough space anywhere, need to allocate a new one
+    ensure(container_allocate_new_page(tx, container_id, page_num));
+  }
   return success();
 }
 // end::container_find_small_space_to_allocate[]
@@ -284,11 +294,12 @@ static result_t container_remove_page(txn_t *tx,
     ensure(txn_modify_metadata(tx, metadata->container.prev, &next));
     prev->container.prev = metadata->container.prev;
   }
-  ensure(txn_get_metadata(tx, container_id, &header));
-  if (header->container.next_allocation_at == p->page_num) {
-    ensure(txn_modify_metadata(tx, container_id, &header));
-    header->container.next_allocation_at = metadata->container.prev;
-  }
+  ensure(txn_modify_metadata(tx, container_id, &header));
+  hash_val_t del = {
+      .hash_id = header->container.free_list_id, .key = p->page_num};
+  ensure(hash_del(tx, &del));
+  header->container.free_list_id = del.hash_id;
+
   ensure(txn_free_page(tx, p));
   return success();
 }
@@ -316,7 +327,8 @@ result_t container_item_del(txn_t *tx, container_item_t *item) {
         varint_decode(p.address + positions[index], &size) + size;
     size_t item_size = (size_t)(end - p.address - positions[index]);
     memset(p.address + positions[index], 0, item_size);
-    positions[index] = 0;
+    positions[index]        = 0;
+    uint16_t old_free_space = metadata->container.free_space;
     metadata->container.free_space +=
         (uint16_t)(item_size + sizeof(uint16_t));
 
@@ -325,14 +337,16 @@ result_t container_item_del(txn_t *tx, container_item_t *item) {
         p.page_num != item->container_id) {
       ensure(container_remove_page(
           tx, item->container_id, &p, metadata));
-    } else if (metadata->container.next_allocation_at == 0 &&
+    } else if (old_free_space <= 256 &&
                metadata->container.free_space > 512) {
       // need to wire this again to the allocation chain
       page_metadata_t *header;
       ensure(txn_modify_metadata(tx, item->container_id, &header));
-      metadata->container.next_allocation_at =
-          header->container.next_allocation_at;
-      header->container.next_allocation_at = p.page_num;
+      hash_val_t set = {.hash_id = header->container.free_list_id,
+          .key                   = p.page_num,
+          .val                   = 0};
+      ensure(hash_set(tx, &set, 0));
+      header->container.free_list_id = set.hash_id;
     }
   }
   return success();
