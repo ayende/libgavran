@@ -12,7 +12,6 @@
 #include <gavran/test.h>
 
 // tag::tests14[]
-
 describe(hash) {
   before_each() {
     errors_clear();
