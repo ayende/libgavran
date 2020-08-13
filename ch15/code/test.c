@@ -11,16 +11,13 @@
 #include <gavran/internal.h>
 #include <gavran/test.h>
 
-// tag::tests14[]
-
 // tag::remember_item[]
-static result_t remember_item(db_t* db, uint64_t container_id,
-                              char* json, uint64_t* item_id) {
+static result_t remember_item(
+    db_t* db, uint64_t container_id, char* json, uint64_t* item_id) {
   txn_t w;
   ensure(txn_create(db, TX_WRITE, &w));
   defer(txn_close, w);
-  container_item_t item = {
-      .container_id = container_id,
+  container_item_t item = {.container_id = container_id,
       .data = {.address = json, .size = strlen(json)}};
   ensure(container_item_put(&w, &item));
   *item_id = item.item_id;
@@ -29,13 +26,13 @@ static result_t remember_item(db_t* db, uint64_t container_id,
 }
 // end::remember_item[]
 
-static result_t write_items(db_t* db, uint64_t container_id,
-                            char* json) {
+// tag::tests15[]
+static result_t write_items(
+    db_t* db, uint64_t container_id, char* json) {
   txn_t w;
   ensure(txn_create(db, TX_WRITE, &w));
   defer(txn_close, w);
-  container_item_t item = {
-      .container_id = container_id,
+  container_item_t item = {.container_id = container_id,
       .data = {.address = json, .size = strlen(json)}};
   for (size_t i = 0; i < 1024; i++) {
     ensure(container_item_put(&w, &item));
@@ -45,21 +42,19 @@ static result_t write_items(db_t* db, uint64_t container_id,
   return success();
 }
 
-// tag::read_item[]
 static result_t read_item(db_t* db, uint64_t container_id,
-                          uint64_t item_id, char* expected) {
+    uint64_t item_id, char* expected) {
   txn_t r;
   ensure(txn_create(db, TX_READ, &r));
   defer(txn_close, r);
-  container_item_t item = {.container_id = container_id,
-                           .item_id = item_id};
+  container_item_t item = {
+      .container_id = container_id, .item_id = item_id};
   ensure(container_item_get(&r, &item));
   ensure(strlen(expected) == item.data.size);
   ensure(memcmp(item.data.address, expected, strlen(expected)) == 0);
 
   return success();
 }
-// end::read_item[]
 
 static result_t create_container(db_t* db, uint64_t* container_id) {
   txn_t w;
@@ -112,14 +107,13 @@ describe(containers) {
       txn_t w;
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
-      container_item_t item = {
-          .container_id = container_id,
+      container_item_t item = {.container_id = container_id,
           .data = {.address = json1, .size = strlen(json1)}};
       assert(container_item_put(&w, &item));
       item_id = item.item_id;
       bool in_place;
       item.data.address = json2;
-      item.data.size = strlen(json2);
+      item.data.size    = strlen(json2);
 
       assert(container_item_update(&w, &item, &in_place));
       assert(in_place);
@@ -148,14 +142,13 @@ describe(containers) {
       txn_t w;
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
-      container_item_t item = {
-          .container_id = container_id,
+      container_item_t item = {.container_id = container_id,
           .data = {.address = buf1, .size = strlen(buf1)}};
       assert(container_item_put(&w, &item));
       item_id = item.item_id;
       bool in_place;
       item.data.address = buf2;
-      item.data.size = strlen(buf2);
+      item.data.size    = strlen(buf2);
 
       assert(container_item_update(&w, &item, &in_place));
       assert(in_place);
@@ -178,8 +171,7 @@ describe(containers) {
       txn_t w;
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
-      container_item_t item = {
-          .container_id = container_id,
+      container_item_t item = {.container_id = container_id,
           .data = {.address = json1, .size = strlen(json1)}};
       for (size_t i = 0; i < ITEM_ARRAY_SIZE; i++) {
         assert(container_item_put(&w, &item));
@@ -194,8 +186,8 @@ describe(containers) {
       defer(txn_close, w);
       // delete to create gaps in the page
       for (size_t i = 0; i < ITEM_ARRAY_SIZE / 2; i += 2) {
-        container_item_t item = {.container_id = container_id,
-                                 .item_id = items[i]};
+        container_item_t item = {
+            .container_id = container_id, .item_id = items[i]};
         assert(container_item_del(&w, &item));
       }
       assert(txn_commit(&w));
@@ -221,7 +213,7 @@ describe(containers) {
     uint64_t container_id;
     assert(create_container(&db, &container_id));
 
-    char* buffer = "{'Hi':'There','Using':'longer json string'}";
+    char* buffer   = "{'Hi':'There','Using':'longer json string'}";
     size_t buf_len = strlen(buffer);
     assert(write_items(&db, container_id, buffer));
 
@@ -229,7 +221,7 @@ describe(containers) {
       txn_t r;
       assert(txn_create(&db, TX_READ, &r));
       defer(txn_close, r);
-      size_t count = 0;
+      size_t count         = 0;
       container_item_t cur = {.container_id = container_id};
       while (container_get_next(&r, &cur) && cur.data.address) {
         assert(buf_len == cur.data.size);
@@ -248,7 +240,7 @@ describe(containers) {
     uint64_t container_id;
     assert(create_container(&db, &container_id));
 
-    char* buffer = "{'Hi':'There','Using':'longer json string'}";
+    char* buffer   = "{'Hi':'There','Using':'longer json string'}";
     size_t buf_len = strlen(buffer);
     uint64_t i1, i2, i3;
     assert(remember_item(&db, container_id, buffer, &i1));
@@ -259,8 +251,8 @@ describe(containers) {
       txn_t w;
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
-      container_item_t item = {.container_id = container_id,
-                               .item_id = i2};
+      container_item_t item = {
+          .container_id = container_id, .item_id = i2};
       assert(container_item_del(&w, &item));
       assert(txn_commit(&w));
     }
@@ -269,7 +261,7 @@ describe(containers) {
       txn_t r;
       assert(txn_create(&db, TX_READ, &r));
       defer(txn_close, r);
-      size_t count = 0;
+      size_t count         = 0;
       container_item_t cur = {.container_id = container_id};
       while (container_get_next(&r, &cur) && cur.data.address) {
         assert(buf_len == cur.data.size);
@@ -288,7 +280,7 @@ describe(containers) {
     uint64_t container_id;
     assert(create_container(&db, &container_id));
 
-    char* buffer = "{'Hi':'There','Using':'longer json string'}";
+    char* buffer   = "{'Hi':'There','Using':'longer json string'}";
     size_t buf_len = strlen(buffer);
     assert(write_items(&db, container_id, buffer));
 
@@ -323,4 +315,4 @@ describe(containers) {
     }
   }
 }
-// end::tests13[]
+// end::tests15[]

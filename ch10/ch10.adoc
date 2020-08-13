@@ -715,3 +715,11 @@ and it took very little code (add the field, and add a check on `db_try_increase
 
 
 You can see the tests in <<test_10>>.
+
+
+[source]
+[[test_10]]
+.`test.c` - Unit testing growing the size of the database
+----
+include::./code/test.c[tags=tests10]
+----

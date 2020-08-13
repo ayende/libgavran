@@ -43,6 +43,15 @@ useful. And now, without further ado, let's get hashing, persistently.
 
 == Persistent hash table
 
+|=== 
+| Data Type    | Hash table (extendible)
+| Write cost   | O(1)
+| Lookup cost  | O(1), exact match only
+| Data type    | Key: `uint64_t`, Value: `uint64_t`
+| Maximum size | Roughly 32 TB
+| Iteration    | Arbitrary order (unrelated to key values)
+|===
+
 We already implemented a hash table in this book. The `pages_map_t` is a hash table for storing `page_t` values using the `page_num` as the key. When talking about _persistent_
 hash tables, on the other hand, we have to deal with something that is quite different. The typical manner in which hash tables are implemented in memory is to create an 
 array to hold the values. When the load factor become too high, we'll re-hash the table to a greater array.

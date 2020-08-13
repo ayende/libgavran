@@ -101,7 +101,7 @@ typedef struct container_page {
   uint16_t ceiling;
   uint64_t next;
   uint64_t prev;
-  uint64_t free_list_id;
+  uint64_t free_list;
 } container_page_t;
 // end::container_page_t[]
 

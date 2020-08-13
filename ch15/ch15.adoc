@@ -1,8 +1,19 @@
 == Raw data containers
 
-The API we have to deal with data right now in Gavran is fairly poor, in terms of what it can offer us. We have pages, and that is pretty much it. That doesn't work very well when
-we deal with arbitrary data, we need some better way to handle it. After thinking about it for quite a bit, I came up with the most minimal set of API that I could think of for 
-managing arbitrary data in Gavran, shown in <<container_api>>.
+|=== 
+| Data Type    | Container
+| Write cost   | O(1)
+| Lookup cost  | O(1), using opaque handle from write
+| Data type    | Arbitrary binary data
+| Maximum size | Unlimited
+| Iteration    | Arbitrary order (unrelated to handle value)
+|===
+
+We built a hash table in the previous chapter, which will allow us to lookup a `uint64_t` value using a `uint64_t` key. If this is all we ever want to do, that is fine, but in
+practice, we need to deal with more complex data. 
+The API we have to deal with _arbitrary data_ right now in Gavran is fairly poor, in terms of what it can offer us. We have pages, and that is pretty much it. That doesn't 
+work very  well when we deal with arbitrary data, we need some better way to handle it. After thinking about it for quite a bit, I came up with the most minimal set of API that 
+I could think of for managing arbitrary data in Gavran, shown in <<container_api>>.
 
 [source]
 [[container_api]]
@@ -12,12 +23,12 @@ include::../include/gavran/db.h[tags=container_api]
 ----
 
 The code in <<container_api>> expose two new primitives that we'll be able to make use of. There is the _Container_ and the _Container Item_. You can think about a container as 
-simply a grouping of values. Gavran makes no requirements about that. You may have a single container and dump all the items there or multiple containers. The key here is that 
-once you have a container you can place items in it. An item is simply a piece of data that is stored by Gavran. Again, we make no requirement on its shape, form or size. The
-latter is important, since it means that we'll need to support items of any size, including those that span multiple pages.
+simply a grouping of values. Gavran makes no requirements about the structure or shape of the values. You may have a single container and dump all the items there or multiple 
+containers. The key here is that once you have a container you can place items in it. An item is simply a piece of data that is stored by Gavran. Again, we make no requirement 
+on its shape, form or size. The latter is important, since it means that we'll need to support items of any size, including those that span multiple pages.
 
-Let's look at how we can use the API usage in <<remember_item>>, here we are storing a JSON string inside Gavran. The container was already previously allocated and we are creating
-a new write transaction to store the JSON to the container, returning the new item id back to the caller.
+Let's look at how we can use the API usage in <<remember_item>>, here we are storing a JSON string inside Gavran. The container was already previously allocated and we are
+creating a new write transaction to store the JSON to the container, returning the new item id back to the caller.
 
 [source]
 [[remember_item]]
@@ -27,10 +38,10 @@ include::./code/test.c[tags=remember_item]
 -----
 
 In <<remember_item>>, we can see that we simply call `container_item_put()` to add an item, and then we get an `item_id` value, which we could later use to get the item back. 
-We have a simple way to recall items, using an opaque ids. With the API and its usage in place, let's talk a bit about what kind of promises we are going to give to
+We have a simple way to recall items, using _opaque_ ids. With the API and its usage in place, let's talk a bit about what kind of promises we are going to give to
 the user.
 
-* A container is expected to be a very long lived object. It is similar to a table in a relational database. Something that you create once and use for many time afterward. 
+* A container is expected to be a very long lived object. It is similar to a table in a relational database. Something that you create once and use for many times afterward. 
 * An item id should allow us to access the item's content with `O(1)` cost.
 * The item id is going to remain stable for the life time of the item.
 
@@ -42,17 +53,20 @@ the `container_create()` function, where it all starts, in <<container_create>>.
 [[container_create]]
 .`container.c` - Creating a new container 
 -----
-include::./code/container_create.c[tags=container_create]
+include::./code/container.c[tags=container_create]
 -----
 
 The `container_create()` allocates a single page and setup its metadata, the metadata for a container page is using the `container_page_t` struct and it is shown in 
 <<container_page_t>>. This is used to manage a container and its items, as we'll shortly see.
+You can also see in <<container_page_t>> that we are starting to use Gavran to implement itself. The container has a `free_list`, to manage its free list. We'll
+discuss this in detail later on in this chapter. What is important is that this is actually a hash table, the same one that we implemented in the last chapter. 
+Things are starting to click into place, I'm very happy to say.
 
 [source]
 [[container_page_t]]
 .`gavran/db.h` - The metadata of a container page
 -----
-include::../include/gavran/db.c[tags=container_page_t]
+include::../include/gavran/db.h[tags=container_page_t]
 -----
 
 Looking at the structure in <<container_page_t>> it may not be obvious how everything plays together, so let's look <<container-page>> to see how the container
@@ -69,7 +83,7 @@ to allow for greater density. That means that we need to somehow _manage_ the it
 
 === Writing an item
 
-The idea is that when we want to write an item to the page, we'll write it to the _top_ of the page. To write an  that is 64 bytes on a page, we'll lower the
+The idea is that when we want to write an item to the page, we'll write it to the _top_ of the page. To write an item that is 64 bytes on a page, we'll lower the
 `ceiling` by 64 bytes and then write 64 bytes from the new `ceiling` position toward the old value. After writing the item, we aren't done. We need some way
 to _refer_ to the item. We could use the offset inside the page, but that has its own issues. In particular, we'll likely need to defrag the page at some point,
 which will require us to move the items around. If we use the offset in the page as the id of the item, we'll need to change the id. We want to avoid that.
@@ -80,23 +94,23 @@ the new position. The id of the item in this case is the index into this array o
 
 In other words, we place the actual value of an item on the top, growing down and we set the position of the item in the page at the bottom, growing up. A page
 is considered full when the `ceiling` and the `floor` meet. It might be easier to understand how this work if we'll look at <<container_add_item_to_page>>.
-The `container_add_item_to_page()` callers are responsible for making sure that there is enough space in the page for adding the item. 
+The caller of `container_add_item_to_page()` is responsible for making sure that there is enough space in the page for adding the item. 
 
 [source]
 [[container_add_item_to_page]]
 .`container.c` - Adding an item to a page
 -----
-include::./code/container_create.c[tags=container_add_item_to_page]
+include::./code/container.c[tags=container_add_item_to_page]
 -----
 
 In `container_add_item_to_page()` we start by getting the container page's metadata as well as the page itself ready for modifications. We then scan the bottom
-of the page looking for an empty index in the `int64_t* positions` array. If we can't find one, we'll increase the size of the `positions` array by incrementing
+of the page looking for an empty index in the `int16_t* positions` array. If we can't find one, we'll increase the size of the `positions` array by incrementing
 the `floor` field on the metadata.
 
 .Working with raw memory
 ****
 One of the things that we'll run into over and over again when implementing persistent data structures is that we give meaning to certain parts of memory
-without bother to go through any sort of structure or API. We have the raw memory of the container page, and we decide that we are going to treat the 
+without bothering to go through any sort of structure or API. We have the raw memory of the container page, and we decide that we are going to treat the 
 start of the page as an array of `int16_t`. At the same time, at the end of the page, we are working with raw bytes. 
 
 We also allow ourselves to do extend an array, which is not something that you'll typically see in C. This is because we are working at a lower level than usual.
@@ -141,7 +155,7 @@ foundation of Gavran we implemented allocation strategies for pages, these are g
 to a page, we'll allocate it in an _overflow_ page. 
 
 An overflow page is a page (or a set of pages) that are dedicated to holding a single value. They have no structure of their own and simply hold their value. We
-have actually mostly dealt with overflow pages up until this chapter, you saw them quite often in the previous code sample. Jumping forward a bit, in <<container_api>>
+have actually mostly dealt with overflow pages up until this chapter whenever we wanted to store some data. Jumping forward a bit, in <<container_api>>
 we have the `container_get_next()`. We need it to be able to iterate over all the items in a container. That is simple to do when the values are stored in the 
 container's page, but how will we deal with large values?
 
@@ -158,7 +172,7 @@ will have its own page, but we'll waste the rest of the page that is sitting emp
 [[container_item_put_large]]
 .`container.c` - Adding a large item to a container
 -----
-include::./code/container_create.c[tags=container_item_put_large]
+include::./code/container.c[tags=container_item_put_large]
 -----
 
 We allocate space directly using `txn_allocate_page()` and then register the metadata as an `page_flags_overflow`. An overflow page has two interesting fields
@@ -198,9 +212,9 @@ process works. We'll start at the top, with `container_item_put()`, shown on <<c
 [[container_item_put]]
 .`container.c` - Entry point to adding a value to a container
 -----
-include::./code/container_create.c[tags=CONTAINER_ITEM_SMALL_MAX_SIZE]
+include::./code/container.c[tags=CONTAINER_ITEM_SMALL_MAX_SIZE]
 
-include::./code/container_create.c[tags=container_item_put]
+include::./code/container.c[tags=container_item_put]
 -----
 
 If the value is large, we'll call to `container_item_put_large()` to do its work. But small values are handled differently. We call to `container_item_allocate()`
@@ -212,9 +226,9 @@ temporary buffer and then have Gavran copy it. You can see the implementation of
 [[container_item_allocate]]
 .`container.c` - Allocating space for a small item in the container
 -----
-include::./code/container_create.c[tags=container_get_total_size]
+include::./code/container.c[tags=container_get_total_size]
 
-include::./code/container_create.c[tags=container_item_allocate]
+include::./code/container.c[tags=container_item_allocate]
 -----
 
 We are already familiar with `container_add_item_to_page()` function which is called in <<container_item_allocate>>. It does the work of actually adding the
@@ -222,12 +236,355 @@ item to the page. And `container_find_small_space_to_allocate()` role is find th
 `container_get_total_size()` function, used to compute how much space a small item will take. In addition to the raw size of the item, we have 2 bytes taken
 by the `int16_t` value we use to store the position of the value as well as the encoded size of the item. 
 
+This is pretty much it in terms of writing to the container, but there is still a big topic to cover. Space allocation _inside_ the container. 
 
+=== Allocating space in the container
 
+When we want to allocate a large item (greater than 6KB), we'll simply allocate the pages for it. This is easy and simple approach to dealing with the issue.
+However, what happens when we have to deal with a smaller item? In this case, we want to place it inside a container page, the question is, _which_ container
+page. 
+A container starts out from a single page, but when it is full, we'll need to allocate more pages. And it is possible that some pages will have space while
+some won't. What makes things more complex is that an item can be of any size. If we need to find space for an item that is `768` bytes in size, we may not
+be able to find space for it in a particular page, but there is still enough space in that page to fit other, smaller values. 
+
+We handle this using the `free_list`, which is actually a hash table. In this case, we aren't using it as a table, but as a hash set. We store in the keys
+the page numbers of pages in the container that has free space available. When we need to allocate space in the container, we'll scan the hash table and 
+try to find a page that has enough space for the current item that is being added. 
+You can see how this is done on <<container_find_small_space_to_allocate>>.
+
+[source]
+[[container_find_small_space_to_allocate]]
+.`container.c` - Find a container page that has enough space to add the current item
+-----
+include::./code/container.c[tags=container_find_small_space_to_allocate]
+-----
+
+<<container_find_small_space_to_allocate>> starts by defining two `pages_map_t`. One (`pages`) is used to store the state of `hash_get_next()`, as we saw in 
+the previous chapter. The other map we use it `to_remove`, which is not initialized at this point. We then start to scan over the `free_list`, finding each
+container page in turn and checking it if is a good fit for the current item. This is done via `container_page_can_fit_item_size()`. You can check how this
+is done in <<container_page_can_fit_item_size>>. 
+
+If we have enough space, we can abort the search, do whatever cleanup is required and return. If we _can't_ find space in the page, we check if it is full. 
+We define a page as full when its free space is too small to hold an item that is 125% of the average item size in the page. You can see how we compute the
+average size of an item in a page in <<container_get_page_avg_item_size>>.
+
+[source]
+[[container_get_page_avg_item_size]]
+.`container.c` - Computing the average size of an item in a page
+-----
+include::./code/container.c[tags=container_get_page_avg_item_size]
+-----
+
+If the current page is too full to hold more entries we'll add it to the `to_remove` map and clean it after we exit the loop. 
+This is done by `container_remove_full_pages()`, which will iterate over the `to_remove` map (if it was created) in order to remove full pages from the 
+`free_list`. We have to do this in two stages because it isn't safe to iterate over the hash table while we are modifying it. 
+Finally, if we were unable to find _any_ page that would match our requirements, we'll allocate a new one using `container_allocate_new_page()`. 
+
+.What is the cost of finding an available page?
+****
+Every time that we need to insert a new (small) item to the container, we need to find a page with enough space for the item. In the worst case, we may need
+to scan through the entire free list before we'll find a good location (or allocate a new one). For this reason, we check the `avg_size` if we couldn't fit the
+current item into the page. 
+
+The idea is that we check if there is enough space there to fit _another_ value, or if we are better off remove the page from the `free_list` to avoid having
+to scan through a lot of pages.
+This way, we can assume that for the most part, we'll end up with pages in the `free_list` that has enough space for the items we want to place in the container
+and can usually assume that we'll have to through just one page before we find space for the new item.
+****
+
+Pages that don't have enough free space are added to the `to_remove` map, which is then passed to `container_remove_full_pages()` for cleanup, as you can see
+in <<container_remove_full_pages>>.
+
+[source]
+[[container_remove_full_pages]]
+.`container.c` - Remove all the pages with no free space from the `free_list`
+-----
+include::./code/container.c[tags=container_remove_full_pages]
+-----
+
+We check if `to_remove` has been initialized and if it has a value, we iterate over all the items in the map and remove them from the `free_list`. Note that the
+only impact this has is to remove them from consideration for _new_ items. These pages are going to still be part of the container, hold their data and allow
+to do modifications in place (if there is room). 
+
+We remove an item from the `free_list` if it has no available space, but what does _that_ mean? Let's look at <<container_page_can_fit_item_size>> where we 
+compute whatever a page has enough free space for our needs and see what is going on.
+
+[source]
+[[container_page_can_fit_item_size]]
+.`container.c` - Checking whatever a page is a good candidate for a particular item
+-----
+include::./code/container.c[tags=container_page_can_fit_item_size]
+-----
+
+We first check whatever the page metadata shows that we have enough space for the item. If we don't, there is nothing to be done. But even if we _have_ enough
+space in the page, it doesn't mean that it is _usable_ space. A pattern of writes and deletes may mean that we have free space in theory, but not in a manner
+that help us. 
+For that reason, we check the difference between the `floor` and `ceiling` values. If there is enough space for the item, we are done and can allocate the new
+item in the page immediately. If there isn't enough space, we'll defrag the page using `container_defrag_page()` before we check again. After calling defrag,
+we _should_ have enough space, but there are some pathologic cases that we have to take into account here. It is actually far simply to call defrag on the page
+as needed than to try to find available free spot in the page. 
+Let's look at how we implement the defrag on a page in <<container_defrag_page>>.
+
+[source]
+[[container_defrag_page]]
+.`container.c` - De-fragmenting a page to increase usable space.
+-----
+include::./code/container.c[tags=container_defrag_page]
+-----
+
+We start by scanning the `uint16_t* positions` array from the end and trying to see if there are any cleared locations on the end. That allows us to shrink the
+size of the `positions` array. We then copy the contents of the page to a temporary buffer and reset the `ceiling` on the page. From there we need to simply
+scan the list of entries in the page and copy them one at a time. For each one, we'll "lower" the `ceiling` and then update the position of the entry in the page.
+
+Note that because the item ids that we hand out are the position of the _index_ into the page, defragging the page is something that we can do without any
+externally visible change in behavior. That is really important, because otherwise we would need to call out to anyone else that may hold a reference to the `item_id`
+of any of the moved items to let them know about the change.
+
+We just went over a lot of code that try to help us use the space from our already existing pages, but eventually we'll run out of all the available space and will
+need to allocate a new page. This is shown in <<container_allocate_new_page>>.
+
+[source]
+[[container_allocate_new_page]]
+.`container.c` - Allocating a new page and wiring it to the container
+-----
+include::./code/container.c[tags=container_allocate_new_page]
+-----
+
+There are a few interesting things that happen in `container_allocate_new_page()`. We start by allocating the new page and setting up its metadata. As part of that,
+we register the newly allocate page in the linked list of container pages by adding it as the next item in the list after the root. This allows us to iterate over
+all the pages in the container and thus, over all the items. 
+
+Part of the work that `container_allocate_new_page()` is tasked with is to register the newly allocated page in the `free_list`, so it will be available the next
+time we want to allocate space for an item.
 
 === Reading an item
 
-Now that we have seen how we write an item to the container, 
+Now that we have seen how we write an item to the container, let's look at the other side, reading an item from the container. In order to do that, we need to 
+get the `item_id` and pass it to `container_item_get()`, shown in <<container_item_get>>.
 
+[source]
+[[container_item_get]]
+.`container.c` - Reading an item from the container
+-----
+include::./code/container.c[tags=container_item_get]
+-----
 
-=== Reading large
+We use the `item\->item_id` to check if this reference a small or a large item. If this is a large object, the `item_id` is divisible by `PAGE_SIZE` and we can
+simply load that page directly. If the `item_id` isn't divisible by `PAGE_SIZE`, we go to the page in question and find the actual position of the value from the `index`. 
+The actual page number and the index are computed from the `item_id`, but they should be considered opaque to the callers.
+
+.The `item_id` is an opaque value
+****
+The `item_id` is, at its core, a reference to a specific location on disk. It is essentially an offset from the start of the file that either points to the real data or 
+to another offset to find it. The fact that you know how we generate the `item_id` shouldn't mean that you can do anything with the value.
+
+The `item_id` should be treated as a black box. The only thing that you should be doing with the `item_id` is to pass it back to the `container_*` functions.
+****
+
+<<container_item_get>> also has an interesting limit, you can only use it to get items by their public `item_id`. We know that large items actually have two `item_id`. 
+The first is to point to the exact page we use for the value, but the second is just a reference to the real `item_id`, and it is stored inside the container page. Why
+are we doing this? 
+
+The idea is that a large item has two `item_id`. A public one (divisible by `PAGE_SIZE`), which is returned from the `container_item_put()` and a private one (not
+divisible by `PAGE_SIZE`), which store the reference. We use this when we need to iterate over the values, as you can see in <<container_get_next>>.
+
+[source]
+[[container_get_next]]
+.`container.c` - Iterating over the entries in the container
+-----
+include::./code/container.c[tags=container_get_next]
+-----
+
+The code in <<container_get_next>> is a bit complex, mostly because we are expected to be called many times and we need to keep state between calls. The idea is that
+we'll use the `item_id` to pass the state between calls. The code in `container_get_next()` is tied closely to `container_get_next_item_id()`, which is shown in 
+<<container_get_next_item_id>>. The idea is that in `container_get_next_item_id()` we resolve the container page that we are currently on. This can be computed as 
+simply as dividing the `item_id` by `PAGE_SIZE` for small items. But we also need to account for large items. In this case, we get the metadata of the large item 
+and then get the _private_ `item_id`, which point back to the container page holding the reference. 
+
+Using this method, we are able to iterate over the container without too much of a hassle, even when we have to deal with large items. The `container_get_next_item_id()`
+function will increment the `item_id`, because this set us up for the look in `container_get_next()`, where we are looking at the _next_ item. Inside this loop, we check
+if the current position points to a large item, in which case we get it from the actual page, or if it is a small item, we just get its size and address.
+
+Note that `varint_decode()` will return the position in the buffer _after_ the integer it decoded. That is where the real value start, which make it very convenient to 
+work with it.
+
+[source]
+[[container_get_next_item_id]]
+.`container.c` - Figuring out what page we'll scan and setting up the `item_id` to the _next_ item
+-----
+include::./code/container.c[tags=container_get_next_item_id]
+-----
+
+=== Deleting an item
+
+After writing and reading, the next task we need to tackle is how we are going to delete an item from the container. This is done using the `container_item_del()` 
+function, shown in <<container_item_del>>.
+
+[source]
+[[container_item_del]]
+.`container.c` - Deleting an item from the container
+-----
+include::./code/container.c[tags=container_item_del]
+-----
+
+To delete a large item, we get the `container_item_id` from the page metadata and delete that as well. Aside from that tidbit, the process of deleting a
+large item mostly consists of calling `txn_free_page()` on the item's `overflow` page. Things gets more interesting when we need to delete a small item. Although, 
+interesting might not be the right term. The process of actually deleting a small item consist of setting its' `positions` index to `0` and zeroing the memory for
+the item, nothing more. 
+
+The real work is done in `container_item_del_finalize()`. We need to call this function because of two reasons:
+
+* If the page is completely empty, we can simply free the page itself.
+* If the page has enough free space, we should register it in the `free_list`. 
+
+Let's see how this is handled in <<container_item_del_finalize>>.
+
+[source]
+[[container_item_del_finalize]]
+.`container.c` - Performing cleanup work after an item was deleted from the container page
+-----
+include::./code/container.c[tags=container_item_del_finalize]
+-----
+
+In `container_item_del_finalize()`, we first check if the entire page is free. If this is the case, and if this isn't the first container page, we can just drop it
+entirely. We need to remove it from the linked list and the `free_list`, which is done in `container_remove_page()`. 
+If the page isn't empty, we check if it has more than enough space for two items. If that is the case, we check if it is already in the `free_list` and if it isn't,
+we add it. 
+The idea is that in the same manner that failure to add an item to a page will remove an item from the `free_list`, a deletion will add us back. 
+
+Note that we do a little dance with the `header` value. We don't want to modify the container's metadata if we can avoid it, so we'll only call to `txn_modify_metadata()`
+on the `header` if we added the page to the hash _and_ the `hash_id` changed. 
+
+The final part of deleting an item from the container is the `container_remove_page()`, shown in <<container_remove_page>>.
+
+[source]
+[[container_remove_page]]
+.`container.c` - Removing a container page from the container
+-----
+include::./code/container.c[tags=container_remove_page]
+-----
+
+The `container_remove_page()` function will wire the `next` / `prev` references for the page. Note that while we check if the `next` is set to `0`, we don't need to 
+check if `prev` is zeroed. This is because we don't delete the first container page, and that is the only one without a `prev` page.
+
+We also remove the page from the `free_list` and have the same dance around `hash_id_changed` to avoid modifying the metadata of the header if we don't want to.
+
+So far, we covered most of the functionality of the container API, but we are left with the most complex part yet to deal with. The `container_item_update()` 
+implementation...
+
+=== Updating an item
+
+Updating an item turns out to be a pretty complex task. On the surface, this doesn't make sense, it would be trivial to implement the update in terms of del and put, 
+after all. The key issue with update is that we want, as much as possible, to retain the same `item_id`. In some cases, this is easy. If we are going to write an 
+updated value of the same size, there is not going to be any problems. We'll simply overwrite the old value, wherever it may be and the `item_id` will not change.
+
+The complexity starts to creep when we have an update that is of different size that the previous item. In most cases, the size difference when updating an item isn't
+that big. We'll typically have very slow growth or decline in the size, so it is still worth it to try to retain the same `item_id`. 
+
+[QUESTION]
+.Why is the `item_id` important across updates?
+====
+We are going to go into a lot of trouble to maintain the `item_id` if at all possible. The question that pops to mind is, why? What is the benefit that we gain from
+keeping the same `item_id` across updates?
+
+Let's consider what you'll do with the `item_id`. In most cases, you'll store it in some location. When updating the item, if the `item_id` didn't change, that means
+that we don't need to update the stored location. This may seem like nitpicking, but reducing writes is why we have `hash_id_changed` and why I'm spending time trying
+to make sure that the `item_id` remains the same. 
+
+A good discussion on the topic is in the blog post: https://eng.uber.com/postgres-to-mysql-migration/[Why Uber Engineering Switched from Postgres to MySQL]. See in 
+particular the section about write amplification. Making sure that updates don't change the `item_id` can allow us to skip significant number of cascading updates 
+and that is certainly worth it.
+====
+
+[source]
+[[container_item_update]]
+.`container.c` - Updating an existing item
+-----
+include::./code/container.c[tags=container_item_update]
+-----
+
+In <<container_item_update>>, you can see that `container_item_update()` is mostly about handling the big ticket issues. We check the `item_id` that we need to update
+and make if we have a large item, but the new size is too small to fit into a single page all on its own, we'll call to `container_item_replace()`. The same is the case
+if we had a small item but the new size is too big to fit into a container page and we need to write to an overflow page. You can see the behavior of `container_item_replace()`
+in <<container_item_replace>>.
+
+[source]
+[[container_item_replace]]
+.`container.c` - Replacing an item by deleting the old item and putting the new one
+-----
+include::./code/container.c[tags=container_item_replace]
+-----
+
+The `container_item_replace()` function doesn't do much, it will first delete the old value and then put the new one. This is the simplest possible thing that we could
+possibly do. Going back to `container_item_update()`, there are two other cases that we have to consider, a large value that is still too large to fit into a container
+page and a small value that is still small enough to fit a container page. Let's start looking at `container_item_update_large()` first in <<container_item_update_large>>.
+
+[source]
+[[container_item_update_large]]
+.`container.c` - Updating a large item (hopefully) in place
+-----
+include::./code/container.c[tags=container_item_update_large]
+-----
+
+In `container_item_update_large()`, we don't care about specific size changes. We care if the number of _pages_ was modified. If the number of pages is the same, we can
+simply modify the page, copy the value to the page and zero the remaining buffer to the end of the page. If the number of pages isn't the same, we'll need to call to
+`container_item_replace()`. In practice, this means that we'll need to modify the `item_id` in this case only when our size change cross an 8KB boundary.
+
+The handling of small items update is more complex, as you can see in <<container_item_update_small>>. 
+
+[source]
+[[container_item_update_small]]
+.`container.c` - Updating a small item in the container
+-----
+include::./code/container.c[tags=container_item_update_small]
+-----
+
+There are two scenarios that we handle in <<container_item_update_small>>. The first is when the size of the item is the same. In this case, we can simply copy it over
+the old data and call it a day. If the size is smaller, there isn't much to do either. We write the value (with the prefixed size, of course) to the old location and 
+zero the remaining bytes. The space that we aren't using has been lost, but the next defrag will take care of that. 
+
+The implementation gets interesting when we need to take care of a _larger_ size. In this case, we can't just use the existing space, let's look at 
+<<container_item_update_small_size_increase>> to see how Gavran is handling this situation.
+
+[source]
+[[container_item_update_small_size_increase]]
+.`container.c` - Find a place to put an item whose size is larger than before
+-----
+include::./code/container.c[tags=container_item_update_small_size_increase]
+-----
+
+We first check if there is enough room in the page for the new size (excluding the old size, of course). If there isn't, we can just replace the value, there is no way
+for us to keep the same `item_id`. But even if there is space in the page, this doesn't mean it is available for us. If the space between the `floor` and the `ceiling`
+isn't enough, we nee to defrag the page. If there isn't any space even after a defrag, we give up and replace the value.
+
+If there is enough space, either immediately or because of defrag, we can write the new item's data to the top of the `ceiling` and update the `positions` array 
+accordingly. The position of the value moved, in this case, but the `item_id` remained the same.
+
+=== Dropping a container
+
+The last topic I want to cover in this chapter is dropping the container. This is similar to dropping a table in a relational database. It is not an action that you do
+often, but when you do, you'll like all the resources used by the container to just go away. In this case, the resources are pages in the data file, and we'll need to 
+mark all of them as free after dropping the container. You can see how this is implemented in <<container_drop>>.
+
+[source]
+[[container_drop]]
+.`container.c` - Dropping a container (and its `free_list`) and freeing all their pages
+-----
+include::./code/container.c[tags=container_drop]
+-----
+
+We start the dropping process by calling `hash_drop()` to release any pages held by the `free_list`. We then iterate through the pages in the container, trying to find
+any large items. If we find such, we'll free their pages. After we are done with each page, we'll free it in turn. The process completes once we have gone through all of
+the pages in the container.
+
+=== Unit tests
+
+As usual, we close our chapter with a few unit tests to verify that the code we wrote actually works. You can also see the API in action in the tests, although I'm more 
+focused on verifying the results than beautiful code in the tests. 
+
+[source]
+[[tests15]]
+.`test.c` - Testing using the container to store items
+----
+include::./code/test.c[tags=tests15]
+----
