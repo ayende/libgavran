@@ -478,7 +478,7 @@ result_t container_get_next(txn_t *tx, container_item_t *item) {
       return success();
     }
     page_num      = metadata->container.next;
-    item->item_id = page_num * PAGE_SIZE;
+    item->item_id = page_num * PAGE_SIZE + 1;
   }
   memset(&item->data, 0, sizeof(span_t));
   item->item_id = 0;
