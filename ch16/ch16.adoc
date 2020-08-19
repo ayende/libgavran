@@ -1,2 +1,160 @@
 == B+Trees
 
+|=== 
+| Data Type    | B+Tree
+| Write cost   | O(logN)
+| Lookup cost  | O(logN), exact match, range queries
+| Data type    | `sorted_map<span_t, uint64_t>`
+| Maximum size | Unlimited
+| Iteration    | Sorted iteration
+|===
+
+A B+Tree is an adaptation of a binary tree to the realities of the hierarchy of storage access speed. This is probably a very strange way to phrase things, I know.
+Let's go back a step. I'm going to assume that you are familiar with https://en.wikipedia.org/wiki/Binary_search_tree[binary search trees] in this chapter. If you 
+need a refresher, the Wikipedia page on the topic is a great introduction. Common implementation of binary search trees are AVL Trees and Red/Black Trees.
+
+The key observation about binary search trees is that each time you visit a node, you cut the search space in half. That gives you the very desired property of 
+`O(log~2~N)` insert and query times. There is a problem with such trees, however. You have to do a _lot_ of pointer chasing to get to the final result. If all your 
+data is in main memory, you can usually ignore this cost (not really, but we'll pretend for a while). When your data is stored on disk, the situation is different.
+
+Consider the code is <<naive-search-tree>>, which implements a binary search on top of a file. What would be the cost of running this code? The cost is still going
+to be `O(log~2~N)`, after all.
+
+[source]
+[[naive-search-tree]]
+.A naive search tree implementation on top of FILE I/O
+----
+bool bst_find(FILE* f, char* key, uint64_t* val){
+    node_t node;
+    read_node(f, &node);
+    int res = strcmp(key, node.key);
+    if (res == 0){
+        *val = node.value;
+        return true;
+    }
+    int64_t pos = res < 0 ? node.left : node.right;
+    if(pos < 0) return false; // not found
+    fseek(f, pos, SEEK_SET);
+    return bst_find(f,key,val);
+}
+----
+
+In <<naive-search-tree>> we are doing one of the most expensive operations in terms of file I/O, small random reads. If the file in question holds 10,000 items
+we'll need to perform _fourteen_ reads from the disk. Let's talk about 
+https://www.freecodecamp.org/news/must-know-numbers-for-every-computer-engineer/[latency numbers every computer engineer must know]. This is a list of some really
+interesting numbers in terms of latency. Doing a seek on a (good) HDD takes 3 milliseconds. That means that on a hard disk, the best speed for the `bst_find()` call
+with just 10,000 items is 42 milliseconds. Even when running on SSD, you'll still have a cost of > 0.25 milliseconds running this function. That is a _lot_.
+
+I'm using a very low number of items in the tree intentionally, to show how expensive binary search tree is. When the cost of accessing some parts of the tree are not
+equal, the binary search tree costs are very high. This is were B+Trees are coming into play. Instead of having a node with just `left` and `right` pointers, we are going
+to have much bigger nodes and an array pointers to child nodes. You can see how that looks like in <<b+tree>>.
+
+[[b+tree]]
+.A B+Tree has multiple pointers from each node to its children
+image::btree.png[]
+
+The idea with B+Trees is that we don't want to use `log~2~` for each node, which is the case where we have just two pointers. The typical number of pointers in a B+Tree
+node is _hundreds_. That means that if we have 10,000 items, we don't need to do `log~2~(10,000)` but `log~256~(10,000)`. That means that instead of having to deal with
+14 disk calls, we are going to need just 2. And if we raise the amount of items?
+With 10 million items, a B+Tree with 256 pointers per node will request just 3 disk accesses. A binary search tree (just two pointers) will require 24 reads from the disk.
+
+B+Trees are _far_ more efficient in this kind of environment. Indeed, B+Trees are on of _the_ most common persistent data structure you'll find. There is a _vast_ 
+body of research on B+Trees and they have been in use for over half a century.
+
+.B+Trees and memory hierarchies
+****
+I mentioned in the beginning of this chapter that B+Trees are meant to adapt a binary search tree to the realities of memory hierarchies. In any modern computer, you'll
+find that you have roughly the following hierarchy of memory access speed:
+
+* Registers
+* L1 Cache
+* L2-L4 Cache
+* Main memory
+* Disk
+
+I'll admit that this is _still_ a simplified model. If you are running on NUMA nodes (non uniform memory access, common in multi socket machines), for example, you have
+local memory and remote memory as well. Disk is often divided into multiple layers with different access speeds as well. 
+
+In general, regardless of how you store the data, there are usually huge difference in cost vs. size vs. speed between layers. It takes a nanosecond to read a value from
+the L1 cache, but 100 nanoseconds to read the same value from RAM. It takes 16 micro seconds to read a value from SSD, on the other hand. 
+
+B+Tree works in pages, and allow us to take advantage of locality of reference. That was initially meant for reducing disk access, but it turns out that they work great
+for reducing costs in any memory hierarchy.
+****
+
+This is meant to be a practical book, not a theoretical discussion on implementation decisions. For that, read the 
+https://w6113.github.io/files/papers/btreesurvey-graefe.pdf[Modern B+Tree Techniques] paper does a great job covering the full details of the history of design and 
+implementation of B+Trees.
+I'm going to outline my approach for implementing the B+Tree for Gavran and explain what I'm doing, without going too deeply into alternatives or divergent design.
+
+We previously built an extendible hash table and we simplified our model by limiting the data structure to be `map<uint64_t, uint64_t>`. In the same manner, we are
+going to implement a B+Tree that would behave like a `sorted_map<span_t, uint64_t>`. In other words, we're going to have the API shown in <<btree_api>>.
+
+[source]
+[[btree_api]]
+.`gavran/db.h` - API for working with B+Trees in Gavran
+----
+include::../include/gavran/db.h[tags=btree_api]
+----
+
+You can see that the API is very similar to the one we have built for hash tables, but unlike hash tables, we have the notion of iteration in both forward and reverse
+directions. In addition to that, not explicitly shown in the API, we have the ability to do ordered iteration. Going through the B+Tree in key order from an arbitrary
+point.
+
+This is because the B+Tree, unlike the other data structures that we implemented, is storing the data in a sorted fashion. Let's look at the actual implementation and
+see how that works.
+
+=== Creating a B+Tree
+
+A B+Tree is composed of two types of pages, we have a _branch_ page, which points to other pages, and we have _leaf_ pages, which hold the actual value. In both cases,
+they are structured in the exact same manner, since the only value we allow in our trees are `uint64_t` and that is what we need to store in the branch pages to point
+to the leaves. As such, the process of creating a B+Tree is simple, as you can see in <<btree_create>>.
+
+[source]
+[[btree_create]]
+.`btree.c` - Creating a new B+Tree with a single leaf page 
+-----
+include::./code/container.c[tags=btree_create]
+-----
+
+There isn't much going on in `btree_create()`, is there? We simply allocate a page and setup its metadata. You can see that like the container pages, we have the notion
+of `floor` and `ceiling` values for the page. Indeed, much of the same techniques are reused between the two data structures. 
+
+=== Writing a value to a B+Tree
+
+Writing a value to a B+Tree is done using the `btree_set()` method. It accepts a `btree_val_t` which has the key and the `uint64_t` value and may optionally return the
+old value of the key. In the container, we were able to simply able to append the new value to the page wherever we had room, but in the case of the tree, we cannot do
+that. One of the key aspects of a B+Tree is that it is sorted, after all.
+
+[IMPORTANT]
+.Keys in the B+Tree
+====
+The B+Tree we will use is going to use binary data as keys. The key is of type `span_t`, so the key _data_ is just any arbitrary memory of some size. We are going to limit
+the key size to 255 bytes. It simplify our lives and there is rarely the need for larger keys. 
+
+If the keys are arbitrary data, how can we sort on them? We are going to use the `memcmp()` function as the sorting function. It means that the keys you'll generate should
+be sortable in lexical order using their raw binary value. It would be simple to provide a comparison function to the B+Tree to allow for more complex comparisons, but 
+I find that it is usually only make things more complex to the implementor and the user alike. 
+
+The fact that the keys are opaque bytes has some interesting implications on sorting when using numbers, for examples. We'll address this in detail later in this chapter.
+====
+
+The structure of a page in the a B+Tree is shown in <<btree_page>>, you can see the metadata on the left, with the ceiling and floor markers. Then we have the values.
+The bottom of the page is also used to store the indexes of the values in the page, and the positions of the _values_ in the page doesn't matter. It is stored on a first
+come, first served basis. 
+
+The order of the _positions_ on the page, on the other hand, matters greatly. If you'll look at the bottom of the page in <<btree_page>> you can see that the positions
+themselves are sorted, using the key.
+
+[[btree_page]]
+.The structure of a single B+Tree page
+image::btree_page.png[]
+
+In other words, when we need to insert a new item into a B+Tree page, we'll insert the actual value at the top of the `ceiling`, just like we do with the container pages.
+But instead of just recording the index of the value in an arbitrary location, we'll sort the `positions` array at the bottom of the page according to the sort order of 
+the key.
+
+The idea is that this means that we'll have to move far less memory, which is more efficient in general and will also play really well with our WAL format. As a reminder,
+we use a diff based WAL format, which means that the less changes we can make to a page, the less we have to write to disk.
+
+Now that we have the theory down, let's see what kind of code is required to make this happen.

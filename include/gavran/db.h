@@ -73,7 +73,18 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_hash_directory    = 5,
   page_flags_hash              = 6,
   page_flags_container         = 7,
+  page_flags_tree_leaf         = 8,
+  page_flags_tree_branch       = 9,
 } page_flags_t;
+
+typedef struct tree_page {
+  page_flags_t page_flags;
+  uint8_t padding[1];
+  uint16_t floor;
+  uint16_t ceiling;
+  uint16_t free_space;
+  uint64_t number_of_entries;
+} tree_page_t;
 
 typedef struct hash_page_directory {
   page_flags_t page_flags;
@@ -153,6 +164,7 @@ typedef struct page_metadata {
     container_page_t container;
     hash_page_t hash;
     hash_page_directory_t hash_dir;
+    tree_page_t tree;
   };
 } page_metadata_t;
 
@@ -381,3 +393,23 @@ result_t hash_del(txn_t *tx, hash_val_t *del);
 result_t hash_get_next(
     txn_t *tx, pages_map_t **state, hash_val_t *it);
 // end::hash_api[]
+
+// tag::btree_api[]
+typedef struct btree_val {
+  uint64_t tree_id;
+  span_t key;
+  uint64_t val;
+  bool has_val;
+  bool tree_id_changed;
+} btree_val_t;
+
+result_t btree_create(txn_t *tx, uint64_t *tree_id);
+result_t btree_drop(txn_t *tx, uint64_t tree_id);
+
+result_t btree_set(txn_t *tx, btree_val_t *set, btree_val_t *old);
+result_t btree_get(txn_t *tx, btree_val_t *kvp);
+result_t btree_del(txn_t *tx, btree_val_t *del);
+
+result_t btree_get_next(txn_t *tx, btree_val_t *it);
+result_t btree_get_prev(txn_t *tx, btree_val_t *it);
+// end::btree_api[]
