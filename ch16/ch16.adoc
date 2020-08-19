@@ -157,4 +157,54 @@ the key.
 The idea is that this means that we'll have to move far less memory, which is more efficient in general and will also play really well with our WAL format. As a reminder,
 we use a diff based WAL format, which means that the less changes we can make to a page, the less we have to write to disk.
 
-Now that we have the theory down, let's see what kind of code is required to make this happen.
+Now that we have the theory down, let's see what kind of code is required to make this happen. The code in <<btree_set_in_page>> shows how we can add an key and a value to
+a B+Tree page. The code in `btree_set_in_page()` makes a number of assumptions that are verified by the caller. The most important one is that the page has enough free space 
+to accommodate the new value. Let's look at the code and figure out what is going on here.
+
+[source]
+[[btree_set_in_page]]
+.`btree.c` - Adding a (sorted) entry to a page
+-----
+include::./code/container.c[tags=btree_set_in_page]
+-----
+
+In <<btree_set_in_page>> we start by calling to `btree_search_pos_in_page()`. This function does at actual search in the B+Tree page and find us the position of the key in
+the `positions` array. The key may already exists or be new, so we need a way to distinguish that. The `btree_search_pos_in_page()` will return either the position of the 
+existing key in the page or the bitwise complement (`\~` operator) of where the value _should_ be. 
+
+We compute the actual size we'll need for the item, and show what is the structure of an entry in the page. Each entry is composed of `key_size: varint`, `char key[key_size]`
+and `value: varint`. If the key already exist (the position is not a negative number) we figure out what is the size of the existing entry and place the new value in the same
+place if that is possible. If there isn't enough space, we'll zero the old value and insert it anew.
+
+If the key does _not_ exists, we need to figure out where to put it. Reversing the bitwise complement we get the proper place for the new key, but we need to make _space_ for
+that. This is why we have the `memmove()` call, we need that to allocate the space in the `positions` array to the new entry. Finally, we shift th `ceiling` down and write the
+new entry to the new position. The `positions` array is updated with the new value and we are done, a new entry exists in the page. 
+
+.Took me a _while_ to understand how this works
+****
+The first time that I run into this kind of code, I couldn't make head or tails out of it. I would recommend going over it inside the debugger, so you can observe the changes
+that are made to the page and understand how they are coming together. We wrote the `hash.debug.c` file specifically to output the structure of the hash table and it was 
+very helpful. Something similar will serve us well to understand how everything is coming together for the B+Tree.
+****
+
+The most important function in this chapter is probably `btree_search_pos_in_page()`, we'll be using that a _lot_. We just used it to find where to place the key in the 
+page and we'll be using it to search in the B+Tree constantly. If you'll run the B+Tree code under a profiler, you are very likely to find this function in your hot spots. 
+So let's look at <<btree_search_pos_in_page>> and understand what is going on there.
+
+[source]
+[[btree_search_pos_in_page]]
+.`btree.c` - Searching for the right position of a key inside a B+Tree page
+-----
+include::./code/container.c[tags=btree_search_pos_in_page]
+-----
+
+The code in <<btree_search_pos_in_page>> is simple binary search. It turns out that most binary search implementation have a bad bug in them, which you can read in 
+https://ai.googleblog.com/2006/06/extra-extra-read-all-about-it-nearly.html[Nearly All Binary Searches and Mergesorts are Broken]. 
+Our code has the fix for this, but it wouldn't matter anyway for our purposes, we are dealing with much smaller range of values. 
+
+We are doing a binary search through the page's entries. Using the `positions` array to get to the stored key and compare it to the one what was supplied to the function.
+We start at the middle of the `positions` array and we split the remaining range in half each time we find a greater or lesser value. If we find an exact match, we can 
+return the position immediately. 
+
+If we _don't_ have a match, we have to return where the value _should_ go. If the `last_match` we had was smaller than the current value, then the value needs to be on the 
+_following_ position, so we increment it. Finally, we can return the bitwise complement to the position, to indicate a missing value.
