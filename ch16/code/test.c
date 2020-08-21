@@ -56,6 +56,50 @@ describe(btree) {
     }
   }
 
+  it("set out of order") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+
+      {
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = "02", .size = 2},
+            .val                    = 2};
+        assert(btree_set(&w, &set, 0));
+      }
+      {
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = "01", .size = 2},
+            .val                    = 1};
+        assert(btree_set(&w, &set, 0));
+      }
+      {
+        btree_val_t get = {
+            .tree_id = tree_id, .key = {.address = "01", .size = 2}};
+
+        assert(btree_get(&w, &get));
+        assert(get.has_val);
+        assert(get.val == 1);
+      }
+      {
+        btree_val_t get = {
+            .tree_id = tree_id, .key = {.address = "02", .size = 2}};
+
+        assert(btree_get(&w, &get));
+        assert(get.has_val);
+        assert(get.val == 2);
+      }
+    }
+  }
+
   it("write enough to split page") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
@@ -69,7 +113,7 @@ describe(btree) {
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
 
-      for (uint32_t i = 0; i < 1024; i++) {
+      for (uint32_t i = 0; i < 10 * 1000; i++) {
         char buffer[5];
         sprintf(buffer, "%04d", i);
         btree_val_t set = {.tree_id = tree_id,
@@ -79,13 +123,16 @@ describe(btree) {
         tree_id = set.tree_id;
       }
 
-      for (uint32_t j = 0; j < 1024; j++) {
+      for (uint32_t j = 0; j < 10 * 1000; j++) {
         char buffer[5];
         sprintf(buffer, "%04d", j);
         btree_val_t get = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 4},
             .val                    = j};
         assert(btree_get(&w, &get));
+        if (!get.has_val) {
+          assert(btree_get(&w, &get));
+        }
         assert(get.has_val);
         assert(get.val == j);
       }

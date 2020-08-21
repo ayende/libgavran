@@ -46,8 +46,6 @@ static void btree_search_pos_in_page(
   // adjust position to where we _should_ be
   if (kvp->last_match > 0) {
     kvp->position++;
-  } else {
-    kvp->position = MAX(0, kvp->position - 1);
   }
   kvp->position = ~kvp->position;
 }
@@ -228,6 +226,7 @@ static result_t btree_get_leaf_page_for(txn_t* tx, btree_val_t* kvp,
   while ((*metadata)->tree.page_flags == page_flags_tree_branch) {
     btree_search_pos_in_page(p, *metadata, kvp);
     if (kvp->position < 0) kvp->position = ~kvp->position;
+    if (kvp->last_match) kvp->position--;  // went too far
     int16_t max_pos    = (*metadata)->tree.floor / sizeof(uint16_t);
     int16_t pos        = MIN(max_pos - 1, kvp->position);
     int16_t* positions = p->address;
