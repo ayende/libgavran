@@ -11,6 +11,8 @@ static result_t txn_get_number_of_pages(
     case page_flags_metadata:
     case page_flags_container:
     case page_flags_hash:
+    case page_flags_tree_branch:
+    case page_flags_tree_leaf:
       *number_of_pages = 1;
       return success();
     case page_flags_hash_directory: {

@@ -84,6 +84,7 @@ typedef struct tree_page {
   uint16_t ceiling;
   uint16_t free_space;
   uint64_t number_of_entries;
+  uint64_t parent_page;
 } tree_page_t;
 
 typedef struct hash_page_directory {
@@ -399,8 +400,11 @@ typedef struct btree_val {
   uint64_t tree_id;
   span_t key;
   uint64_t val;
+  int16_t position;
+  int8_t last_match;
   bool has_val;
   bool tree_id_changed;
+  uint8_t padding[3];
 } btree_val_t;
 
 result_t btree_create(txn_t *tx, uint64_t *tree_id);
