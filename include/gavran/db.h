@@ -405,6 +405,7 @@ typedef struct btree_val {
   bool has_val;
   bool tree_id_changed;
   uint8_t padding[3];
+  uint64_t current_page;
 } btree_val_t;
 
 result_t btree_create(txn_t *tx, uint64_t *tree_id);

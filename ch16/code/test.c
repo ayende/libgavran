@@ -113,8 +113,8 @@ describe(btree) {
       assert(txn_create(&db, TX_WRITE, &w));
       defer(txn_close, w);
 
+      char buffer[5];
       for (uint32_t i = 0; i < 10 * 1000; i++) {
-        char buffer[5];
         sprintf(buffer, "%04d", i);
         btree_val_t set = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 4},
@@ -124,7 +124,6 @@ describe(btree) {
       }
 
       for (uint32_t j = 0; j < 10 * 1000; j++) {
-        char buffer[5];
         sprintf(buffer, "%04d", j);
         btree_val_t get = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 4},
@@ -135,6 +134,75 @@ describe(btree) {
         }
         assert(get.has_val);
         assert(get.val == j);
+      }
+
+      {
+        memset(buffer, 0, 5);
+        btree_val_t it = {.tree_id = tree_id,
+            .key                   = {.address = "0000", .size = 4}};
+        assert(btree_get(&w, &it));
+        assert(it.has_val);
+        for (uint32_t j = 1; j < 10 * 1000; j++) {
+          sprintf(buffer, "%04d", j);
+          assert(btree_get_next(&w, &it));
+          assert(it.has_val);
+          assert(it.val == j);
+          assert(memcmp(it.key.address, buffer, 4) == 0);
+        }
+      }
+    }
+  }
+
+  it("scan through data") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+
+      for (uint32_t i = 0; i < 10; i++) {
+        char buffer[5];
+        sprintf(buffer, "%04d", i * 2);
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 4},
+            .val                    = i * 2};
+        assert(btree_set(&w, &set, 0));
+        tree_id = set.tree_id;
+      }
+
+      {
+        char buffer[5];
+        sprintf(buffer, "%04d", 5);
+        btree_val_t get = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 4}};
+        assert(btree_get(&w, &get));
+        assert(get.has_val == false);
+        uint64_t expected = 6;
+        for (size_t i = 0; i < 7; i++) {
+          assert(btree_get_next(&w, &get));
+          assert(get.has_val);
+          assert(get.val == expected + i * 2);
+        }
+        assert(btree_get_next(&w, &get));
+        assert(get.has_val == false);  // at end
+        get.key.address = buffer;
+        get.key.size    = 4;
+        assert(btree_get(&w, &get));
+        assert(get.has_val == false);
+        expected = 4;
+        for (size_t i = 0; i < 3; i++) {
+          assert(btree_get_prev(&w, &get));
+          assert(get.has_val);
+          assert(get.val == expected - i * 2);
+        }
+        assert(btree_get_prev(&w, &get));
+        assert(get.has_val == false);  // at start
       }
     }
   }

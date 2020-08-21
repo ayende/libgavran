@@ -253,6 +253,7 @@ result_t btree_get(txn_t* tx, btree_val_t* kvp) {
   page_t p;
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(tx, kvp, &p, &metadata));
+  kvp->current_page = p.page_num;
   if (kvp->last_match != 0) {
     kvp->has_val = false;
     return success();
@@ -263,4 +264,94 @@ result_t btree_get(txn_t* tx, btree_val_t* kvp) {
       varint_decode(start, &key_size) + key_size, &kvp->val);
   kvp->has_val = true;
   return success();
+}
+
+static uint64_t btree_get_val_at(page_t* p, uint16_t pos) {
+  uint16_t* positions = p->address;
+  uint64_t k, v;
+  uint8_t* key_start = varint_decode(p->address + positions[pos], &k);
+  varint_decode(key_start + k, &v);
+  return v;
+}
+
+static result_t btree_find_page_pos(page_t* p,
+    page_metadata_t* metadata, uint64_t page_num, uint16_t* pos) {
+  uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
+  for (uint16_t i = 0; i < max_pos; i++) {
+    uint64_t v = btree_get_val_at(p, i);
+    if (v == page_num) {
+      *pos = i;
+      return success();
+    }
+  }
+  failed(EINVAL,
+      msg("Unable to find child page reference in branch page"),
+      with(p->page_num, "%lu"), with(page_num, "%lu"));
+}
+
+static result_t btree_iterate(
+    txn_t* tx, btree_val_t* it, int8_t step) {
+  page_t p = {.page_num = it->current_page};
+  page_metadata_t* metadata;
+  ensure(txn_get_page_and_metadata(tx, &p, &metadata));
+
+  while (true) {
+    assert(metadata->tree.page_flags == page_flags_tree_leaf);
+    uint16_t* positions = p.address;
+    uint16_t max_pos    = metadata->tree.floor / sizeof(uint16_t);
+    if (it->position < 0) {
+      it->position = ~it->position;
+      // we are moving to previous, but we were on greater than search
+      if (step < 0) it->position--;
+    } else {
+      it->position += step;
+    }
+    if (it->position >= 0 &&  // still same page
+        it->position < max_pos) {
+      it->key.address = varint_decode(
+          p.address + positions[it->position], &it->key.size);
+      varint_decode(it->key.address + it->key.size, &it->val);
+      it->has_val = true;
+      return success();
+    }
+    while (true) {
+      if (metadata->tree.parent_page == 0) {
+        it->has_val = false;
+        return success();  // done
+      }
+      uint64_t cur_page = p.page_num;
+      p.page_num        = metadata->tree.parent_page;
+      ensure(txn_get_page_and_metadata(tx, &p, &metadata));
+      assert(metadata->tree.page_flags == page_flags_tree_branch);
+      max_pos = metadata->tree.floor / sizeof(uint16_t);
+      uint16_t cur_pos;
+      ensure(btree_find_page_pos(&p, metadata, cur_page, &cur_pos));
+      cur_pos += step;  // may underflow, handled via max_pos check
+      if (cur_pos >= max_pos) break;  // go up...
+      p.page_num = btree_get_val_at(&p, cur_pos);
+      ensure(txn_get_page_and_metadata(tx, &p, &metadata));
+      // go down all branches
+      while (metadata->tree.page_flags == page_flags_tree_branch) {
+        uint16_t edge_pos = step > 0 ? 0 : (max_pos - 1);
+        p.page_num        = btree_get_val_at(&p, edge_pos);
+        ensure(txn_get_page_and_metadata(tx, &p, &metadata));
+        max_pos = metadata->tree.floor / sizeof(uint16_t);
+      }
+      if (step > 0) {
+        it->position = ~0;
+      } else {
+        it->position =
+            ~(int16_t)(metadata->tree.floor / sizeof(uint16_t));
+      }
+      it->current_page = p.page_num;
+      break;
+    }
+  }
+}
+
+result_t btree_get_next(txn_t* tx, btree_val_t* it) {
+  return btree_iterate(tx, it, 1);
+}
+result_t btree_get_prev(txn_t* tx, btree_val_t* it) {
+  return btree_iterate(tx, it, -1);
 }
