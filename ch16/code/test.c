@@ -137,14 +137,85 @@ describe(btree) {
       }
 
       {
+        // assert(btree_dump_tree(&w, tree_id));
         memset(buffer, 0, 5);
-        btree_val_t it = {.tree_id = tree_id,
-            .key                   = {.address = "0000", .size = 4}};
-        assert(btree_get(&w, &it));
-        assert(it.has_val);
+        btree_cursor_t it = {.tree_id = tree_id,
+            .tx                       = &w,
+            .key = {.address = "0000", .size = 4}};
+        assert(btree_cursor_search(&it));
         for (uint32_t j = 1; j < 10 * 1000; j++) {
           sprintf(buffer, "%04d", j);
-          assert(btree_get_next(&w, &it));
+          assert(btree_get_next(&it));
+          assert(it.has_val);
+          assert(it.val == j);
+          assert(memcmp(it.key.address, buffer, 4) == 0);
+        }
+      }
+    }
+  }
+
+  it("read, write, del") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+
+      char buffer[6];
+      for (uint32_t i = 0; i < 10 * 1000; i++) {
+        sprintf(buffer, "%05d", i * 2);
+
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 5},
+            .val                    = i * 2};
+
+        assert(btree_set(&w, &set, 0));
+        tree_id = set.tree_id;
+      }
+      for (uint32_t i = 0; i < 10 * 1000; i++) {
+        sprintf(buffer, "%05d", i * 2 + 1);
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 5},
+            .val                    = i * 2 + 1};
+
+        assert(btree_set(&w, &set, 0));
+        tree_id = set.tree_id;
+      }
+
+      for (uint32_t j = 5000; j < 15 * 1000; j++) {
+        sprintf(buffer, "%05d", j);
+        btree_val_t del = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 5},
+            .val                    = j};
+        assert(btree_del(&w, &del));
+        assert(del.has_val);
+        assert(del.val == j);
+      }
+
+      {
+        btree_cursor_t it = {// start of everything
+            .tree_id = tree_id,
+            .tx      = &w,
+            .key     = {.address = 0, .size = 0}};
+        assert(btree_cursor_search(&it));
+        assert(it.has_val == false);
+        for (uint32_t j = 0; j < 5 * 1000; j++) {
+          sprintf(buffer, "%04d", j);
+          assert(btree_get_next(&it));
+          assert(it.has_val);
+          assert(it.val == j);
+          assert(memcmp(it.key.address, buffer, 4) == 0);
+        }
+
+        for (uint32_t j = 15 * 1000; j < 20 * 1000; j++) {
+          sprintf(buffer, "%04d", j);
+          assert(btree_get_next(&it));
           assert(it.has_val);
           assert(it.val == j);
           assert(memcmp(it.key.address, buffer, 4) == 0);
@@ -179,30 +250,30 @@ describe(btree) {
       {
         char buffer[5];
         sprintf(buffer, "%04d", 5);
-        btree_val_t get = {.tree_id = tree_id,
-            .key                    = {.address = buffer, .size = 4}};
-        assert(btree_get(&w, &get));
-        assert(get.has_val == false);
+        btree_cursor_t c = {.tree_id = tree_id,
+            .tx                      = &w,
+            .key = {.address = buffer, .size = 4}};
+        assert(btree_cursor_search(&c));
         uint64_t expected = 6;
         for (size_t i = 0; i < 7; i++) {
-          assert(btree_get_next(&w, &get));
-          assert(get.has_val);
-          assert(get.val == expected + i * 2);
+          assert(btree_get_next(&c));
+          assert(c.has_val);
+          assert(c.val == expected + i * 2);
         }
-        assert(btree_get_next(&w, &get));
-        assert(get.has_val == false);  // at end
-        get.key.address = buffer;
-        get.key.size    = 4;
-        assert(btree_get(&w, &get));
-        assert(get.has_val == false);
+        assert(btree_get_next(&c));
+        assert(c.has_val == false);  // at end
+        c.key.address = buffer;
+        c.key.size    = 4;
+        assert(btree_cursor_search(&c));
+        assert(c.has_val == false);
         expected = 4;
         for (size_t i = 0; i < 3; i++) {
-          assert(btree_get_prev(&w, &get));
-          assert(get.has_val);
-          assert(get.val == expected - i * 2);
+          assert(btree_get_prev(&c));
+          assert(c.has_val);
+          assert(c.val == expected - i * 2);
         }
-        assert(btree_get_prev(&w, &get));
-        assert(get.has_val == false);  // at start
+        assert(btree_get_prev(&c));
+        assert(c.has_val == false);  // at start
       }
     }
   }

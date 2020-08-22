@@ -83,8 +83,6 @@ typedef struct tree_page {
   uint16_t floor;
   uint16_t ceiling;
   uint16_t free_space;
-  uint64_t number_of_entries;
-  uint64_t parent_page;
 } tree_page_t;
 
 typedef struct hash_page_directory {
@@ -271,6 +269,13 @@ typedef struct cleanup_callback {
 } cleanup_callback_t;
 // end::cleanup_callback_t[]
 
+typedef struct btree_stack {
+  uint64_t *pages;
+  int16_t *positions;
+  uint32_t size;
+  uint32_t index;  // one based indexer
+} btree_stack_t;
+
 // tag::txn_state_t[]
 typedef struct txn_state {
   uint64_t tx_id;
@@ -284,6 +289,7 @@ typedef struct txn_state {
   txn_state_t *next_tx;
   void *shipped_wal_record;
   uint64_t can_free_after_tx_id;
+  btree_stack_t tmp_stack;
   uint32_t usages;
   db_flags_t flags;
 } txn_state_t;
@@ -405,7 +411,6 @@ typedef struct btree_val {
   bool has_val;
   bool tree_id_changed;
   uint8_t padding[3];
-  uint64_t current_page;
 } btree_val_t;
 
 result_t btree_create(txn_t *tx, uint64_t *tree_id);
@@ -415,6 +420,21 @@ result_t btree_set(txn_t *tx, btree_val_t *set, btree_val_t *old);
 result_t btree_get(txn_t *tx, btree_val_t *kvp);
 result_t btree_del(txn_t *tx, btree_val_t *del);
 
-result_t btree_get_next(txn_t *tx, btree_val_t *it);
-result_t btree_get_prev(txn_t *tx, btree_val_t *it);
+typedef struct btree_cursor {
+  txn_t *tx;
+  uint64_t tree_id;
+  btree_stack_t stack;
+  span_t key;
+  uint64_t val;
+  bool has_val;
+  uint8_t padding[7];
+} btree_cursor_t;
+
+result_t btree_cursor_at_start(btree_cursor_t *cursor);
+result_t btree_cursor_at_end(btree_cursor_t *cursor);
+result_t btree_cursor_search(btree_cursor_t *cursor);
+result_t btree_get_next(btree_cursor_t *cursor);
+result_t btree_get_prev(btree_cursor_t *cursor);
+result_t btree_free_cursor(btree_cursor_t *cursor);
+enable_defer(btree_free_cursor);
 // end::btree_api[]

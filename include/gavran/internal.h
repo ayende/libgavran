@@ -102,3 +102,21 @@ implementation_detail bool hash_page_get_next(
 implementation_detail result_t print_hash_table(
     FILE *f, txn_t *tx, uint64_t hash_id);
 implementation_detail uint64_t hash_permute_key(uint64_t x);
+
+void btree_stack_clear(btree_stack_t *s);
+
+result_t btree_stack_push(
+    btree_stack_t *s, uint64_t page_num, int16_t pos);
+
+result_t btree_stack_pop(
+    btree_stack_t *s, uint64_t *page_num, int16_t *pos);
+
+result_t btree_stack_peek(
+    btree_stack_t *s, uint64_t *page_num, int16_t *pos);
+
+result_t btree_stack_free(btree_stack_t *s);
+
+enable_defer(btree_stack_free);
+
+implementation_detail result_t btree_dump_tree(
+    txn_t *tx, uint64_t tree_id);
