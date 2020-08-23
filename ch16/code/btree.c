@@ -4,6 +4,13 @@
 #include <gavran/db.h>
 #include <gavran/internal.h>
 
+static result_t btree_validate_key(span_t* key) {
+  ensure(key->size > 0);
+  ensure(key->size <= 512);
+  ensure(key->address, msg("Key cannot have a NULL address"));
+  return success();
+}
+
 result_t btree_create(txn_t* tx, uint64_t* tree_id) {
   page_t p = {.number_of_pages = 1};
   page_metadata_t* metadata;
@@ -107,10 +114,11 @@ static result_t btree_defrag(page_t* p, page_metadata_t* metadata) {
     uint16_t cur_pos = positions[i];
     uint8_t* end     = varint_decode(
         varint_decode(tmp + cur_pos, &size) + size, &size);
-    positions[i] = (uint16_t)(end - (tmp + cur_pos));
-    metadata->tree.ceiling -= positions[i];
+    uint16_t entry_size = (uint16_t)(end - (tmp + cur_pos));
+    metadata->tree.ceiling -= entry_size;
+    positions[i] = metadata->tree.ceiling;
     memcpy(p->address + metadata->tree.ceiling, tmp + cur_pos,
-        (size_t)(end - (tmp + cur_pos)));
+        entry_size);
   }
   return success();
 }
@@ -178,6 +186,11 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
       o_metadata->tree.ceiling -= entry_size;
       memcpy(other.address + o_metadata->tree.ceiling,
           p->address + positions[idx], entry_size);
+      if (ref.key.address == 0) {  // first item in new page
+        ref.key.address = other.address + o_metadata->tree.ceiling +
+                          varint_get_length(size);
+        ref.key.size = size;
+      }
       o_positions[o_idx] = o_metadata->tree.ceiling;
       o_metadata->tree.floor += sizeof(uint16_t);
       o_metadata->tree.free_space -= sizeof(uint16_t) + entry_size;
@@ -189,7 +202,6 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
     metadata->tree.floor -=
         (max_pos - (max_pos / 2)) * sizeof(uint16_t);
   }
-
   page_t parent;
   page_metadata_t* p_metadata;
   ensure(btree_stack_pop(stack, &parent.page_num, &ref.position));
@@ -276,6 +288,7 @@ result_t btree_drop(txn_t* tx, uint64_t tree_id) {
 }
 
 result_t btree_set(txn_t* tx, btree_val_t* set, btree_val_t* old) {
+  assert(btree_validate_key(&set->key));
   page_t p;
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(tx, set, &p, &metadata));
@@ -284,6 +297,7 @@ result_t btree_set(txn_t* tx, btree_val_t* set, btree_val_t* old) {
 }
 
 result_t btree_get(txn_t* tx, btree_val_t* kvp) {
+  assert(btree_validate_key(&kvp->key));
   page_t p;
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(tx, kvp, &p, &metadata));
@@ -307,8 +321,49 @@ static uint64_t btree_get_val_at(page_t* p, uint16_t pos) {
   return v;
 }
 
+static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
+  page_t p = {.page_num = c->tree_id};
+  page_metadata_t* metadata;
+  ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
+  assert(metadata->common.page_flags == page_flags_tree_branch ||
+         metadata->common.page_flags == page_flags_tree_leaf);
+  btree_stack_clear(&c->tx->state->tmp_stack);
+  int16_t pos = 0;
+  while (metadata->tree.page_flags == page_flags_tree_branch) {
+    uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
+    pos              = start ? 0 : (int16_t)max_pos - 1;
+    ensure(
+        btree_stack_push(&c->tx->state->tmp_stack, p.page_num, pos));
+    uint16_t* positions = p.address;
+    size_t key_size;
+    uint8_t* entry     = p.address + positions[pos];
+    uint8_t* val_start = varint_decode(entry, &key_size) + key_size;
+    varint_decode(val_start, &p.page_num);
+    ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
+  }
+  assert(metadata->tree.page_flags == page_flags_tree_leaf);
+  int16_t leaf_max_pos = metadata->tree.floor / sizeof(uint16_t);
+  ensure(btree_stack_push(&c->tx->state->tmp_stack, p.page_num,
+      ~(start ? 0 : leaf_max_pos)));
+
+  memcpy(&c->stack, &c->tx->state->tmp_stack, sizeof(btree_stack_t));
+  memset(&c->tx->state->tmp_stack, 0, sizeof(btree_stack_t));
+
+  return success();
+}
+
+result_t btree_cursor_at_start(btree_cursor_t* cursor) {
+  return btree_cursor_at(cursor, true);
+}
+result_t btree_cursor_at_end(btree_cursor_t* cursor) {
+  return btree_cursor_at(cursor, false);
+}
+
 result_t btree_cursor_search(btree_cursor_t* c) {
+  assert(btree_validate_key(&c->key));
   btree_val_t kvp = {.key = c->key, .tree_id = c->tree_id};
+  // handle cursor reuse for multiple queries
+  ensure(btree_free_cursor(c));
   page_t p;
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(c->tx, &kvp, &p, &metadata));
@@ -416,13 +471,13 @@ static void btree_copy_entries(page_t* src,
   uint16_t max_pos    = src_metadata->tree.floor / sizeof(uint16_t);
   uint16_t* positions = src->address;
   for (uint16_t i = 0; i < max_pos; i++) {
-    btree_val_t ent;
+    btree_val_t ent = {0};
     ent.key.address =
         varint_decode(src->address + positions[i], &ent.key.size);
-    varint_decode(ent.key.address + ent.key.size, &ent.val);
+    void* end =
+        varint_decode(ent.key.address + ent.key.size, &ent.val);
     uint16_t req_size =
-        (uint16_t)(varint_get_length(ent.key.size) + ent.key.size +
-                   varint_get_length(ent.val));
+        (uint16_t)(end - (src->address + positions[i]));
     btree_search_pos_in_page(dst, dst_metadata, &ent);
     btree_write_in_page(dst, dst_metadata, req_size, &ent, 0);
   }
@@ -461,10 +516,10 @@ static result_t btree_maybe_merge_pages(
   ensure(txn_modify_page(tx, &parent));
   ensure(txn_modify_metadata(tx, parent.page_num, &parent_metadata));
 
-  uint32_t joint_free_space =
-      metadata->tree.free_space + sibling_metadata->tree.free_space;
+  uint32_t used_space = (PAGE_SIZE * 2) - metadata->tree.free_space +
+                        sibling_metadata->tree.free_space;
   // not enough free space to be worth the merge
-  if (joint_free_space > (PAGE_SIZE / 4) * 3) return success();
+  if (used_space > (PAGE_SIZE / 4) * 3) return success();
 
   page_t joined = {.number_of_pages = 1};
   page_metadata_t* j_metadata;
@@ -506,6 +561,7 @@ static result_t btree_maybe_merge_pages(
 }
 
 result_t btree_del(txn_t* tx, btree_val_t* del) {
+  assert(btree_validate_key(&del->key));
   page_t p;
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(tx, del, &p, &metadata));

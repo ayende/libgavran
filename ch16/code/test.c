@@ -137,12 +137,12 @@ describe(btree) {
       }
 
       {
-        // assert(btree_dump_tree(&w, tree_id));
         memset(buffer, 0, 5);
         btree_cursor_t it = {.tree_id = tree_id,
             .tx                       = &w,
             .key = {.address = "0000", .size = 4}};
         assert(btree_cursor_search(&it));
+        defer(btree_free_cursor, it);
         for (uint32_t j = 1; j < 10 * 1000; j++) {
           sprintf(buffer, "%04d", j);
           assert(btree_get_next(&it));
@@ -174,10 +174,10 @@ describe(btree) {
         btree_val_t set = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 5},
             .val                    = i * 2};
-
         assert(btree_set(&w, &set, 0));
         tree_id = set.tree_id;
       }
+
       for (uint32_t i = 0; i < 10 * 1000; i++) {
         sprintf(buffer, "%05d", i * 2 + 1);
         btree_val_t set = {.tree_id = tree_id,
@@ -187,12 +187,12 @@ describe(btree) {
         assert(btree_set(&w, &set, 0));
         tree_id = set.tree_id;
       }
-
       for (uint32_t j = 5000; j < 15 * 1000; j++) {
         sprintf(buffer, "%05d", j);
         btree_val_t del = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 5},
             .val                    = j};
+
         assert(btree_del(&w, &del));
         assert(del.has_val);
         assert(del.val == j);
@@ -201,16 +201,15 @@ describe(btree) {
       {
         btree_cursor_t it = {// start of everything
             .tree_id = tree_id,
-            .tx      = &w,
-            .key     = {.address = 0, .size = 0}};
-        assert(btree_cursor_search(&it));
-        assert(it.has_val == false);
+            .tx      = &w};
+        assert(btree_cursor_at_start(&it));
+        defer(btree_free_cursor, it);
         for (uint32_t j = 0; j < 5 * 1000; j++) {
-          sprintf(buffer, "%04d", j);
+          sprintf(buffer, "%05d", j);
           assert(btree_get_next(&it));
           assert(it.has_val);
           assert(it.val == j);
-          assert(memcmp(it.key.address, buffer, 4) == 0);
+          assert(memcmp(it.key.address, buffer, 5) == 0);
         }
 
         for (uint32_t j = 15 * 1000; j < 20 * 1000; j++) {
@@ -254,6 +253,7 @@ describe(btree) {
             .tx                      = &w,
             .key = {.address = buffer, .size = 4}};
         assert(btree_cursor_search(&c));
+        defer(btree_free_cursor, c);
         uint64_t expected = 6;
         for (size_t i = 0; i < 7; i++) {
           assert(btree_get_next(&c));

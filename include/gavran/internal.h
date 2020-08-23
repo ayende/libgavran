@@ -120,3 +120,6 @@ enable_defer(btree_stack_free);
 
 implementation_detail result_t btree_dump_tree(
     txn_t *tx, uint64_t tree_id);
+
+implementation_detail void btree_dump_page(
+    page_t *p, page_metadata_t *metadata);
