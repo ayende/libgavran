@@ -558,7 +558,7 @@ result_t txn_close(txn_t *tx) {
     db->active_write_tx = 0;
   }
   txn_clear_working_set(tx);
-  ensure(btree_stack_free(&tx->state->tmp_stack));
+  op_result_t *res = btree_stack_free(&tx->state->tmp_stack);
   // end::working_set_txn_close[]
   if (!(tx->state->flags & TX_COMMITED)) {  // rollback
     // <1>
@@ -577,7 +577,7 @@ result_t txn_close(txn_t *tx) {
     }
     txn_free_single_tx_state(tx->state);
     tx->state = 0;
-    return success();
+    return res;
   }
   if (!db->transactions_to_free && tx->state != db->default_read_tx)
     db->transactions_to_free = tx->state;
@@ -587,7 +587,7 @@ result_t txn_close(txn_t *tx) {
   }
 
   tx->state = 0;
-  return success();
+  return res;
 }
 // end::txn_close[]
 
