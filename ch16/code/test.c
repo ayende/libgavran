@@ -185,8 +185,13 @@ describe(btree) {
             .val                    = i * 2 + 1};
 
         assert(btree_set(&w, &set, 0));
+        btree_val_t get = {
+            .tree_id = tree_id, {.address = buffer, .size = 5}};
+        assert(btree_get(&w, &get));
+        assert(get.has_val);
         tree_id = set.tree_id;
       }
+
       for (uint32_t j = 5000; j < 15 * 1000; j++) {
         sprintf(buffer, "%05d", j);
         btree_val_t del = {.tree_id = tree_id,
@@ -275,6 +280,57 @@ describe(btree) {
         assert(btree_get_prev(&c));
         assert(c.has_val == false);  // at start
       }
+    }
+  }
+
+  it("work with deep trees") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+
+    const int size = 2048;
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+
+      for (uint32_t i = 0; i < size; i++) {
+        char buffer[256];
+        sprintf(buffer, "%0255d", i);
+        btree_val_t set = {.tree_id = tree_id,
+            .key = {.address = buffer, .size = 255},
+            .val = i};
+
+        assert(btree_set(&w, &set, 0));
+
+        tree_id = set.tree_id;
+      }
+      assert(txn_commit(&w));
+    }
+    {
+      txn_t r;
+      assert(txn_create(&db, TX_READ, &r));
+      defer(txn_close, r);
+
+      uint32_t cur = size - 1;
+      char buffer[256];
+      btree_cursor_t c = {.tree_id = tree_id, .tx = &r};
+      assert(btree_cursor_at_end(&c));
+      defer(btree_free_cursor, c);
+      uint32_t count = 0;
+      while (true) {
+        assert(btree_get_prev(&c));
+        if (c.has_val == false) break;
+        count++;
+        assert(c.val == cur);
+        sprintf(buffer, "%0255d", cur--);
+        assert(memcmp(buffer, c.key.address, c.key.size) == 0);
+      }
+      assert(count == size);
     }
   }
 }

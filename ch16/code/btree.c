@@ -32,6 +32,7 @@ static void btree_search_pos_in_page(
   int16_t high = max_pos - 1, low = 0;
   uint16_t* positions = p->address;
   kvp->position       = 0;  // to handle empty pages (after split)
+  kvp->last_match     = 0;
   while (low <= high) {
     kvp->position = (low + high) >> 1;
     uint64_t ks;
@@ -150,28 +151,31 @@ static result_t btree_create_root_page(
   ensure(btree_stack_push(&tx->state->tmp_stack, root.page_num, 0));
   return success();
 }
+static uint64_t btree_get_val_at(page_t* p, uint16_t pos);
 
 static result_t btree_split_page(txn_t* tx, page_t* p,
-    page_metadata_t* metadata, btree_val_t* set) {
+    page_metadata_t** metadata, btree_val_t* set) {
   btree_stack_t* stack = &tx->state->tmp_stack;
   if (stack->index == 0) {  // at root
     ensure(btree_create_root_page(tx, p, set));
   }
-
-  page_t other = {.number_of_pages = 1};
+  page_metadata_t* cur_metadata = *metadata;
+  page_t other                  = {.number_of_pages = 1};
   page_metadata_t* o_metadata;
   ensure(txn_allocate_page(tx, &other, &o_metadata, p->page_num));
-  o_metadata->tree.page_flags = metadata->tree.page_flags;
+  o_metadata->tree.page_flags = cur_metadata->tree.page_flags;
   o_metadata->tree.ceiling    = PAGE_SIZE;
   o_metadata->tree.free_space = PAGE_SIZE;
 
-  uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
+  uint16_t max_pos = cur_metadata->tree.floor / sizeof(uint16_t);
   bool seq_write_up =
       max_pos == (uint16_t)(~set->position) && set->last_match > 0;
   bool seq_write_down = set->position == 0 && set->last_match < 0;
   btree_val_t ref = {.tree_id = set->tree_id, .val = other.page_num};
   if (seq_write_down || seq_write_up) {  // optimization: no split req
     ref.key = set->key;
+    memcpy(p, &other, sizeof(page_t));
+    *metadata = o_metadata;
   } else {
     uint16_t* positions   = p->address;
     uint16_t* o_positions = other.address;
@@ -195,12 +199,17 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
       o_metadata->tree.floor += sizeof(uint16_t);
       o_metadata->tree.free_space -= sizeof(uint16_t) + entry_size;
       memset(p->address + positions[idx], 0, entry_size);
-      metadata->tree.free_space += sizeof(uint16_t) + entry_size;
+      cur_metadata->tree.free_space += sizeof(uint16_t) + entry_size;
     }
     memset(positions + (max_pos / 2), 0,
         (max_pos - (max_pos / 2)) * sizeof(uint16_t));
-    metadata->tree.floor -=
+    cur_metadata->tree.floor -=
         (max_pos - (max_pos / 2)) * sizeof(uint16_t);
+    if (memcmp(ref.key.address, set->key.address,
+            MIN(set->key.size, ref.key.size)) < 0) {
+      memcpy(p, &other, sizeof(page_t));
+      *metadata = o_metadata;
+    }
   }
   page_t parent;
   page_metadata_t* p_metadata;
@@ -208,6 +217,10 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
   ensure(txn_get_page_and_metadata(tx, &parent, &p_metadata));
   btree_search_pos_in_page(&parent, p_metadata, &ref);
   ensure(btree_set_in_page(tx, parent.page_num, &ref, 0));
+  if (ref.tree_id_changed) {
+    set->tree_id_changed = true;
+    set->tree_id         = ref.tree_id;
+  }
   return success();
 }
 
@@ -219,19 +232,21 @@ static result_t btree_set_in_page(txn_t* tx, uint64_t page_num,
   ensure(txn_modify_metadata(tx, page_num, &metadata));
   size_t req_size = varint_get_length(set->key.size) + set->key.size +
                     varint_get_length(set->val);
-  if (req_size + sizeof(uint16_t) > metadata->tree.free_space) {
-    ensure(btree_split_page(tx, &p, metadata, set));
-    return btree_set(tx, set, old);  // now try again
-  }
-  if (req_size + sizeof(uint16_t) >
+  if (req_size + sizeof(uint16_t) >  // not enough space?
       (metadata->tree.ceiling - metadata->tree.floor)) {
-    ensure(btree_defrag(&p, metadata));  // let's see if this helps
+    if (req_size + sizeof(uint16_t) < metadata->tree.free_space) {
+      // there should be enough _space_, let's defrag
+      ensure(btree_defrag(&p, metadata));  // let's see if this helps
+    }
+    // check again...
     if (req_size + sizeof(uint16_t) >
         (metadata->tree.ceiling - metadata->tree.floor)) {
-      ensure(btree_split_page(tx, &p, metadata, set));
-      return btree_set(tx, set, old);  // now try again
+      ensure(btree_split_page(tx, &p, &metadata, set));
+      // need to adjust position after the changes...
+      btree_search_pos_in_page(&p, metadata, set);
     }
   }
+
   btree_write_in_page(&p, metadata, (uint16_t)req_size, set, old);
   return success();
 }
@@ -264,8 +279,6 @@ static result_t btree_get_leaf_page_for(txn_t* tx, btree_val_t* kvp,
   btree_search_pos_in_page(p, *metadata, kvp);
   return success();
 }
-
-static uint64_t btree_get_val_at(page_t* p, uint16_t pos);
 
 static result_t btree_free_page_recursive(
     txn_t* tx, uint64_t page_num) {
@@ -410,19 +423,21 @@ static result_t btree_iterate(btree_cursor_t* c, int8_t step) {
       ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
       assert(metadata->tree.page_flags == page_flags_tree_branch);
       max_pos = metadata->tree.floor / sizeof(uint16_t);
-      pos += step;  // may underflow, handled via max_pos check
-      if (pos >= max_pos) {
-        break;  // go up...
+      pos += step;
+      if (pos < 0 || pos >= max_pos) {
+        continue;  // go up...
       }
       ensure(btree_stack_push(&c->stack, p.page_num, pos));
       p.page_num = btree_get_val_at(&p, (uint16_t)pos);
       ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
       // go down all branches
       while (metadata->tree.page_flags == page_flags_tree_branch) {
+        max_pos           = metadata->tree.floor / sizeof(uint16_t);
         uint16_t edge_pos = step > 0 ? 0 : (max_pos - 1);
-        p.page_num        = btree_get_val_at(&p, edge_pos);
+        ensure(btree_stack_push(
+            &c->stack, p.page_num, (int16_t)edge_pos));
+        p.page_num = btree_get_val_at(&p, edge_pos);
         ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
-        max_pos = metadata->tree.floor / sizeof(uint16_t);
       }
       if (step > 0) {
         pos = ~0;

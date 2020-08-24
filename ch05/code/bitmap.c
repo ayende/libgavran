@@ -10,7 +10,7 @@ static bool bitmap_finalize_match(bitmap_search_state_t *search) {
         search->internal.previous_set_bit + 1;
     search->output.space_available_at_position =
         (search->internal.current_set_bit -
-         search->output.found_position);
+            search->output.found_position);
     return true;
   }
   return false;
@@ -47,7 +47,7 @@ static bool bitmap_search_word(bitmap_search_state_t *search) {
           search->internal.previous_set_bit + 1;
       search->output.space_available_at_position =
           (search->internal.current_set_bit -
-           search->output.found_position);
+              search->output.found_position);
       search->internal.previous_set_bit =
           search->internal.current_set_bit;
       return true;
@@ -105,34 +105,34 @@ static bool bitmap_search_once(bitmap_search_state_t *search) {
 #define MAX_SEARCH_DISTANCE 64
 static bool bitmap_search_smallest_nearby(
     bitmap_search_state_t *search) {
-  uint64_t current_pos = 0;
+  uint64_t current_pos  = 0;
   uint64_t current_size = ULONG_MAX;
 
   // the bigger the request range, the less we care about locality
   size_t boundary =
       (search->input.near_position + MAX_SEARCH_DISTANCE +
-       search->input.space_required);
+          search->input.space_required);
   while (bitmap_search_once(search)) {
     if (search->input.space_required ==
         search->output.space_available_at_position)
       return true;  // perfect match!
     if (current_size > search->output.space_available_at_position) {
       current_size = search->output.space_available_at_position;
-      current_pos = search->output.found_position;
+      current_pos  = search->output.found_position;
     }
     if (search->input.near_position &&
         search->output.found_position > boundary) {
       // We have gone too far? Stop being choosy
       if (current_size < search->output.space_available_at_position) {
         search->output.space_available_at_position = current_size;
-        search->output.found_position = current_pos;
+        search->output.found_position              = current_pos;
       }
       return true;
     }
   }
 
   search->output.space_available_at_position = current_size;
-  search->output.found_position = current_pos;
+  search->output.found_position              = current_pos;
 
   return current_size != ULONG_MAX;
 }
@@ -144,30 +144,31 @@ bool bitmap_search(bitmap_search_state_t *search) {
       search->input.near_position / 64 >= search->input.bitmap_size)
     return false;
 
-  search->internal.current_word = search->input.bitmap[0];
+  search->internal.current_word     = search->input.bitmap[0];
   search->internal.previous_set_bit = ULONG_MAX;
 
-  size_t high = search->input.near_position / 64;
+  search->internal.search_offset = search->input.near_position / 64;
 
-  void *old_bitmap = search->input.bitmap;
+  void *old_bitmap  = search->input.bitmap;
   uint64_t old_size = search->input.bitmap_size;
 
-  search->input.bitmap += high;
-  search->input.bitmap_size -= high;
+  search->input.bitmap += search->internal.search_offset;
+  search->input.bitmap_size -= search->internal.search_offset;
+  search->internal.search_offset *= 64;  //  pages instead of words
 
   if (bitmap_search_smallest_nearby(search)) {
-    search->output.found_position += high * 64;
+    search->output.found_position += search->internal.search_offset;
     return true;
   }
-  if (!high) {
+  if (!search->internal.search_offset) {
     return false;  // already scanned it all
   }
 
-  search->input.bitmap = old_bitmap;
-  search->input.bitmap_size =
-      MIN(old_size, high + search->input.space_required);
+  search->input.bitmap      = old_bitmap;
+  search->input.bitmap_size = MIN(old_size,
+      search->internal.search_offset + search->input.space_required);
 
-  // we search _high_, couldn't find anything, maybe lower?
+  // we search _after_, couldn't find anything, maybe before?
   return bitmap_search_once(search);
 }
 // end::bitmap_search[]

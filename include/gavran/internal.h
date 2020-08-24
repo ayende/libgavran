@@ -70,6 +70,7 @@ typedef struct bitmap_search_state {
     uint64_t current_word;
     uint64_t current_set_bit;
     uint64_t previous_set_bit;
+    size_t search_offset;
   } internal;
 
 } bitmap_search_state_t;

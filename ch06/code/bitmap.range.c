@@ -3,7 +3,8 @@
 // tag::bitmap_is_acceptable_small_match[]
 static bool bitmap_is_acceptable_small_match(
     bitmap_search_state_t *s) {
-  if (!(s->output.found_position & ~PAGES_IN_METADATA_MASK)) {
+  uint64_t pos = s->output.found_position + s->internal.search_offset;
+  if (!(pos & ~PAGES_IN_METADATA_MASK)) {
     // cannot use, falls on metadata page, try to shift it
     s->output.found_position++;
     s->output.space_available_at_position--;
@@ -11,23 +12,20 @@ static bool bitmap_is_acceptable_small_match(
     return (s->input.space_required >=
             s->output.space_available_at_position);
   }
-  uint64_t start = s->output.found_position & PAGES_IN_METADATA_MASK;
+  uint64_t start = pos & PAGES_IN_METADATA_MASK;
   uint64_t end =
-      (s->output.found_position + s->input.space_required - 1) &
-      PAGES_IN_METADATA_MASK;
+      (pos + s->input.space_required - 1) & PAGES_IN_METADATA_MASK;
   if (start == end)  // on the same MB, nothing to do
     return true;
   // past the next metadata page
   uint64_t new_start = start + PAGES_IN_METADATA + 1;
   if (new_start + s->input.space_required >
-      s->output.found_position +
-          s->output.space_available_at_position) {
+      pos + s->output.space_available_at_position) {
     // not enough space to shift things
     return false;
   }
-  s->output.space_available_at_position -=
-      (new_start - s->output.found_position);
-  s->output.found_position = new_start;
+  s->output.space_available_at_position -= (new_start - pos);
+  s->output.found_position = new_start - s->internal.search_offset;
   return true;
 }
 // end::bitmap_is_acceptable_small_match[]
@@ -50,7 +48,7 @@ implementation_detail bool bitmap_is_acceptable_match(
 
   uint64_t new_end =
       ((s->output.found_position + s->input.space_required) &
-       PAGES_IN_METADATA_MASK) +
+          PAGES_IN_METADATA_MASK) +
       PAGES_IN_METADATA;
   if (new_end > s->output.found_position +
                     s->output.space_available_at_position) {
