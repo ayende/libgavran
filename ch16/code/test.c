@@ -332,6 +332,24 @@ describe(btree) {
       }
       assert(count == size);
     }
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+
+      for (uint32_t i = 0; i < size; i++) {
+        char buffer[256];
+        sprintf(buffer, "%0255d", i);
+        btree_val_t del = {.tree_id = tree_id,
+            .key = {.address = buffer, .size = 255}};
+
+        assert(btree_del(&w, &del));
+        assert(del.has_val);
+        assert(del.val == i);
+      }
+      assert(txn_commit(&w));
+    }
   }
 }
 // end::tests16[]
