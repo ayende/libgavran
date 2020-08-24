@@ -465,7 +465,7 @@ result_t btree_free_cursor(btree_cursor_t* cursor) {
   return btree_stack_free(&cursor->stack);
 }
 
-static void btree_remove_entry(
+static uint64_t btree_remove_entry(
     page_t* p, page_metadata_t* metadata, uint16_t pos) {
   uint16_t* positions = p->address;
   uint64_t ks, v;
@@ -478,6 +478,7 @@ static void btree_remove_entry(
   positions[metadata->tree.floor / sizeof(uint16_t)] = 0;
   metadata->tree.free_space +=
       sizeof(uint16_t) + (uint16_t)(end - start);
+  return v;
 }
 
 static void btree_copy_entries(page_t* src,
@@ -585,7 +586,10 @@ result_t btree_del(txn_t* tx, btree_val_t* del) {
     return success();
   }
   del->has_val = true;
-  btree_remove_entry(&p, metadata, (uint16_t)del->position);
+  ensure(txn_modify_metadata(tx, p.page_num, &metadata));
+  ensure(txn_modify_page(tx, &p));
+  del->val =
+      btree_remove_entry(&p, metadata, (uint16_t)del->position);
   ensure(btree_maybe_merge_pages(tx, &p, metadata));
   return success();
 }
