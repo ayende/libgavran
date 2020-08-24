@@ -17,8 +17,8 @@ The key observation about binary search trees is that each time you visit a node
 `O(log~2~N)` insert and query times. There is a problem with such trees, however. You have to do a _lot_ of pointer chasing to get to the final result. If all your 
 data is in main memory, you can usually ignore this cost (not really, but we'll pretend for a while). When your data is stored on disk, the situation is different.
 
-Consider the code is <<naive-search-tree>>, which implements a binary search on top of a file. What would be the cost of running this code? The cost is still going
-to be `O(log~2~N)`, after all.
+Consider the code is <<naive-search-tree>>, which implements a binary search on top of a file. What would be the cost of running this code? The complexity is still
+going to be `O(log~2~N)`, after all, but what would be the _cost_?
 
 [source]
 [[naive-search-tree]]
@@ -54,8 +54,8 @@ to have much bigger nodes and an array pointers to child nodes. You can see how 
 image::btree.png[]
 
 The idea with B+Trees is that we don't want to use `log~2~` for each node, which is the case where we have just two pointers. The typical number of pointers in a B+Tree
-node is _hundreds_. That means that if we have 10,000 items, we don't need to do `log~2~(10,000)` but `log~256~(10,000)`. That means that instead of having to deal with
-14 disk calls, we are going to need just 2. And if we raise the amount of items?
+node is in the _hundreds_. That means that if we have 10,000 items, we don't need to do `log~2~(10,000)` but `log~256~(10,000)`. That means that instead of having 
+to deal with 14 disk calls, we are going to need just 2. And if we raise the amount of items?
 With 10 million items, a B+Tree with 256 pointers per node will request just 3 disk accesses. A binary search tree (just two pointers) will require 24 reads from the disk.
 
 B+Trees are _far_ more efficient in this kind of environment. Indeed, B+Trees are on of _the_ most common persistent data structure you'll find. There is a _vast_ 
@@ -76,10 +76,15 @@ I'll admit that this is _still_ a simplified model. If you are running on NUMA n
 local memory and remote memory as well. Disk is often divided into multiple layers with different access speeds as well. 
 
 In general, regardless of how you store the data, there are usually huge difference in cost vs. size vs. speed between layers. It takes a nanosecond to read a value from
-the L1 cache, but 100 nanoseconds to read the same value from RAM. It takes 16 micro seconds to read a value from SSD, on the other hand. 
+the L1 cache, but 100 nanoseconds to read the same value from RAM. It takes 16 micro seconds to read a value from SSD, and far longer from an HDD. In general, the bigger
+the storage, you can assume that the more expensive it is. And the economic realities means that you are going to have to deal with memory hierarchies. 
 
-B+Tree works in pages, and allow us to take advantage of locality of reference. That was initially meant for reducing disk access, but it turns out that they work great
-for reducing costs in any memory hierarchy.
+You _can_ get machines with many TB of RAM, mind you. That still doesn't mean that you can ignore the memory hierarchy. I looked at AWS and found `u-24tb1.metal`, which is
+a bare metal server with 24 TB of RAM. This has 8 cores, so you have separate NUMA nodes to take into account. It has 448 cores running `Intel Xeon 8280L`. These chips has
+1.75MB of L1 cache, 28MB L2 cache and 38.5 MB L3 cache. Even in this case, you have to juggle the memory hierarchy and the different latencies between them. 
+
+B+Tree works in pages which allows us to take advantage of locality of reference. That was initially meant for reducing disk access, but it turns out that they work great
+for reducing costs in any memory hierarchy. A good discussion on the topic is also on the https://queue.acm.org/detail.cfm?id=1814327[You Are Doing It Wrong] paper. 
 ****
 
 This is meant to be a practical book, not a theoretical discussion on implementation decisions. For that, read the 
@@ -97,14 +102,22 @@ going to implement a B+Tree that would behave like a `sorted_map<span_t, uint64_
 include::../include/gavran/db.h[tags=btree_api]
 ----
 
-You can see that the API is very similar to the one we have built for hash tables, but unlike hash tables, we have the notion of iteration in both forward and reverse
-directions. In addition to that, not explicitly shown in the API, we have the ability to do ordered iteration. Going through the B+Tree in key order from an arbitrary
-point.
-
+You can see that the API is very similar to the one we have built for hash tables. Unlike hash tables, with just `hash_val_t`, B+Tree we'll `btree_val_t` for reading,
+writing and deleting items from tree and `btree_cursor_t` to forward and backward iteration on the tree. That can happen from the beginning or end of the tree or from
+any given point. 
+ 
 This is because the B+Tree, unlike the other data structures that we implemented, is storing the data in a sorted fashion. Let's look at the actual implementation and
 see how that works.
 
 === Creating a B+Tree
+
+.B+Trees can be complex beasts
+****
+In terms of line of code, the B+Tree implementation in Gavran is on par with the Extendible Hash Table and the Containers we previous looked at. In terms of complexity,
+however, I find the B+Tree code to be far more complex.
+
+Conceptually, the idea of a B+Tree is fairly simple and obvious, but a key issue with 
+****
 
 A B+Tree is composed of two types of pages, we have a _branch_ page, which points to other pages, and we have _leaf_ pages, which hold the actual value. In both cases,
 they are structured in the exact same manner, since the only value we allow in our trees are `uint64_t` and that is what we need to store in the branch pages to point
