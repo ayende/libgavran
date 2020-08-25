@@ -587,8 +587,8 @@ static result_t btree_remove_from_parent(txn_t* tx, page_t* parent,
   return success();
 }
 
-static result_t btree_maybe_merge_pages(
-    txn_t* tx, page_t* p, page_metadata_t* metadata) {
+static result_t btree_maybe_merge_pages(txn_t* tx, page_t* p,
+    page_metadata_t* metadata, btree_val_t* del) {
   // if page is over 2/3 full, we'll do nothing
   if (metadata->tree.free_space < (PAGE_SIZE / 3) * 2)
     return success();
@@ -642,6 +642,10 @@ static result_t btree_maybe_merge_pages(
   }
   btree_search_pos_in_page(&parent, parent_metadata, &ref);
   ensure(btree_set_in_page(tx, parent.page_num, &ref, 0));
+  if (ref.tree_id_changed) {
+    del->tree_id_changed = true;
+    del->tree_id         = ref.tree_id;
+  }
   return success();
 }
 
@@ -659,6 +663,6 @@ result_t btree_del(txn_t* tx, btree_val_t* del) {
   ensure(txn_modify_page(tx, &p));
   del->val =
       btree_remove_entry(&p, metadata, (uint16_t)del->position);
-  ensure(btree_maybe_merge_pages(tx, &p, metadata));
+  ensure(btree_maybe_merge_pages(tx, &p, metadata, del));
   return success();
 }
