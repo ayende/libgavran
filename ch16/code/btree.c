@@ -152,20 +152,30 @@ static result_t btree_create_root_page(
 
   set->tree_id_changed = true;
   set->tree_id         = root.page_num;
-  uint64_t key_size;
-  uint8_t* key_start =
-      varint_decode(p->address + *(uint16_t*)p->address, &key_size);
-  btree_val_t ref = {.val = p->page_num,
-      .key                = {.address = key_start, .size = key_size},
+  btree_val_t ref      = {.val = p->page_num,
+      .key                = {.address = 0, .size = 0},
       .position           = ~0};  // new entry
-  size_t req_size = varint_get_length(ref.key.size) + ref.key.size +
-                    varint_get_length(ref.val);
+  size_t req_size = varint_get_length(0) + varint_get_length(ref.val);
   btree_write_in_page(
       &root, root_metadata, (uint16_t)req_size, &ref, 0);
   ensure(btree_stack_push(&tx->state->tmp_stack, root.page_num, 0));
   return success();
 }
 static uint64_t btree_get_val_at(page_t* p, uint16_t pos);
+
+static result_t btree_get_at(page_t* p, page_metadata_t* metadata,
+    uint16_t pos, span_t* key, span_t* entry) {
+  uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
+  ensure(pos < max_pos, msg("pos out of range"), with(pos, "%d"),
+      with(max_pos, "%d"));
+  uint64_t val;
+  uint16_t* positions = p->address;
+  entry->address      = p->address + positions[pos];
+  key->address        = varint_decode(entry->address, &key->size);
+  void* end           = varint_decode(key->address + key->size, &val);
+  entry->size         = (size_t)(end - entry->address);
+  return success();
+}
 
 static result_t btree_get_leftmost_key(txn_t* tx, page_t* p,
     page_metadata_t* metadata, span_t* leftmost_key) {
@@ -174,8 +184,56 @@ static result_t btree_get_leftmost_key(txn_t* tx, page_t* p,
     ensure(txn_get_page_and_metadata(tx, p, &metadata));
   }
   span_t entry;
-  ensure(btree_get_at(p, metadata, 0, leftmost_key, &entry);
+  ensure(btree_get_at(p, metadata, 0, leftmost_key, &entry));
   return success();
+}
+
+static page_metadata_t* btree_split_page_in_half(page_t* p,
+    page_metadata_t* metadata, page_t* other,
+    page_metadata_t* o_metadata, btree_val_t* ref, btree_val_t* set,
+    uint16_t max_pos) {
+  uint16_t* positions   = p->address;
+  uint16_t* o_positions = other->address;
+  for (size_t idx = max_pos / 2, o_idx = 0; idx < max_pos;
+       idx++, o_idx++) {
+    uint64_t size, val_size;
+    uint8_t* key_start =
+        varint_decode(p->address + positions[idx], &size);
+    void* end = varint_decode(key_start + size, &val_size);
+    uint16_t entry_size =
+        (uint16_t)(end - (p->address + positions[idx]));
+    o_metadata->tree.ceiling -= entry_size;
+    memcpy(other->address + o_metadata->tree.ceiling,
+        p->address + positions[idx], entry_size);
+    if (ref->key.address == 0) {  // first item in new page
+      ref->key.address = other->address + o_metadata->tree.ceiling +
+                         varint_get_length(size);
+      ref->key.size = size;
+    }
+    o_positions[o_idx] = o_metadata->tree.ceiling;
+    o_metadata->tree.floor += sizeof(uint16_t);
+    o_metadata->tree.free_space -= sizeof(uint16_t) + entry_size;
+    memset(p->address + positions[idx], 0, entry_size);
+    metadata->tree.free_space += sizeof(uint16_t) + entry_size;
+  }
+  memset(positions + (max_pos / 2), 0,
+      (max_pos - (max_pos / 2)) * sizeof(uint16_t));
+  metadata->tree.floor -=
+      (max_pos - (max_pos / 2)) * sizeof(uint16_t);
+  if (memcmp(ref->key.address, set->key.address,
+          MIN(set->key.size, ref->key.size)) < 0) {
+    memcpy(p, other, sizeof(page_t));
+    return o_metadata;
+  }
+  return metadata;
+}
+
+static void btree_init_metadata(
+    page_metadata_t* m, page_flags_t page_flags) {
+  m->tree.page_flags = page_flags;
+  m->tree.floor      = 0;
+  m->tree.ceiling    = PAGE_SIZE;
+  m->tree.free_space = PAGE_SIZE;
 }
 
 static result_t btree_split_page(txn_t* tx, page_t* p,
@@ -184,70 +242,35 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
   if (stack->index == 0) {  // at root
     ensure(btree_create_root_page(tx, p, set));
   }
-  page_metadata_t* cur_metadata = *metadata;
-  page_t cur_page               = *p;
-  page_t other                  = {.number_of_pages = 1};
+  page_t other = {.number_of_pages = 1};
   page_metadata_t* o_metadata;
   ensure(txn_allocate_page(tx, &other, &o_metadata, p->page_num));
-  o_metadata->tree.page_flags = cur_metadata->tree.page_flags;
-  o_metadata->tree.ceiling    = PAGE_SIZE;
-  o_metadata->tree.free_space = PAGE_SIZE;
+  btree_init_metadata(o_metadata, (*metadata)->tree.page_flags);
 
-  uint16_t max_pos = cur_metadata->tree.floor / sizeof(uint16_t);
+  uint16_t max_pos = (*metadata)->tree.floor / sizeof(uint16_t);
   bool seq_write_up =
       max_pos == (uint16_t)(~set->position) && set->last_match > 0;
   bool seq_write_down = (~set->position == 0) && set->last_match < 0;
   btree_val_t ref = {.tree_id = set->tree_id, .val = other.page_num};
-  if (seq_write_up || seq_write_down) {  // optimization: no split req
+  if (seq_write_up) {  // optimization: no split req
     ref.key = set->key;
     memcpy(p, &other, sizeof(page_t));
     *metadata = o_metadata;
+  } else if (seq_write_down) {
+    memcpy(other.address, p->address, PAGE_SIZE);
+    memset(p->address, 0, PAGE_SIZE);
+    memcpy(o_metadata, (*metadata), sizeof(page_metadata_t));
+    btree_init_metadata((*metadata), o_metadata->tree.page_flags);
+    ensure(btree_get_leftmost_key(tx, &other, o_metadata, &ref.key));
   } else {
-    uint16_t* positions   = p->address;
-    uint16_t* o_positions = other.address;
-    for (size_t idx = max_pos / 2, o_idx = 0; idx < max_pos;
-         idx++, o_idx++) {
-      uint64_t size, val_size;
-      uint8_t* key_start =
-          varint_decode(p->address + positions[idx], &size);
-      void* end = varint_decode(key_start + size, &val_size);
-      uint16_t entry_size =
-          (uint16_t)(end - (p->address + positions[idx]));
-      o_metadata->tree.ceiling -= entry_size;
-      memcpy(other.address + o_metadata->tree.ceiling,
-          p->address + positions[idx], entry_size);
-      if (ref.key.address == 0) {  // first item in new page
-        ref.key.address = other.address + o_metadata->tree.ceiling +
-                          varint_get_length(size);
-        ref.key.size = size;
-      }
-      o_positions[o_idx] = o_metadata->tree.ceiling;
-      o_metadata->tree.floor += sizeof(uint16_t);
-      o_metadata->tree.free_space -= sizeof(uint16_t) + entry_size;
-      memset(p->address + positions[idx], 0, entry_size);
-      cur_metadata->tree.free_space += sizeof(uint16_t) + entry_size;
-    }
-    memset(positions + (max_pos / 2), 0,
-        (max_pos - (max_pos / 2)) * sizeof(uint16_t));
-    cur_metadata->tree.floor -=
-        (max_pos - (max_pos / 2)) * sizeof(uint16_t);
-    if (memcmp(ref.key.address, set->key.address,
-            MIN(set->key.size, ref.key.size)) < 0) {
-      memcpy(p, &other, sizeof(page_t));
-      *metadata = o_metadata;
-    }
+    *metadata = btree_split_page_in_half(
+        p, *metadata, &other, o_metadata, &ref, set, max_pos);
   }
   page_t parent;
   page_metadata_t* p_metadata;
   ensure(btree_stack_pop(stack, &parent.page_num, &ref.position));
   ensure(txn_get_page_and_metadata(tx, &parent, &p_metadata));
   btree_search_pos_in_page(&parent, p_metadata, &ref);
-  assert(~ref.position > 0 && ref.position < 0);
-  if (~ref.position == 1) {
-    span_t leftmost_key;
-    ensure(btree_get_leftmost_key(
-        tx, &cur_page, cur_metadata, &leftmost_key));
-  }
   ensure(btree_set_in_page(tx, parent.page_num, &ref, 0));
   if (ref.tree_id_changed) {
     set->tree_id_changed = true;
@@ -539,20 +562,6 @@ static result_t btree_find_best_sibling_to_merge(txn_t* tx,
     *sibling_pos = (uint16_t)(cur_pos - 1);
   else
     *sibling_pos = (uint16_t)(cur_pos + 1);
-  return success();
-}
-
-static result_t btree_get_at(page_t* p, page_metadata_t* metadata,
-    uint16_t pos, span_t* key, span_t* entry) {
-  uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
-  ensure(pos < max_pos, msg("pos out of range"), with(pos, "%d"),
-      with(max_pos, "%d"));
-  uint64_t val;
-  uint16_t* positions = p->address;
-  entry->address      = p->address + positions[pos];
-  key->address        = varint_decode(entry->address, &key->size);
-  void* end           = varint_decode(key->address + key->size, &val);
-  entry->size         = (size_t)(end - entry->address);
   return success();
 }
 

@@ -46,10 +46,6 @@ describe(btree) {
         btree_val_t set = {.tree_id = tree_id,
             .key                    = {.address = buffer, .size = 4},
             .val                    = (uint64_t)i};
-        if (i <= 228) {
-          assert(btree_dump_tree(&w, tree_id));
-          printf("a");
-        }
         assert(btree_set(&w, &set, 0));
         tree_id = set.tree_id;
       }
