@@ -419,7 +419,9 @@ result_t btree_drop(txn_t *tx, uint64_t tree_id);
 result_t btree_set(txn_t *tx, btree_val_t *set, btree_val_t *old);
 result_t btree_get(txn_t *tx, btree_val_t *kvp);
 result_t btree_del(txn_t *tx, btree_val_t *del);
+// end::btree_api[]
 
+// tag::btree_cursor_api[]
 typedef struct btree_cursor {
   txn_t *tx;
   uint64_t tree_id;
@@ -437,4 +439,4 @@ result_t btree_get_next(btree_cursor_t *cursor);
 result_t btree_get_prev(btree_cursor_t *cursor);
 result_t btree_free_cursor(btree_cursor_t *cursor);
 enable_defer(btree_free_cursor);
-// end::btree_api[]
+// end::btree_cursor_api[]

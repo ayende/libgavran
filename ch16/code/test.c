@@ -28,6 +28,51 @@ describe(btree) {
     system("rm -f /tmp/db/*");
   }
 
+  it("set out of order") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+      char buffer[5];
+      for (int i = 2048 - 1; i >= 0; i--) {
+        sprintf(buffer, "%04d", i);
+        btree_val_t set = {.tree_id = tree_id,
+            .key                    = {.address = buffer, .size = 4},
+            .val                    = (uint64_t)i};
+        if (i <= 228) {
+          assert(btree_dump_tree(&w, tree_id));
+          printf("a");
+        }
+        assert(btree_set(&w, &set, 0));
+        tree_id = set.tree_id;
+      }
+
+      {
+        memset(buffer, 0, 5);
+        btree_cursor_t it = {
+            .tree_id = tree_id,
+            .tx      = &w,
+        };
+        assert(btree_cursor_at_start(&it));
+        defer(btree_free_cursor, it);
+        for (uint32_t j = 0; j < 2048; j++) {
+          sprintf(buffer, "%04d", j);
+          assert(btree_get_next(&it));
+          assert(it.has_val);
+          assert(it.val == j);
+          assert(memcmp(it.key.address, buffer, 4) == 0);
+        }
+      }
+    }
+  }
+
   it("work with deep trees") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
@@ -127,50 +172,6 @@ describe(btree) {
       assert(btree_get(&w, &get));
       assert(get.has_val);
       assert(get.val == 5);
-    }
-  }
-
-  it("set out of order") {
-    db_t db;
-    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
-    assert(db_create("/tmp/db/try", &options, &db));
-    defer(db_close, db);
-    uint64_t tree_id;
-    assert(create_btree(&db, &tree_id));
-
-    {
-      txn_t w;
-      assert(txn_create(&db, TX_WRITE, &w));
-      defer(txn_close, w);
-
-      {
-        btree_val_t set = {.tree_id = tree_id,
-            .key                    = {.address = "02", .size = 2},
-            .val                    = 2};
-        assert(btree_set(&w, &set, 0));
-      }
-      {
-        btree_val_t set = {.tree_id = tree_id,
-            .key                    = {.address = "01", .size = 2},
-            .val                    = 1};
-        assert(btree_set(&w, &set, 0));
-      }
-      {
-        btree_val_t get = {
-            .tree_id = tree_id, .key = {.address = "01", .size = 2}};
-
-        assert(btree_get(&w, &get));
-        assert(get.has_val);
-        assert(get.val == 1);
-      }
-      {
-        btree_val_t get = {
-            .tree_id = tree_id, .key = {.address = "02", .size = 2}};
-
-        assert(btree_get(&w, &get));
-        assert(get.has_val);
-        assert(get.val == 2);
-      }
     }
   }
 

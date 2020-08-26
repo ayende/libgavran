@@ -22,8 +22,8 @@ implementation_detail void btree_dump_page(
     uint8_t* key_start =
         varint_decode(p->address + positions[i], &key_size);
     varint_decode(key_start + key_size, &val);
-    printf("%d)\t %.*s -> %lu\n", i, (int32_t)key_size - 245,
-        key_start + 245, val);
+    printf(
+        "%d)\t %.*s -> %lu\n", i, (int32_t)key_size, key_start, val);
   }
 }
 

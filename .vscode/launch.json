@@ -31,7 +31,7 @@
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },
       "args": [
-        "allocation_tests"
+        "btree"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
