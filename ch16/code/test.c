@@ -256,18 +256,21 @@ describe(btree) {
             .val                    = i * 2 + 1};
 
         assert(btree_set(&w, &set, 0));
+        tree_id = set.tree_id;
+
         btree_val_t get = {
             .tree_id = tree_id, {.address = buffer, .size = 5}};
         assert(btree_get(&w, &get));
         assert(get.has_val);
-        tree_id = set.tree_id;
+        assert(get.val == set.val);
       }
 
       for (uint32_t j = 5000; j < 15 * 1000; j++) {
         sprintf(buffer, "%05d", j);
-        btree_val_t del = {.tree_id = tree_id,
-            .key                    = {.address = buffer, .size = 5},
-            .val                    = j};
+        btree_val_t del = {
+            .tree_id = tree_id,
+            .key     = {.address = buffer, .size = 5},
+        };
         assert(btree_del(&w, &del));
         assert(del.has_val);
         assert(del.val == j);

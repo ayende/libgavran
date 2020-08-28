@@ -269,12 +269,14 @@ typedef struct cleanup_callback {
 } cleanup_callback_t;
 // end::cleanup_callback_t[]
 
+// tag::btree_stack_t[]
 typedef struct btree_stack {
   uint64_t *pages;
   int16_t *positions;
-  uint32_t size;
-  uint32_t index;  // one based indexer
+  size_t size;
+  size_t index;
 } btree_stack_t;
+// end::btree_stack_t[]
 
 // tag::txn_state_t[]
 typedef struct txn_state {

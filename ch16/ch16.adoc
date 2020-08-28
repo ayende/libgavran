@@ -174,6 +174,10 @@ the key.
 The idea is that this means that we'll have to move far less memory, which is more efficient in general and will also play really well with our WAL format. As a reminder,
 we use a diff based WAL format, which means that the less changes we can make to a page, the less we have to write to disk.
 
+In <<btree_page>> you can see that the leftmost entry in the top page (which is a branch page) is the empty symbol: `∅`. The leftmost key in branch pages can be empty, and
+has the meaning of "smaller than anything on my right". This approach allows us to add smaller value than the current minimum on the page without having to update the 
+entire tree with the new smallest value.
+
 ==== Searching a key in a page
 
 Let's look first at what is probably _the_ most important piece of code for our B+Tree, the sort routine shown in <<btree_search_pos_in_page>>.
@@ -202,6 +206,17 @@ searching in the page just once. Why does this matter? We'll be calling to `btre
 If you'll run the B+Tree code under a profiler, you are very likely to find this function in your hot spots. Any optimization in the search is going to have a big impact on
 our B+Tree performance.
 
+[TIP]
+.Empty keys behavior for `btree_search_pos_in_page()`
+====
+The leftmost key (marked as `∅` in the <<btree_page>>) in the leftmost branch page on each level is always empty and is treated as smaller than anything else. We handle this 
+scenario explicitly in `btree_search_pos_in_page()`, as you can see in <<btree_search_pos_in_page>>. An empty key can only appear as the leftmost key in a branch page.
+
+This is useful when we are adding items that are smaller than the smallest key in the tree. We can simply walk to the leftmost entry along the tree until we reach the
+location we'll place the new key. If we didn't use the empty key, we'll need to update the leftmost entry of the tree each time we added the minimum value. On large
+trees, that means that we have to update the entire hierarchy. By using an empty key, we can handle that implicitly. 
+====
+
 ==== Finding _where_ to make the write
 
 The `btree_set()` function is shown in <<btree_set>> and isn't really that interesting. All it does is find the appropriate page to set the value on and then set the value
@@ -229,5 +244,333 @@ include::./code/btree.c[tags=btree_get_leaf_page_for]
 -----
 
 Starting from the root page, we search for the given key using `btree_search_pos_in_page()`. If we are on a branch page, we use the position from the search to go down the tree
-toward the appropriate leaf page. If you'll look back in <<btree>> you'll see that the branch page don't hold all the keys of the leaf pages. Instead, it hold the a key
-that is less than or equal to the first key in the page that it points to. That means that when scanning branch pages, we'll very often see searches that are beyond 
+toward the appropriate leaf page. If you'll look back in <<btree_page>> you'll see that the branch page don't hold all the keys of the leaf pages. Instead, it hold the a key
+that is less than or equal to the first key in the page that it points to. That means that when scanning branch pages, we'll very often see searches that haven't got an exact
+match. For that reason, we have to do a fixup to find the right location to do the next search.
+
+We first use bitwise complement to invert the behavior of `btree_search_pos_in_page()` when an exact match isn't found and we decrement the value if the last match was too
+big for us. The idea is that the keys in the branch page represent a _range_ of values. Looking at the tree in <<btree_page>>, we have the `∅ .. 2` as the first range, `3 .. 7`
+as the second, `8 .. 11` as the third and the final range is `12 .. ∞` (where `∞` is infinity, so any larger value). 
+We determine the range as the equals or greater than that the key entry in the branch and smaller than the _next_ key in the branch page. 
+
+Once we found the next position to go through, we get the child page that is pointed to and continue the process until we get to a leaf page. Because of the size of the branch
+pages, the number of branch pages is usually very small. Even if you have a billion items in the B+Tree, you'll only need three steps to get to the leaf page. Once we go to the
+leaf, we run `btree_search_pos_in_page()` _again_. This time, we need to find the position of the key _inside_ the leaf. 
+
+If the key doesn't exists, `btree_search_pos_in_page()` will set the `position` to a negative value. A bitwise complement to where the value _should_ go. That is very useful in
+both searches and when we need to insert a new value to the leaf page.
+Right now, we only have a single page in the B+Tree, the root page we created in `btree_create()`. When we create the B+Tree, we create a single leaf page, so as it currently 
+stands, we'll not get to the `while` loop and only do a search directly inside the leaf page.
+
+We looked into how `btree_get_leaf_page_for()` find the right page to work with, but there is another thing that is is responsible for. The current working stack. In the code
+you can see that inside the transaction's state, we have the `tmp_stack` that we use to track where we are in the B+Tree. 
+
+==== Traversing paths in the B+Tree
+
+When we search inside the B+Tree, we start at the root and go downward toward the leaf page that contains the actual values that we are interested in. If we are interested in
+simply searching to the value, we don't care about the path we walked through to get there. But when we want to _modify_ the data, the path to the leaf page is very important.
+If we need to split the page (or merge it), we need to know what the _parent_ page is.
+
+If you'll notice, the `tree_page_t` struct hold no information about the parent page, so we can't go up the tree, only down. The stack is used to allow us to climb up back the
+tree. In the _vast_ majority of the cases, the depth of the tree (and the size of the stack) is going to be very shallow. I would be shocked to see if hit double digits. 
+In fact, we can compute that. If we can put merely 10 entries per page, we'll have a tree depth of 9 with a billion items in the tree. Note that usually an 8KB page will contain
+hundreds of entries, so the depth of the tree (and the size of the stack) is far less. 
+
+The stack we use to store the traversal path in the B+Tree is about as simple as you can get. The API is shown in <<btree_stack_t>>.
+
+[source]
+[[btree_stack_t]]
+.`gavran/db.h` and `gavran/internal.h` - API for using the B+Trees stacks to manage the path traversal
+----
+include::../include/gavran/db.h[tags=btree_stack_t]
+
+include::../include/gavran/internal.h[tags=btree_stack_api]
+----
+
+The stack is basically just two parallel arrays that are used to store the page number and the position within this page. I used a struct of array instead of array of struct
+to get better density of data and avoid alignment issues. You can see the `btree_stack_push()` and `btree_stack_pop()` implementation in <<btree_stack>>.
+
+[source]
+[[btree_stack]]
+.`btree.stack.c` - Pushing and popping values from the B+Tree stack
+-----
+include::./code/btree.stack.c[tags=btree_stack]
+-----
+
+As I mentioned, the depth of the stack is _very_ unlikely to grow very big. And the _push_ and _pop_ operations are quite cheap. We're going to be using the stack each and
+every time we search the B+Tree, which means that making this efficient is a priority. The cost of the stack usage is negligible, but the cost of memory allocation and 
+de-allocation is very high. 
+
+To handle these costs, we aren't going to allocate and free the stack every time that we traverse the B+Tree. Instead, we have added a field to the `txn_state_t` structure
+named `tmp_stack`. This is initialized by the first B+Tree search we run (using `btree_increase_size()`) and then reused each time. We'll cleanup the allocated `tmp_stack`
+when we call `txn_close()` on the transaction. The remaining functions for the stack implementation are shown in <<btree_stack_utils>>.
+
+[source]
+[[btree_stack_utils]]
+.`btree.stack.c` - Peeking, freeing and clearing the B+Tree stack
+-----
+include::./code/btree.stack.c[tags=btree_stack_utils]
+-----
+
+The main reason we need this stack is to store the traversal path in the tree, but why is this required? This is useful when we need to modify the structure of the tree 
+itself, for example, when a page grows too large and we need to split it. Let's look into how we manage the space inside a B+Tree page.
+
+==== Space allocation and usage in a B+Tree page. 
+
+In `btree_set()` there are two main operations. The first, which we looked at, is finding the right page to work with using `btree_get_leaf_page_for()`. The second part
+is writing the actual entry to the page in `btree_set_in_page()`, which we'll look at now. 
+
+The structure of a B+Tree page in Gavran is very similar to the container pages we looked at in the previous chapter. We write the data to the page from the `ceiling` and 
+write the position of the entry to the `positions` array from the `floor`. Unlike container pages, however, we don't use arbitrary order but require that the items in the
+`positions` array will be sorted. Note that there is no such requirement for the entries' data. That allows us to save on a lot of memory moves when we are adding a new
+item to a B+Tree page, since we only have to shift a (much smaller) amount of `uint16_t` offsets. 
+
+The bulk of the work of writing an entry to a page isn't actually done by `btree_set_in_page()`. Instead, this function is charged with making sure that there is enough 
+space in the page to accommodate the new entry. Let's look at the code <<btree_set_in_page>> and then we'll discuss what is going on in detail.
+
+[source]
+[[btree_set_in_page]]
+.`btree.c` - Setting an entry on the page, updating in place if possible
+-----
+include::./code/btree.c[tags=btree_set_in_page]
+-----
+
+The code in <<btree_set_in_page>> first check if we are inserting a new value or updating an existing one. This is done using the `set\->position` value, which was set by
+calling the `btree_search_pos_in_page()` call in `btree_get_leaf_page_for()`. If we are updating an existing value, we'll try to update it in place. If we are successful,
+we are done. This is simple, because we just have to update the data in the page and not change its structure.
+
+But if we can't do an in place update, or if we are inserting a new entry, we will need to append the new entry to the page. This is more complex, because we have to deal
+with quite a few edge cases. Let's look at the in place update first, shown on <<btree_try_update_in_place>>.
+
+[source]
+[[btree_try_update_in_place]]
+.`btree.c` - Trying to do an in place update when updating the value of an existing entry
+-----
+include::./code/btree.c[tags=btree_try_update_in_place]
+-----
+
+The code in `btree_try_update_in_place()` get the existing entry and see if the size of the entry already on the page can fit the new value. If so, we write the new value
+at the end of the key and then zero the rest of the memory (if the new value is smaller than the old one). 
+If there isn't enough space, we'll zero the entire entry and try to append the entry to the page as a new item (but keeping the same position). This is shown in 
+<<btree_append_to_page>>. What is interesting is that in `btree_append_to_page()` we aren't actually doing much appending, what the function is doing is make sure that there
+is enough space _to_ append the entry.
+
+[source]
+[[btree_append_to_page]]
+.`btree.c` - Write a new entry to the B+Tree page, making sure that we have enough space to do so
+-----
+include::./code/btree.c[tags=btree_append_to_page]
+-----
+
+In `btree_append_to_page()` we start by checking how much available space we have (the distance between the `ceiling` and the `floor`). We write entries to the B+Tree page
+from the `ceiling` down, toward the `floor`. This is identical to how we did things in the container pages in the previous chapter. There are two scenarios that may occur if
+the space between the `ceiling` and `floor` is too small. It is possible that there is enough free space in the page, but it is not available on a continuous basis. We handle
+this scenario using the `bree_defrag()` function. The other scenario is that the page is full and there is no more space for it. 
+In that case, we'll need to split the page. But before we can split the page, there is some bookkeeping that we have to deal with.
+
+When we are updating an existing entry and we get to the `btree_append_to_page()` function, we know that the entry has already been zeroed on the page, but there is still the
+allocate `position` entry for the entry. Before we can split the page, we need to remove the remains of the entry and only then we can split the page.
+Before getting to the details of page splits, let's look at how we are defragging a B+Tree page.
+
+==== Defragging a B+Tree page to recover space
+
+In the previous chapter, we also implemented de-fragmentation on the container pages. The implementation for B+Tree pages is very similar, but has some important differences.
+Unlike container pages, we aren't forced to keep the `position` in the same location for all time. We will routinely move the actual `position` of an entry in a page around.
+On the other hand, on a B+Tree page, the _reason_ we move an entry around is that we need to maintain the sorting order. Defragging a B+Tree page means that we are already
+working on a sorted entry, so we just need to reshuffle the entries, not the positions. You can see what we do in <<btree_defrag>>.
+
+[source]
+[[btree_defrag]]
+.`btree.c` - Recovering from internal fragmentation in the B+Tree
+-----
+include::./code/btree.c[tags=btree_defrag]
+-----
+
+We allocate a temporary buffer to hold a copy of the page data and then we zero the page's data (but we are skipping the `positions` array at the bottom of the page). Then 
+we can simply run through the entires and copy the actual entry data from the temporary buffer back to the page, layering them one at a time on top of the `ceiling` and updating
+the offset of the `position` in the page. This is pretty simple code and it ends up with us being in an optimal shape and without any wasted space. 
+
+==== Page splits in the B+Tree
+
+The real complexity we have in a B+Tree is all around page splits and page merges. A page split occurs when we try to write an entry that should go to a page that is full. At 
+this point, we have to split the page into two. That means that we have to take the following actions:
+
+* Allocate a new page.
+* Divide the entries between the current page and the new one.
+* Insert a reference to the newly allocated page to the _parent_ page.
+
+It is the last action that is causing the complexity. When we insert a new item to the parent page, it is possible that the _parent_ will be full. That requires us that we'll
+split the parent page as well. And maybe the _grandparent_ as well, etc. This means that we have to be careful about working with the B+Tree because any modification can change
+the shape of the tree. In practice, it doesn't happen very often (once every few hundreds inserts, usually), but it is the cause of significant complexity.
+
+If you'll look at `btree_append_to_page()` you'll see that after we call to `btree_split_page()` we also call to `btree_search_pos_in_page()`. This is done because we changed
+the entries in the page, so we need to find the new position for the entry.
+
+You can see the start of the splitting process in <<btree_split_page>>. This is just the start because the process is somewhat involved, so I've split it into multiple 
+functions.
+
+[source]
+[[btree_split_page]]
+.`btree.c` - Splitting a B+Tree page into two separate pages and re-balancing the entries
+-----
+include::./code/btree.c[tags=btree_split_page]
+-----
+
+The `btree_split_page()` is called when the current page is out of space. That can be the first (leaf) page in the tree or any other page in the tree. The first thing we
+check is if we go to the top of the tree and we need to create a new root page. This is the first time that we actually make use of the traversal path stack in our code. 
+If we need to split a page and it is at the top of the tree, we'll introduce a new root page using `btree_create_root_page()`. We'll look into that function in a bit, for
+now, let's focus on what is actually happening in on the code in <<btree_split_page>>.
+
+.The cost of splitting a page
+****
+One of the interesting properties of B+Tree is that the patterns of writes can have a significant impact on the performance of the system. When we deal with the
+Extendible Hash Table, there was no real difference with how you structured your keys or in what manners you read data from the hash table. With B+Tree, the situation is 
+very different.
+
+When we insert data in a sequential manner, we are able to fill up a page completely before we need to split it. That means that the internal fragmentation of the pages is
+low and the _depth_ of the tree is optimal. If we write the same data, but in a random fashion, then we are likely to have to split the pages much earlier and leave unused
+space in the pages.
+
+The extra page splits will cause us to have a greater tree depth, and that is is leading cause of additional costs in a B+Tree. The B+Tree implementation in Gavran 
+is going to try to reduce the number of page splits by as much as possible. One of the way we do that is to avoid storing any actual data in the B+tree, we only store 
+a `uint64_t` value. Voron's B+Tree, on the other hand, may contain arbitrary sized data, which complicates the implementation significantly. 
+
+The _user_ of the B+Tree is also encouraged to take the access patterns into account. Storing the data in sorted order is _much_ better all around.
+****
+
+The `btree_split_page()` function make a distinction between three separate scenarios for a page split:
+
+* The page is split because of a new entry whose key is _higher_ than the last entry in the page. This will commonly happen when you are using ascending keys, such as
+  incrementing numeric values, etc.
+* The page is split because of an entry whose key is _lower_ than the first entry in the page. This happens when you are writing in descending order. Usually because
+  you are writing data from another source which is already sorted. There are actually very few scenario where this will happen, though. 
+* The page is split because of an entry whose key falls somewhere in the _middle_ of the page.
+
+The reason we have to deal with all three scenarios is to get the optimal behavior. In the first two cases, we don't _need_ to split the page. Instead, we can simply
+allocate a new (empty) page in the tree, wire it up to the parent page and call it a day. The new write will go to the new page and we get the optimal density of the
+data. 
+If we have a write to the middle of the page, we have to actually split the page _and_ split the data, leading to potentially wasted space inside the pages. You can 
+see the three options in the <<btree_split_page>>. 
+
+We use the `ref.key` to hold the key that will be inserted to the parent page and will contain the newly allocated page. That key will be used to find the entries
+in the new page. 
+
+[IMPORTANT]
+.You can make a _single_ change to the tree
+====
+An interesting implication of the fact that an insert to a page can cause a page split is that we have a hard time to do multiple operations on the page at the same
+time. For example, if we wanted to modify two keys in the parent page, we might run into a case where the first key would cause a page split in the parent page, which
+will cause the _next_ key to go to another page.
+
+We _could_ handle it, but it is easier to accept a limit of a single modification to the parent page and avoid that complexity.
+====
+
+If `seq_write_up` is true, we are looking and a sequential write. In this case, we set the new page's initial key to be the new key that we are now inserting to the 
+tree. We also change what page the entry will be written to. If we have a sequential write, we're changing the destination page to the newly allocated page.
+The new page is currently empty, but we'll fill it with the new value as soon as we return from the `btree_split_page()`. 
+
+On the other hand, if `seq_write_down` is true, that means that we have a descending write. A write that is less than the first item in the page represents an interesting
+problem for us. The issue is that we'll need to place the new page _before_ the current page. That is easy enough to do in most cases, except if the current page
+is the leftmost page (smallest value) in the parent page. Why is that a problem?
+
+If you'll look at <<btree>>, you'll see that the leftmost key in the branch page is an empty value, which we marked it as `∅`. If the current page is already using the key
+that means "smaller than anything", how can we write a value to the page that will mean smaller still?
+We could update _both_ pages keys, but that has its own problem. Each write to the page may split it, so if we make multiple writes to the page we'll need to handle the
+possible split for each write. That is complex to do and opens us up to various edge cases.
+
+Instead, we go the other way around. We _move_ all the entries from the current page to the new one, and reset the current page. We then insert the _new_ page to the tree
+using the smallest value in that page (or its children, done using `btree_get_leftmost_key()`). The actual write that will happen after the call returns will happen in 
+the current page, which is now empty and ready to accept more writes that are smaller still. 
+In this case, even though we moved the whole page, we are still in a very good place, in terms of information density. We didn't have to actually split the entires, just
+move where they reside. 
+
+To find the smallest key to write to the parent page, we call to `btree_get_leftmost_key()`. Why do we need to do that? Because the current page we move may be a branch
+page with the leftmost key is empty (`∅`). In order to find what is the _actual_ smallest key for a page, we may need to go down the leftmost path until we reach a leaf page.
+You can see how this is done in <<btree_get_leftmost_key>>.
+
+[source]
+[[btree_get_leftmost_key]]
+.`btree.c` - Getting the smallest key from a page (or its children)
+-----
+include::./code/btree.c[tags=btree_get_leftmost_key]
+-----
+
+Now that we understand how we deal with writes that are greater than the entire page or smaller than the page, let's talk about writes to the middle of the page. This is the
+case where we are actually splitting the page and dividing the entires between the two parts. This is done in the `btree_split_page_in_half()` function, shown in 
+<<btree_split_page_in_half>>.
+
+[source]
+[[btree_split_page_in_half]]
+.`btree.c` - Moving half the entires in a page to the newly allocate page.
+-----
+include::./code/btree.c[tags=btree_split_page_in_half]
+-----
+
+We are doing a few interesting things in <<btree_split_page_in_half>>. First, we take all the entires in the 2nd half of the current page and move them to the new page.
+The new page will always get the larger half of the entries. The first entry in the new page will be the reference key for the new page to the parent page. You can see
+how we determine that in `btree_split_page_in_half()` by setting the `ref\->key`'s value to the first entry's key that we process.
+
+One we are done copying half the entries to the new page, we'll zero out the entries we copied on the original page. We end up with two pages, each with half of the 
+entries of the original page. The last thing tha we need to handle on this function is deciding what page we'll write the value to. This is why we pass the `set` to
+the function.
+
+Because we split the page in half, the `set\->key` may belong to either page. This function will check whatever we should be writing it to the current page or whatever
+it belongs in the newly allocated page. If the key on `set` belongs to the newly allocated page, we'll set it as the destination for the next write in the set operation.
+This is similar to what we do in `btree_split_page()` when we have a sequential write and just allocate a new page for the new data.
+
+The last portion of splitting a page is calling to `btree_append_to_parent()`, shown in <<btree_append_to_parent>>. This is where we wire the new page to the tree using
+the appropriate key. 
+
+[source]
+[[btree_append_to_parent]]
+.`btree.c` - Adding the new page to the tree by writing the new key to the parent page.
+-----
+include::./code/btree.c[tags=btree_append_to_parent]
+-----
+
+We use the stack to get the parent's page number and prepare the page for modifications. We then search the parent page using `btree_search_pos_in_page()` to find the 
+appropriate location for the new entry. We conclude the process by calling to `btree_set_in_page()` to do the actual write. 
+
+The last part is important, because if you'll recall, `btree_append_to_parent()` is called from `btree_split_page()` which is called in turn from `btree_append_to_page()`
+which is called from `btree_set_in_page()`. In other words, we have now entered a recursive call. This time, we aren't operating on the leaf page but on its parent branch
+page. 
+
+An addition to the page may trigger another page split, which will go upward in the tree (using the stack) all the way to the root. Once we get to the root, we'll need to
+allocate a new page for the root. This is shown in <<btree_create_root_page>>.
+
+[source]
+[[btree_create_root_page]]
+.`btree.c` - Creating a new root page for the tree.
+-----
+include::./code/btree.c[tags=btree_create_root_page]
+-----
+
+The new root page is always a branch page which has an empty leftmost key pointing to the current root page. Note that when we create the new root page, the `tree_id` of 
+the tree changes, since the `tree_id` always points to the root page. This is similar to how we handled the directory growth in the Extendible Hash Table example. 
+The final act of the `btree_create_root_page()` function is to register the new root tree in the stack, so we'll be able to later use the new root page as the parent page.
+
+[NOTE]
+.The empty (`∅`) key marker
+====
+The root page is always created with a single entry using an empty key. This is used to refer to "smaller than anything" value. At each level, the leftmost branch page will
+have its leftmost key set to an empty key. 
+
+Other branch pages may have a leftmost key with an actual value or have an empty key. That depends on the exact series of operations that were applied to the tree. It doesn't
+matter much if the leftmost key on anything but the leftmost branch page has an empty key. 
+====
+
+The final piece of adding an entry to page is `btree_insert_to_page()`, shown on <<btree_insert_to_page>>. 
+
+[source]
+[[btree_insert_to_page]]
+.`btree.c` - Prepare the page for a new inserted entry.
+-----
+include::./code/btree.c[tags=btree_insert_to_page]
+-----
+
+The `btree_insert_to_page()` function doesn't handle the actual insertion. Instead, it prepares the space in the page for the insertion and returns the location to write the
+new entry. Mostly it is about updating the page metadata, but note the different behavior of this function if the `position` specified is positive or negative.
+
+If we are passed a positive `position`, we are _updating_ an existing entry, so we don't need to touch the `positions` array. But if we are passed a negative position we know
+that we have to allocate space for the new entry's `position`. We call `memmove()` to do the heavy lifting of creating the appropriate space in the `positions` array to fit 
+the new entry's offset in the page. 
