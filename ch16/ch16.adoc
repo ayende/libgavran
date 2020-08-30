@@ -110,8 +110,8 @@ Let's look at the actual implementation and see how that works.
 
 .B+Trees can be complex beasts
 ****
-In terms of line of code, the B+Tree implementation in Gavran is on par with the Extendible Hash Table and the Containers we previous looked at. In terms of complexity,
-however, I find the B+Tree code to be far more complex.
+In terms of line of code, the B+Tree implementation in Gavran is about 1.26 times larger than the Extendible Hash Table or the Containers we previous looked at. 
+In terms of complexity, however, I find the B+Tree code to be far more complex.
 
 Conceptually, the idea of a B+Tree is fairly simple and obvious, but the implementation tends to be quite tricky. One of the most common issues is that any modification
 to the tree may have repercussions higher up the tree. When dealing with variable length values, that can make the code more complex and expose several edge cases that
@@ -153,6 +153,15 @@ be sortable in lexical order using their raw binary value. It would be simple to
 I find that it is usually only make things more complex to the implementor and the user alike. 
 
 The fact that the keys are opaque bytes has some interesting implications on sorting when using numbers, for examples. We'll address this in detail later in this chapter.
+
+We ensure that all our keys fit the required criteria using the code in <<btree_validate_key>>. 
+
+[source]
+[[btree_validate_key]]
+.`btree.c` - Validating that the provided key is valid (1 .. 512 in size and not pointing to `NULL`).
+-----
+include::./code/btree.c[tags=btree_validate_key]
+-----
 ====
 
 The structure of a page in the a B+Tree is shown in <<btree_page>>, you can see the metadata on the left, with the ceiling and floor markers. Then we have the values.
@@ -518,6 +527,16 @@ Because we split the page in half, the `set\->key` may belong to either page. Th
 it belongs in the newly allocated page. If the key on `set` belongs to the newly allocated page, we'll set it as the destination for the next write in the set operation.
 This is similar to what we do in `btree_split_page()` when we have a sequential write and just allocate a new page for the new data.
 
+[TIP]
+.We aren't dealing with comparing against the empty key when splitting the page
+====
+In `btree_search_pos_in_page()` we had to deal explicitly with the empty key, but in `btree_split_page_in_half()`, we are calling `memcmp()` without special
+casing for the empty key. Why is that?
+
+In `btree_split_page_in_half()` we are comparing a key that is _not_ the leftmost entry. This is because we compare against the entry at the half way mark from
+the original page, and we know that an empty key cannot reside there.
+====
+
 The last portion of splitting a page is calling to `btree_append_to_parent()`, shown in <<btree_append_to_parent>>. This is where we wire the new page to the tree using
 the appropriate key. 
 
@@ -545,8 +564,10 @@ allocate a new page for the root. This is shown in <<btree_create_root_page>>.
 include::./code/btree.c[tags=btree_create_root_page]
 -----
 
-The new root page is always a branch page which has an empty leftmost key pointing to the current root page. Note that when we create the new root page, the `tree_id` of 
-the tree changes, since the `tree_id` always points to the root page. This is similar to how we handled the directory growth in the Extendible Hash Table example. 
+The new root page is always a branch page which has an empty leftmost key pointing to the current root page. When doing similar things with the Extendible Hash Table, we 
+had to change the `hash_id` of the table whenever we grew the directory. That is something that I would like to avoid doing for B+Tree, so you'll note that I'm allocating
+a new page in `btree_create_root_page()`, but that isn't used for the _root_ of the tree. Instead, I'm moving the old root page to the new page and setting the _original_
+page as the root page again. In this manner, the `tree_id` of the B+Tree is constant and will never change. 
 The final act of the `btree_create_root_page()` function is to register the new root tree in the stack, so we'll be able to later use the new root page as the parent page.
 
 [NOTE]
@@ -574,3 +595,266 @@ new entry. Mostly it is about updating the page metadata, but note the different
 If we are passed a positive `position`, we are _updating_ an existing entry, so we don't need to touch the `positions` array. But if we are passed a negative position we know
 that we have to allocate space for the new entry's `position`. We call `memmove()` to do the heavy lifting of creating the appropriate space in the `positions` array to fit 
 the new entry's offset in the page. 
+
+As you can see, adding an item to the B+Tree isn't a trivial operation. Not so much because of what happens during normal operations but because of the number of edge cases
+that we have to deal with. The fact that we ensured that the maximum size of an entry can be up to `KeyLenSize(2) + KeySize(512) + ValSize(10) = MaxEntry(524)` actually
+simplify a lot of things. Given that the size of a page is 8KB, we don't need to worry about not being able to double split (splitting the page once, and still not having
+enough room for the value we want to insert) or have to balance the size of entries along with their number, etc.
+
+Now that we know how we set values into the B+Tree, let's see how we can _read_ data from the tree.
+
+=== Reading from the B+Tree
+
+We actually have most of the functionality for reading already explored. Let's look at how `btree_get()` is implemented in <<btree_get>>.
+
+[source]
+[[btree_get]]
+.`btree.c` - Getting a value from the tree by key
+-----
+include::./code/btree.c[tags=btree_get]
+-----
+
+We already saw how `btree_get_leaf_page_for()` works in <<btree_get_leaf_page_for>>. It searches through the tree to find the appropriate leaf page for the key we are searching
+for. If the `kvp\->last_match` is not set to `0`, that means that we didn't have an exact match and can immediately tell that we don't have the key in the tree. If we the last
+match is zero, we can use the `kvp\->position` to get the actual value from the page. This is handled by `btree_get_entry_at()`, which is shown in <<btree_get_entry_at>>.
+
+[source]
+[[btree_get_entry_at]]
+.`btree.c` - Get the entry by index from a B+Tree page
+-----
+include::./code/btree.c[tags=btree_get_entry_at]
+-----
+
+We are simply reversing the entry write process and unpacking the data from the entry. Note that we could probably come up with a entry format that might be cheaper to unpack
+and process, but this is very space efficient and simple and provide us with the great sets of behaviors (can read & write independent of any other values, easy to write and parse,
+easy to debug, etc). There is also the convenience function `btree_get_val_at()` which make it easier to get just the value, something that we often need to do.
+
+[NOTICE]
+.Reading is easy and simple in B+Tree
+====
+You might have noticed that the reading portion of the B+Tree is shorter, simpler and much easier to understand and run that the write part. This is not really a true reflection of
+how such things really behave, to be fair. Most of the code and complexity in writing to a B+Tree comes from the edge cases, when we need to split a page. The process of writing to
+the B+Tree when we _don't_ need to split the page is very straightforward. Almost identical to the reading workflow. 
+
+The good thing about the reads being simpler is that they are also _cheap_. And in most scenarios, you are going to be reading a lot more than you'll be writing. Even when we have a
+lot of writes, though. We'll pay the extra cost of page splits only once every few _hundreds_ operations, so it is highly amortized cost. 
+====
+
+=== Dropping the B+Tree
+
+The order of sections in this chapter may appear strange to you. We started by showing how to create the B+Tree, spend a _lot_ of time working through the intricacies of writing to
+the B+Tree and then moved to seeing how we read from the tree. Now we are dropping the tree entirely? We are actually missing a few important features, namely deleting items and 
+iterating over the tree. 
+I'm trying to manage the amount of complexity that I'm throwing all at once by putting some of the easier pieces in the middle.
+
+Dropping a B+Tree means that we need to free all the pages and resources associated with it. That task turns out to be fairly simple, as you can see in <<btree_drop>>.
+
+[source]
+[[btree_drop]]
+.`btree.c` - Dropping a B+Tree by recursively freeing all of its pages
+-----
+include::./code/btree.c[tags=btree_drop]
+-----
+
+The code in <<btree_drop>> runs over the entries in a branch page and recurse into each of them. Whenever we hit a leaf page, we free it and then we go up the tree. This is a simple
+depth first search that will end up freeing all the pages in the tree. I like the simplicity, because we can ignore the _contents_ of the pages or their structure. We can just follow
+the links and free the pages that we no longer need.
+
+With this brief respite, let's move back to one of the more complex aspects of B+Tree, deleting entries.
+
+=== Deleting from the B+Tree
+
+You might have gathered that deleting items from the B+Tree is not a trivial task. This is only partially correct. Deleting items from the B+Tree is actually very easy, the complexity
+starts when we need to merge pages. A page split happens when a page is too full and we can't add any more entries to it. A page merge happens when an entry is deleted from a page and
+we take advantage of the additional space to merge two adjacent pages together. Why do we want to do that, if this is so complex? 
+
+* Merging pages reduce the amount of pages that the B+Tree takes, reducing the disk size we need.
+* Merging pages can reduce the _depth_ of the B+Tree, which means that we can do less work to find and work with the tree.
+
+The deletion process starts in `btree_del()`, shown in <<btree_del>>.
+
+[source]
+[[btree_del]]
+.`btree.c` - Deleting an entry by key from the B+Tree
+-----
+include::./code/btree.c[tags=btree_del]
+-----
+
+Our good friend `btree_get_leaf_page_for()` is there, finding up the right leaf page to start working on. If we `del\->last_match` isn't zeroed, we don't have an exact match and can stop
+the process. If there is an exact match, we call to `btree_remove_entry()` to do the actual removal of the entry. Finally, in `btree_maybe_merge_pages()` we do the actual page merging, if
+we can.
+Let's look first at what it takes to remove an entry from a page, this is shown in <<btree_remove_entry>>.
+
+[source]
+[[btree_remove_entry]]
+.`btree.c` - Removing an entry from a page
+-----
+include::./code/btree.c[tags=btree_remove_entry]
+-----
+
+There isn't much going on in `btree_remove_entry()`, we zero the relevant entry, shift the `positions` array to remove the `position` we are removing from the page and updating the page's
+metadata. Removing an entry from a page is not a big deal, but the problem is how do we recover the space when a page is completely empty, or how do we re-balance the load between pages
+as data is written and deleted.
+
+.Data access patterns considerations
+****
+One of the things that we have to take into account when building the B+Tree is what kind of access patterns should we expect and optimize for. 
+A good example is building good support for writing data in a sequential manner. You saw in the `btree_split()` that we have taken that into account and optimize the process of adding a
+splitting a page where the value is always growing (or decreasing). 
+
+When _deleting_ items, we have to consider one of the following options:
+
+* A queue like system. New entries written the end of the B+Tree and remove them from the front. 
+* A stack like system. Writing entries to the end of the B+Tree and remove them from the end.
+* Random deletes - may happen everywhere in the tree. 
+
+In this case, I'm referring to the start and the end of the B+Tree in terms of the sorted values, mind. As much as possible, we want to avoid merging those pages if we can. The reason
+for that is that they tend to be very commonly used as the targets of deletes.
+
+In the case of a queue like structure, we'll be appending to the end and removing from the front. Merging the first page will just cause us to do more work. For that reason, we only
+merge adjacent pages if they are in the middle of their branch page. 
+****
+
+The page merge process starts at `btree_maybe_merge_pages()`, which is shown on <<btree_maybe_merge_pages>>.
+
+[source]
+[[btree_maybe_merge_pages]]
+.`btree.c` - Deciding whatever we should merge the current page with its next sibling
+-----
+include::./code/btree.c[tags=btree_maybe_merge_pages]
+-----
+
+The code in `btree_maybe_merge_pages()` is mostly concerned with deciding whatever we _should_ merge the page with its sibling. We filter out pages that don't have enough free space, we
+bail out early if we are already at the root page or if the current page is at the first or last position in its parent page (see the sidebar discussion on that). We also check that
+the pages we merge have the same type. We cannot merge branch and leaf pages together, after all.
+
+If we passed all of these checks, we proceed to the `btree_merge_pages()` to do the actual merging. The code for page merges is shown in <<btree_merge_pages>> but I want to focus on
+something quite important first. The whole _point_ of `btree_maybe_merge_pages()` is to avoid or delay, as much as possible, the process of page merging. We are trying to avoid page 
+splits because they are expensive, the increase the depth of the tree (which requires additional searches), they use more disk space, etc. Why would we want to reduce page merges, though?
+With page merges, we are _reducing_ the depth of the tree, so that is a _good_ thing, no?
+
+The issue is, again, related to the expected access patterns that we are likely to see and https://en.wikichip.org/wiki/schlemiel_the_painter%27s_algorithm[Schlemiel's Algorithm]. 
+The issue is that deletes tend to either be completely random and come in clumps. We want to avoid doing merge work on each delete, because that can cause a delete of N items to cause
+us to do `O(N~2~)` work. For that reason, we attempt to delay the merges as much as possible. 
+
+You can see the same line of thinking in <<btree_merge_pages>> as well, since we do work to delay the _next_ call as much as we can. There is an important assumption we can make in 
+`btree_merge_pages()`, we are getting two pages and they are _in order_. In other words, the `p2` data entries all come after the entries in `p2`. That turns out to be very helpful in
+reducing the overall complexity.
+
+[source]
+[[btree_merge_pages]]
+.`btree.c` - Merging two sibling pages (or re-balancing their entries)
+-----
+include::./code/btree.c[tags=btree_merge_pages]
+-----
+
+The code in `btree_merge_pages()` is straightforward, we make sure that the `sibling` and is ready for modifications and then  call to `btree_balance_entries()` to re-balance
+the entries and then either remove the empty `sibling` page (if we emptied it from all its entries) or update the `parent` if there are still entries in the `sibling` page. 
+I think we should first look at `btree_balance_entries()` ,shown in <<btree_balance_entries>>, to understand how it works and then we can discuss the way page merging works with
+better understanding of how the whole machinery works.
+
+[source]
+[[btree_balance_entries]]
+.`btree.c` - Moving as many entries from `p2` to `p1` as can be fitted.
+-----
+include::./code/btree.c[tags=btree_balance_entries]
+-----
+
+In `btree_balance_entries()` we copy the entries from the `p2` page to `p1`. If you'll recall, we know that all the entries in `p2` are greater than the ones in `p1`, so we can
+simply copy the entries from the start of `p2` to the end of `p1` without needing to do anything else to maintain the sort order.
+We are copying from the `p2` page until we run out of either entries on `p2` to copy or space to copy to in `p1`. Once that is done, we can remove all the entires that we copied 
+from `p2` in one shot. We are using this approach to avoid the cost of removing one item at a time, which can lead to `O(N~2~)` complexity.
+
+.Why am I so careful about zeroing the memory?
+****
+I'm not sure if you noticed, but I'm trying to be very careful about zeroing out any memory that we have cleared. This isn't actually required, we don't rely on the contents of 
+bytes on the page that aren't actively being used. But I'm making sure that whenever we delete an entry from the page, we'll immediately zero it. Why go to the trouble?
+
+One side of this is about security, if we zero the old data immediately (which will be written to disk) we can be sure that deleted records are not hanging around after they are
+no longer wanted. This is a minor concern, to be honest. If you care about the security of your system, encryption is where you want to go, not zeroing the memory. You can probably
+_still_ recover the data from the disk after we overwrote it with zeros, if you try hard enough.
+
+The more practical reason is that it make it very easy to avoid accidentally using the space after it has been freed. By making sure that it is freed, we can catch such issues
+much earlier.
+****
+
+Now that you saw how the key components of the page merge process work, let's talk about the implications of this design. We'll only consider a page to be a merge candidate if it
+has at least 2.7KB of free space. Given that the maximum size of an entry is 524 bytes (and most are _much_ smaller), that means that when we consider a merge between pages, we'll
+copy quite a few entries all at once. 
+
+We always copy down, so when we need to merge a page, we'll look at the _following_ page (with larger entries) to supply us with additional entries to fill the page. A better 
+might test the previous and next pages and see if we can find a good candidate, but that complicates the code and doesn't usually end up being very beneficial for real world scenarios.
+We are avoiding the top and bottom pages in a branch page as starting points for page merges, that is to optimize common behaviors of deleting from start / end in a sequential manner.
+
+We are also being conservative with the merge process. When we merge, we merge a _single_ page at a time and we don't attempt to probe additional pages to see if we can merge them. 
+
+The final step in the merge process is updating the parent page. This is done in `btree_merge_pages()` by removing the old entry of the `sibling` page from the parent and inserting
+the new first key in the `sibling` page. An interesting issue that may arise in this case is that the act of changing the key pointing to the `sibling` page may actually cause us
+to split the _parent_ page. This is already handled by the code, so we don't have to take any action, but it is important to understand the potential cascading affects that we have
+in the B+Tree.
+
+Let's take a last look at <<btree_maybe_free_empty_page>> where you can see how we handle reducing the depth of the tree. In `btree_maybe_free_empty_page()` we check if the page
+we are working with was completely emptied. This can happen if the page we removed items from was the first or last in the parent page (since we aren't merging these) or if the
+page was a leaf page adjacent to a branch page, etc. 
+
+[source]
+[[btree_maybe_free_empty_page]]
+.`btree.c` - Removing an empty page from the tree
+-----
+include::./code/btree.c[tags=btree_maybe_free_empty_page]
+-----
+
+When we remove a page, we have to update the parent page, this is done in `btree_remove_from_parent()`. This is also where the merge process turn recursive and we check if we 
+need to merge the parent page (and in turn, the grandparent, etc). You can see how that works in <<btree_remove_from_parent>>.
+
+[source]
+[[btree_remove_from_parent]]
+.`btree.c` - Remove a page from the parent page, fixup the tree if needed
+-----
+include::./code/btree.c[tags=btree_remove_from_parent]
+-----
+
+The code in `btree_remove_from_parent()` is doing a whole bunch of things all at once, so let's try to list them in order. We start from just removing the entry from the parent
+page. Here we have to be careful about structure of the tree. If we removed the leftmost entry, we will replace the new leftmost entry with an empty key (which we represent using
+the `∅` sign). The idea is that the leftmost key in a branch page should be the `∅` (smaller than anything) and we maintain that during the merge process. This is important since
+deleting entries from the start will lead us to repeatedly remove the leftmost page. By ensuring that the leftmost entry is always the empty key, we can keep the tree ready for
+new writes at the start of the tree.
+
+The next step is to recursively call to `btree_maybe_merge_pages()` to see if we can merge the parent page as well. Once that is done, we check if the parent hsa a single entry
+in the page. If this is the case, we can simply copy the child page to the parent page and remove the child. This is the stage where we are actually reducing the depth of the 
+tree.
+
+This concludes the merging process for pages on delete and we are nearly done with understanding how B+Tree works. There is just one last thing we need to go over, iteration
+over the B+Tree data...
+
+=== Iterating over the B+Tree entries
+
+We have done all the work that is required to allow reads, writes and deletes on the B+Tree. I think that you can agree that comparing the complexity to the Extendible Hash
+Table we implemented previously, the B+Tree is a lot more complex. But in terms of the functionality we have so far, it isn't really that interesting. We can also do
+writes, reads and deletes using the hash table, and it is a lot less complex. What is the _point_ of using a B+Tree?
+
+The most important property of a B+Tree is that it is sorted. That means that when we search a key in the B+Tree, the cost is `O(~log~N)`. More important, it means that we
+can iterate through the entires in the B+Tree in sort order. The API we have for iteration on the B+Tree is shown in <<btree_cursor_api>>.
+
+[source]
+[[btree_cursor_api]]
+.`gavran/db.h` - API for iterating over the entries in a B+Tree
+----
+include::../include/gavran/db.h[tags=btree_cursor_api]
+----
+
+You can learn quite a lot from the API in <<btree_cursor_api>>. Unlike our previous iteration API, we now have a dedicated structure for iteration on the B+Tree. This is
+required because we need to maintain the state of the iteration between calls. The API allows us to start the iteration from the start or end of the tree and iterate 
+in ascending and descending order. 
+We also have the option of starting the iteration from a given key using `btree_cursor_search()`. 
+It is also important to note that once we are done using the cursor, we _must_ free it using `btree_free_cursor()`. 
+
+Before we dive into the implementation of iteration on the B+Tree, I think a usage example would be a better idea. Take a look at <<get_last_hour_entries>>, where we are
+showing off a 
+
+[source]
+[[get_last_hour_entries]]
+.`btree.c` - Iterating a B+Tree from a particular point in time
+-----
+include::./code/btree.c[tags=get_last_hour_entries]
+-----

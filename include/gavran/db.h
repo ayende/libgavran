@@ -411,8 +411,7 @@ typedef struct btree_val {
   int16_t position;
   int8_t last_match;
   bool has_val;
-  bool tree_id_changed;
-  uint8_t padding[3];
+  uint8_t padding[4];
 } btree_val_t;
 
 result_t btree_create(txn_t *tx, uint64_t *tree_id);

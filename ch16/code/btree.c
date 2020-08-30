@@ -4,12 +4,14 @@
 #include <gavran/db.h>
 #include <gavran/internal.h>
 
+// tag::btree_validate_key[]
 static result_t btree_validate_key(span_t* key) {
   ensure(key->size > 0);
   ensure(key->size <= 512);
   ensure(key->address, msg("Key cannot have a NULL address"));
   return success();
 }
+// end::btree_validate_key[]
 
 // tag::btree_create[]
 static void btree_init_metadata(
@@ -124,52 +126,61 @@ static void* btree_insert_to_page(page_t* p,
 
 // tag::btree_create_root_page[]
 static result_t btree_create_root_page(
-    txn_t* tx, page_t* p, btree_val_t* set) {
-  page_t root = {.number_of_pages = 1};
-  page_metadata_t* root_metadata;
-  ensure(txn_allocate_page(tx, &root, &root_metadata, p->page_num));
-  root_metadata->tree.page_flags = page_flags_tree_branch;
-  root_metadata->tree.ceiling    = PAGE_SIZE;
-  root_metadata->tree.free_space = PAGE_SIZE;
+    txn_t* tx, page_t* p, page_metadata_t** metadata) {
+  page_t new = {.number_of_pages = 1};
+  page_metadata_t* new_metadata;
+  ensure(txn_allocate_page(tx, &new, &new_metadata, p->page_num));
+  memcpy(new.address, p->address, PAGE_SIZE);
+  memcpy(new_metadata, *metadata, sizeof(page_metadata_t));
 
-  set->tree_id_changed = true;
-  set->tree_id         = root.page_num;
+  memset(p->address, 0, PAGE_SIZE);
+  btree_init_metadata(*metadata, page_flags_tree_branch);
 
   size_t req_size =
       varint_get_length(0) + 0 + varint_get_length(p->page_num);
-  uint8_t* val_p = btree_insert_to_page(
-      &root, root_metadata, 0, (uint16_t)req_size);
+  uint8_t* val_p =
+      btree_insert_to_page(p, *metadata, 0, (uint16_t)req_size);
   *val_p++ = 0;  // key size
-  varint_encode(p->page_num, val_p);
-  ensure(btree_stack_push(&tx->state->tmp_stack, root.page_num, 0));
+  varint_encode(new.page_num, val_p);
+  ensure(btree_stack_push(&tx->state->tmp_stack, p->page_num, 0));
+
+  memcpy(p, &new, sizeof(page_t));
+  *metadata = new_metadata;
+
   return success();
 }
 // end::btree_create_root_page[]
-static uint64_t btree_get_val_at(page_t* p, uint16_t pos);
 
-static result_t btree_get_at(page_t* p, page_metadata_t* metadata,
+// tag::btree_get_entry_at[]
+static void btree_get_entry_at(page_t* p, page_metadata_t* metadata,
     uint16_t pos, span_t* key, uint64_t* val, span_t* entry) {
   uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
-  ensure(pos < max_pos, msg("pos out of range"), with(pos, "%d"),
-      with(max_pos, "%d"));
+  assert(pos < max_pos);
   uint16_t* positions = p->address;
   entry->address      = p->address + positions[pos];
   key->address        = varint_decode(entry->address, &key->size);
   void* end           = varint_decode(key->address + key->size, val);
   entry->size         = (size_t)(end - entry->address);
-  return success();
 }
+static uint64_t btree_get_val_at(
+    page_t* p, page_metadata_t* metadata, uint16_t pos) {
+  span_t key, entry;
+  uint64_t val;
+  btree_get_entry_at(p, metadata, pos, &key, &val, &entry);
+  return val;
+}
+// end::btree_get_entry_at[]
 
 // tag::btree_get_leftmost_key[]
 static result_t btree_get_leftmost_key(txn_t* tx, page_t* p,
     page_metadata_t* metadata, span_t* leftmost_key) {
   while (metadata->tree.page_flags == page_flags_tree_branch) {
-    p->page_num = btree_get_val_at(p, 0);
+    p->page_num = btree_get_val_at(p, metadata, 0);
     ensure(txn_get_page_and_metadata(tx, p, &metadata));
   }
   span_t entry;
   uint64_t val;
-  ensure(btree_get_at(p, metadata, 0, leftmost_key, &val, &entry));
+  btree_get_entry_at(p, metadata, 0, leftmost_key, &val, &entry);
   return success();
 }
 // end::btree_get_leftmost_key[]
@@ -185,7 +196,7 @@ static result_t btree_split_page_in_half(page_t* p,
   span_t key, entry;
   for (uint16_t idx = max_pos / 2, o_idx = 0; idx < max_pos;
        idx++, o_idx++) {
-    ensure(btree_get_at(p, *metadata, idx, &key, &val, &entry));
+    btree_get_entry_at(p, *metadata, idx, &key, &val, &entry);
     o_metadata->tree.ceiling -= entry.size;
     memcpy(other->address + o_metadata->tree.ceiling, entry.address,
         entry.size);
@@ -198,7 +209,7 @@ static result_t btree_split_page_in_half(page_t* p,
   size_t removed = (max_pos - (max_pos / 2));
   memset(positions + (max_pos / 2), 0, removed * sizeof(uint16_t));
   (*metadata)->tree.floor -= removed * sizeof(uint16_t);
-  ensure(btree_get_at(other, o_metadata, 0, &ref->key, &val, &entry));
+  btree_get_entry_at(other, o_metadata, 0, &ref->key, &val, &entry);
   if (memcmp(ref->key.address, set->key.address,
           MIN(set->key.size, ref->key.size)) < 0) {
     memcpy(p, other, sizeof(page_t));
@@ -209,8 +220,8 @@ static result_t btree_split_page_in_half(page_t* p,
 // end::btree_split_page_in_half[]
 
 // tag::btree_append_to_parent[]
-static result_t btree_append_to_parent(txn_t* tx,
-    btree_stack_t* stack, btree_val_t* set, btree_val_t* ref) {
+static result_t btree_append_to_parent(
+    txn_t* tx, btree_stack_t* stack, btree_val_t* ref) {
   page_t parent = {0};
   page_metadata_t* p_metadata;
   int16_t _pos;
@@ -219,10 +230,6 @@ static result_t btree_append_to_parent(txn_t* tx,
   ensure(txn_modify_metadata(tx, parent.page_num, &p_metadata));
   btree_search_pos_in_page(&parent, p_metadata, ref);
   ensure(btree_set_in_page(tx, parent.page_num, ref, 0));
-  if (ref->tree_id_changed) {
-    set->tree_id_changed = true;
-    set->tree_id         = ref->tree_id;
-  }
   return success();
 }
 // end::btree_append_to_parent[]
@@ -232,7 +239,7 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
     page_metadata_t** metadata, btree_val_t* set) {
   btree_stack_t* stack = &tx->state->tmp_stack;
   if (stack->index == 0) {  // at root
-    ensure(btree_create_root_page(tx, p, set));
+    ensure(btree_create_root_page(tx, p, metadata));
   }
   page_t other = {.number_of_pages = 1};
   page_metadata_t* o_metadata;
@@ -257,7 +264,7 @@ static result_t btree_split_page(txn_t* tx, page_t* p,
     ensure(btree_split_page_in_half(
         p, metadata, &other, o_metadata, &ref, set, max_pos));
   }
-  ensure(btree_append_to_parent(tx, stack, set, &ref));
+  ensure(btree_append_to_parent(tx, stack, &ref));
   return success();
 }
 // end::btree_split_page[]
@@ -300,8 +307,8 @@ static result_t btree_try_update_in_place(page_t* p,
     btree_val_t* old, bool* updated) {
   span_t key, entry;
   uint64_t old_val;
-  ensure(btree_get_at(
-      p, metadata, (uint16_t)set->position, &key, &old_val, &entry));
+  btree_get_entry_at(
+      p, metadata, (uint16_t)set->position, &key, &old_val, &entry);
   if (old) {
     old->has_val = true;
     old->val     = old_val;
@@ -359,7 +366,7 @@ static result_t btree_get_leaf_page_for(txn_t* tx, btree_val_t* kvp,
         &tx->state->tmp_stack, p->page_num, kvp->position));
     uint16_t max_pos = (*metadata)->tree.floor / sizeof(uint16_t);
     uint16_t pos     = MIN(max_pos - 1, (uint16_t)kvp->position);
-    p->page_num      = btree_get_val_at(p, pos);
+    p->page_num      = btree_get_val_at(p, *metadata, pos);
     ensure(txn_get_page_and_metadata(tx, p, metadata));
   }
   assert((*metadata)->tree.page_flags == page_flags_tree_leaf);
@@ -368,6 +375,7 @@ static result_t btree_get_leaf_page_for(txn_t* tx, btree_val_t* kvp,
 }
 // end::btree_get_leaf_page_for[]
 
+// tag::btree_drop[]
 static result_t btree_free_page_recursive(
     txn_t* tx, uint64_t page_num) {
   page_t p = {.page_num = page_num};
@@ -376,17 +384,17 @@ static result_t btree_free_page_recursive(
   if (metadata->tree.page_flags != page_flags_tree_leaf) {
     uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
     for (uint16_t i = 0; i < max_pos; i++) {
-      uint64_t child = btree_get_val_at(&p, i);
+      uint64_t child = btree_get_val_at(&p, metadata, i);
       ensure(btree_free_page_recursive(tx, child));
     }
   }
   ensure(txn_free_page(tx, &p));
   return success();
 }
-
 result_t btree_drop(txn_t* tx, uint64_t tree_id) {
   return btree_free_page_recursive(tx, tree_id);
 }
+// end::btree_drop[]
 
 // tag::btree_set[]
 result_t btree_set(txn_t* tx, btree_val_t* set, btree_val_t* old) {
@@ -399,6 +407,7 @@ result_t btree_set(txn_t* tx, btree_val_t* set, btree_val_t* old) {
 }
 // end::btree_set[]
 
+// tag::btree_get[]
 result_t btree_get(txn_t* tx, btree_val_t* kvp) {
   assert(btree_validate_key(&kvp->key));
   page_t p;
@@ -408,21 +417,13 @@ result_t btree_get(txn_t* tx, btree_val_t* kvp) {
     kvp->has_val = false;
     return success();
   }
-  size_t key_size;
-  uint8_t* start = p.address + ((int16_t*)p.address)[kvp->position];
-  varint_decode(
-      varint_decode(start, &key_size) + key_size, &kvp->val);
+  span_t key, entry;
+  btree_get_entry_at(
+      &p, metadata, (uint16_t)kvp->position, &key, &kvp->val, &entry);
   kvp->has_val = true;
   return success();
 }
-
-static uint64_t btree_get_val_at(page_t* p, uint16_t pos) {
-  uint16_t* positions = p->address;
-  uint64_t k, v;
-  uint8_t* key_start = varint_decode(p->address + positions[pos], &k);
-  varint_decode(key_start + k, &v);
-  return v;
-}
+// end::btree_get[]
 
 static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
   page_t p = {.page_num = c->tree_id};
@@ -518,7 +519,7 @@ static result_t btree_iterate(btree_cursor_t* c, int8_t step) {
         continue;  // go up...
       }
       ensure(btree_stack_push(&c->stack, p.page_num, pos));
-      p.page_num = btree_get_val_at(&p, (uint16_t)pos);
+      p.page_num = btree_get_val_at(&p, metadata, (uint16_t)pos);
       ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
       // go down all branches
       while (metadata->tree.page_flags == page_flags_tree_branch) {
@@ -526,7 +527,7 @@ static result_t btree_iterate(btree_cursor_t* c, int8_t step) {
         uint16_t edge_pos = step > 0 ? 0 : (max_pos - 1);
         ensure(btree_stack_push(
             &c->stack, p.page_num, (int16_t)edge_pos));
-        p.page_num = btree_get_val_at(&p, edge_pos);
+        p.page_num = btree_get_val_at(&p, metadata, edge_pos);
         ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
       }
       if (step > 0) {
@@ -555,71 +556,34 @@ result_t btree_free_cursor(btree_cursor_t* cursor) {
   return btree_stack_free(&cursor->stack);
 }
 
+// tag::btree_remove_entry[]
 static uint64_t btree_remove_entry(
     page_t* p, page_metadata_t* metadata, uint16_t pos) {
+  span_t key, entry;
+  uint64_t val;
+  btree_get_entry_at(p, metadata, pos, &key, &val, &entry);
+  memset(entry.address, 0, entry.size);
   uint16_t* positions = p->address;
-  uint64_t ks, v;
-  uint8_t* start = p->address + positions[pos];
-  uint8_t* end   = varint_decode(varint_decode(start, &ks) + ks, &v);
-  memset(start, 0, (size_t)(end - start));
   memmove(positions + pos, positions + pos + 1,
       metadata->tree.floor - (pos + 1) * sizeof(uint16_t));
   metadata->tree.floor -= (uint16_t)sizeof(uint16_t);
   positions[metadata->tree.floor / sizeof(uint16_t)] = 0;
-  metadata->tree.free_space +=
-      sizeof(uint16_t) + (uint16_t)(end - start);
-  return v;
+  metadata->tree.free_space += sizeof(uint16_t) + entry.size;
+  return val;
 }
+// end::btree_remove_entry[]
 
-static result_t btree_find_best_sibling_to_merge(txn_t* tx,
-    page_t* parent, page_metadata_t* parent_metadata,
-    uint16_t cur_pos, uint16_t* sibling_pos) {
-  uint16_t siblings_count =
-      parent_metadata->tree.floor / sizeof(uint16_t);
-  assert(siblings_count >= 2);
-  if (cur_pos == siblings_count - 1) {
-    *sibling_pos = (uint16_t)(cur_pos - 1);
-    return success();
-  }
-  if (cur_pos == 0) {
-    *sibling_pos = 1;
-    return success();
-  }
-  // choose sibling with most free space
-  page_metadata_t *right, *left;
-  uint64_t page = btree_get_val_at(parent, (uint16_t)(cur_pos - 1));
-  ensure(txn_get_metadata(tx, page, &left));
-  page = btree_get_val_at(parent, (uint16_t)(cur_pos + 1));
-  ensure(txn_get_metadata(tx, page, &right));
-  if (left->tree.free_space > right->tree.free_space)
-    *sibling_pos = (uint16_t)(cur_pos - 1);
-  else
-    *sibling_pos = (uint16_t)(cur_pos + 1);
-  return success();
-}
-
+// tag::btree_balance_entries[]
 static result_t btree_balance_entries(page_t* p1, page_metadata_t* m1,
-    page_t* p2, page_metadata_t* m2, int8_t* step) {
-  span_t k1, k2, entry;
+    page_t* p2, page_metadata_t* m2) {
   uint64_t val;
-  ensure(btree_get_at(p1, m1, 0, &k1, &val, &entry));
-  ensure(btree_get_at(p2, m2, 0, &k2, &val, &entry));
-  int res = memcmp(k1.address, k2.address, MIN(k1.size, k2.size));
-  uint16_t p1_pos, p2_pos;
-
-  if (res < 0) {
-    p1_pos = m1->tree.floor / sizeof(uint16_t);
-    p2_pos = 0;
-    *step  = 0;
-  } else {
-    p1_pos = 0;
-    p2_pos = m2->tree.floor / sizeof(uint16_t) - 1;
-    *step  = -1;
-  }
-
-  while (m2->tree.floor) {
-    span_t key;
-    ensure(btree_get_at(p2, m2, p2_pos, &key, &val, &entry));
+  uint16_t p1_base    = m1->tree.floor / sizeof(uint16_t);
+  uint16_t max_p2_pos = m2->tree.floor / sizeof(uint16_t);
+  uint16_t p2_pos     = 0;
+  size_t total_moved  = 0;
+  for (; p2_pos < max_p2_pos; p2_pos++) {
+    span_t key, entry;
+    btree_get_entry_at(p2, m2, p2_pos, &key, &val, &entry);
     if (m1->tree.free_space < entry.size + sizeof(uint16_t)) {
       break;  // no more room
     }
@@ -631,94 +595,130 @@ static result_t btree_balance_entries(page_t* p1, page_metadata_t* m1,
         break;  // still can't find room? abort
     }
     void* dst = btree_insert_to_page(
-        p1, m1, ~(int16_t)p1_pos, (uint16_t)entry.size);
+        p1, m1, (int16_t)(p2_pos + p1_base), (uint16_t)entry.size);
     memcpy(dst, entry.address, entry.size);
-    btree_remove_entry(p2, m2, p2_pos);
-    p2_pos += *step;
-    p1_pos++;
+    memset(entry.address, 0, entry.size);
+    total_moved += entry.size + sizeof(uint16_t);
   }
+  m2->tree.free_space += total_moved;
+  m2->tree.floor -= p2_pos * sizeof(uint16_t);
+  memmove(p2->address, p2->address + p2_pos * sizeof(uint16_t),
+      (max_p2_pos - p2_pos) * sizeof(uint16_t));
+  memset(p2->address + m2->tree.floor * sizeof(uint16_t), 0,
+      (max_p2_pos - m2->tree.floor) * sizeof(uint16_t));
   return success();
 }
+// end::btree_balance_entries[]
 
+static result_t btree_maybe_merge_pages(
+    txn_t* tx, page_t* p, page_metadata_t* metadata);
+
+// tag::btree_remove_from_parent[]
 static result_t btree_remove_from_parent(txn_t* tx, page_t* parent,
     page_metadata_t* parent_metadata, page_t* remove,
-    uint16_t remove_pos, page_t* sibling,
-    page_metadata_t* s_metadata) {
+    uint16_t remove_pos) {
   ensure(txn_free_page(tx, remove));
   btree_remove_entry(parent, parent_metadata, remove_pos);
-  if (parent_metadata->tree.floor == sizeof(uint16_t)) {
-    // only remaining item, replace
-    memcpy(parent_metadata, s_metadata, sizeof(page_metadata_t));
-    memcpy(parent->address, sibling->address, PAGE_SIZE);
-    ensure(txn_free_page(tx, sibling));
+  if (remove_pos == 0) {  // ensure leftmost branch key is empty
+    uint64_t val = btree_get_val_at(parent, parent_metadata, 0);
+    btree_remove_entry(parent, parent_metadata, 0);
+    uint8_t* dst = btree_insert_to_page(parent, parent_metadata,
+        ~0 /*insert new*/, (uint16_t)(1 + varint_get_length(val)));
+    *dst++       = 0;  // empty key size
+    varint_encode(val, dst);
   }
+  ensure(btree_maybe_merge_pages(tx, parent, parent_metadata));
+  if (parent_metadata->tree.floor != sizeof(uint16_t))
+    return success();
+  page_t p = {// only remaining item, replace the parent page
+      .page_num = btree_get_val_at(parent, parent_metadata, 0)};
+  page_metadata_t* metadata;
+  ensure(txn_get_page_and_metadata(tx, &p, &metadata));
+  memcpy(parent_metadata, metadata, sizeof(page_metadata_t));
+  memcpy(parent->address, p.address, PAGE_SIZE);
+  ensure(txn_free_page(tx, &p));
   return success();
 }
+// end::btree_remove_from_parent[]
 
-static result_t btree_maybe_merge_pages(txn_t* tx, page_t* p,
-    page_metadata_t* metadata, btree_val_t* del) {
-  // if page is over 2/3 full, we'll do nothing
-  if (metadata->tree.free_space < (PAGE_SIZE / 3) * 2)
+// tag::btree_maybe_free_empty_page[]
+static result_t btree_maybe_free_empty_page(txn_t* tx, page_t* p,
+    page_metadata_t* metadata, page_t* parent,
+    page_metadata_t* parent_metadata, uint16_t position) {
+  if (metadata->tree.floor != 0) return success();
+  ensure(txn_modify_page(tx, parent));  // emptied the page
+  ensure(txn_modify_metadata(tx, parent->page_num, &parent_metadata));
+  ensure(btree_remove_from_parent(
+      tx, parent, parent_metadata, p, position));
+  return success();
+}
+// end::btree_maybe_free_empty_page[]
+
+// tag::btree_merge_pages[]
+static result_t btree_merge_pages(txn_t* tx, page_t* p,
+    page_metadata_t* metadata, page_t* parent,
+    page_metadata_t* parent_metadata, page_t* sibling,
+    uint16_t sibling_pos) {
+  page_metadata_t* s_metadata;
+  ensure(txn_modify_page(tx, sibling));
+  ensure(txn_modify_metadata(tx, sibling->page_num, &s_metadata));
+
+  ensure(btree_balance_entries(p, metadata, sibling, s_metadata));
+
+  if (s_metadata->tree.floor == 0) {  // completely emptied sibling
+    ensure(btree_remove_from_parent(
+        tx, parent, parent_metadata, sibling, sibling_pos));
     return success();
-  if (tx->state->tmp_stack.index == 0)
-    return success();  // nothing to merge with
+  }
+  uint64_t val;
+  span_t entry;
+  btree_val_t ref = {.val = sibling->page_num};
 
+  ensure(txn_modify_page(tx, parent));
+  ensure(txn_modify_metadata(tx, parent->page_num, &parent_metadata));
+
+  btree_remove_entry(parent, parent_metadata, sibling_pos);
+  btree_get_entry_at(sibling, s_metadata, 0, &ref.key, &val, &entry);
+  btree_search_pos_in_page(parent, parent_metadata, &ref);
+  ensure(btree_set_in_page(tx, parent->page_num, &ref, 0));
+  return success();
+}
+// end::btree_merge_pages[]
+
+// tag::btree_maybe_merge_pages[]
+static result_t btree_maybe_merge_pages(
+    txn_t* tx, page_t* p, page_metadata_t* metadata) {
+  // if page is over 2/3 full, we'll do nothing
+  if (metadata->tree.free_space < (PAGE_SIZE / 3) * 2 ||
+      tx->state->tmp_stack.index == 0)  // nothing to merge with
+    return success();
   int16_t cur_pos;
   page_t parent = {0};
   ensure(btree_stack_pop(
       &tx->state->tmp_stack, &parent.page_num, &cur_pos));
   page_metadata_t* parent_metadata;
   ensure(txn_get_page_and_metadata(tx, &parent, &parent_metadata));
-  uint16_t sibling_pos;
-  ensure(btree_find_best_sibling_to_merge(
-      tx, &parent, parent_metadata, (uint16_t)cur_pos, &sibling_pos));
-  page_t sibling = {
-      .page_num = btree_get_val_at(&parent, sibling_pos)};
+  uint16_t max_pos = parent_metadata->tree.floor / sizeof(uint16_t);
+  if (cur_pos == 0 || cur_pos == max_pos - 1) {
+    return btree_maybe_free_empty_page(  // not merging at start / end
+        tx, p, metadata, &parent, parent_metadata, (uint16_t)cur_pos);
+  }
+  uint16_t sibling_pos = (uint16_t)cur_pos + 1;
+  page_t sibling       = {.page_num = btree_get_val_at(
+                        &parent, parent_metadata, sibling_pos)};
   page_metadata_t* s_metadata;
-  ensure(txn_modify_page(tx, &sibling));
-  ensure(txn_modify_metadata(tx, sibling.page_num, &s_metadata));
-  ensure(txn_modify_page(tx, &parent));
-  ensure(txn_modify_metadata(tx, parent.page_num, &parent_metadata));
-
-  // cannot merge leaf & branch pages
+  ensure(txn_get_metadata(tx, sibling.page_num, &s_metadata));
   if (s_metadata->tree.page_flags != metadata->tree.page_flags) {
-    if (metadata->tree.floor == 0) {  // emptied the page
-      ensure(btree_remove_from_parent(tx, &parent, parent_metadata, p,
-          (uint16_t)cur_pos, &sibling, s_metadata));
-    }
-    return success();
+    return btree_maybe_free_empty_page(  // cannot merge leaf & branch
+        tx, p, metadata, &parent, parent_metadata, (uint16_t)cur_pos);
   }
-
-  int8_t step;
-  ensure(btree_balance_entries(
-      p, metadata, &sibling, s_metadata, &step));
-  if (s_metadata->tree.floor == 0) {  // completed emptied sibling...
-    ensure(btree_remove_from_parent(tx, &parent, parent_metadata,
-        &sibling, sibling_pos, p, metadata));
-    return success();
-  }
-  uint64_t val;
-  span_t entry;
-  btree_val_t ref = {0};
-  if (step != -1) {
-    ref.val = sibling.page_num;
-    btree_remove_entry(&parent, parent_metadata, sibling_pos);
-    ensure(btree_get_at(
-        &sibling, s_metadata, 0, &ref.key, &val, &entry));
-  } else {
-    ref.val = p->page_num;
-    btree_remove_entry(&parent, parent_metadata, (uint16_t)cur_pos);
-    ensure(btree_get_at(p, metadata, 0, &ref.key, &val, &entry));
-  }
-  btree_search_pos_in_page(&parent, parent_metadata, &ref);
-  ensure(btree_set_in_page(tx, parent.page_num, &ref, 0));
-  if (ref.tree_id_changed) {
-    del->tree_id_changed = true;
-    del->tree_id         = ref.tree_id;
-  }
+  ensure(btree_merge_pages(tx, p, metadata, &parent, parent_metadata,
+      &sibling, sibling_pos));
   return success();
 }
+// end::btree_maybe_merge_pages[]
 
+// tag::btree_del[]
 result_t btree_del(txn_t* tx, btree_val_t* del) {
   assert(btree_validate_key(&del->key));
   page_t p;
@@ -733,6 +733,7 @@ result_t btree_del(txn_t* tx, btree_val_t* del) {
   ensure(txn_modify_page(tx, &p));
   del->val =
       btree_remove_entry(&p, metadata, (uint16_t)del->position);
-  ensure(btree_maybe_merge_pages(tx, &p, metadata, del));
+  ensure(btree_maybe_merge_pages(tx, &p, metadata));
   return success();
 }
+// end::btree_del[]

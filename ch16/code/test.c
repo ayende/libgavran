@@ -11,7 +11,33 @@
 #include <gavran/internal.h>
 #include <gavran/test.h>
 
+// tag::get_last_hour_entries[]
+typedef void (*callback_t)(uint64_t);
+
+static result_t get_last_hour_entries(
+    db_t* db, uint64_t tree_id, callback_t callback) {
+  txn_t tx;
+  ensure(txn_create(db, TX_READ, &tx));
+  defer(txn_close, tx);
+  time_t an_hour_ago    = time(0) - (60 * 60);
+  uint64_t big_endian   = bswap_64(an_hour_ago);
+  btree_cursor_t cursor = {
+      .key     = {.address = &big_endian, .size = sizeof(uint64_t)},
+      .tree_id = tree_id,
+      .tx      = &tx,
+  };
+  ensure(btree_cursor_search(&cursor));
+  defer(btree_free_cursor, cursor);
+  while (true) {
+    ensure(btree_get_next(&cursor));
+    if (cursor.has_val == false) break;
+    callback(cursor.val);
+  }
+}
+// end::get_last_hour_entries[]
+
 // tag::tests16[]
+
 static result_t create_btree(db_t* db, uint64_t* tree_id) {
   txn_t w;
   ensure(txn_create(db, TX_WRITE, &w));
@@ -129,13 +155,7 @@ describe(btree) {
         sprintf(buffer, "%0255d", i);
         btree_val_t del = {.tree_id = tree_id,
             .key = {.address = buffer, .size = 255}};
-        if (i == 41) {
-          printf("a");
-        }
         assert(btree_del(&w, &del));
-        if (del.has_val == false || del.val != i) {
-          printf("a");
-        }
         assert(del.has_val);
         assert(del.val == i);
       }
