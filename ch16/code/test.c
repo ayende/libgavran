@@ -1,3 +1,4 @@
+#include <byteswap.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -12,28 +13,28 @@
 #include <gavran/test.h>
 
 // tag::get_last_hour_entries[]
-typedef void (*callback_t)(uint64_t);
+// typedef void (*callback_t)(uint64_t);
 
-static result_t get_last_hour_entries(
-    db_t* db, uint64_t tree_id, callback_t callback) {
-  txn_t tx;
-  ensure(txn_create(db, TX_READ, &tx));
-  defer(txn_close, tx);
-  time_t an_hour_ago    = time(0) - (60 * 60);
-  uint64_t big_endian   = bswap_64(an_hour_ago);
-  btree_cursor_t cursor = {
-      .key     = {.address = &big_endian, .size = sizeof(uint64_t)},
-      .tree_id = tree_id,
-      .tx      = &tx,
-  };
-  ensure(btree_cursor_search(&cursor));
-  defer(btree_free_cursor, cursor);
-  while (true) {
-    ensure(btree_get_next(&cursor));
-    if (cursor.has_val == false) break;
-    callback(cursor.val);
-  }
-}
+// static result_t get_last_hour_entries(
+//     db_t* db, uint64_t tree_id, callback_t callback) {
+//   txn_t tx;
+//   ensure(txn_create(db, TX_READ, &tx));
+//   defer(txn_close, tx);
+//   time_t an_hour_ago    = time(0) - (60 * 60);
+//   uint64_t big_endian   = bswap_64(an_hour_ago);
+//   btree_cursor_t cursor = {
+//       .key     = {.address = &big_endian, .size =
+//       sizeof(uint64_t)}, .tree_id = tree_id, .tx      = &tx,
+//   };
+//   ensure(btree_cursor_search(&cursor));
+//   defer(btree_free_cursor, cursor);
+//   while (true) {
+//     ensure(btree_get_next(&cursor));
+//     if (cursor.has_val == false) break;
+//     callback(cursor.val);
+//   }
+//   return success();
+// }
 // end::get_last_hour_entries[]
 
 // tag::tests16[]

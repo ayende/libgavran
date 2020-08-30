@@ -516,9 +516,40 @@ structure of the data inside a `hash` page. The extendible hash table we build h
 cost us 16 bytes to hold. In other words, a single `hash` page would be able to store up to 512 entries. 
 
 You might have noticed earlier in this chapter that I kept referring to the `hash` pages as capable of holding much more than that, but I didn't give an exact number. This is because
-we aren't going to store the entry data as is. We are going to use `varint` encoding for this purpose. This is a common encoding format for integers that allow us to pack small
-integers with high degree of efficiency. The idea is that we can write an `int64_t` in far fewer bytes. The `varint` encoding is _really_ common and is used in many scenarios.
-You can https://developers.google.com/protocol-buffers/docs/encoding[read more about the `varint` encoding] if you are unfamiliar with it. 
+we aren't going to store the entry data as is. We are going to use `varint` encoding for this purpose. There are _many_ formats for https://github.com/stoklund/varint[varints]. 
+The one that we are going to use was taken from the https://github.com/danburkert/bytekey/[bytekey repository]. 
+
+The `bytekey` format uses a 4 bit prefix to denote the length of the key, unlike the common 7 bit varint encoding such as the one used by 
+https://developers.google.com/protocol-buffers/docs/encoding[Protocol Buffers]. Let's compare the two options in terms of the size that they take, you can see the full details
+in <<bytekey_vs_varint>>.
+
+[[bytekey_vs_varint]]
+.Encoded size per numeric range for `bytekey` and `7 bits varint` 
+|===
+| bytes | `bytekey`                                                 | `7 bits varint`
+|  1    | 0 .. 15                                                   | 0 .. 127
+|  2    | 16 .. 4095                                                | 128 .. 16,383
+|  3    | 4096 .. 1,048,575                                         | 16,384 .. 2,097,151
+|  4    | 1,048,576 .. 268,435,455                                  | 2,097,152 .. 268,435,456
+|  5    | 268,435,456 .. 68,719,476,735                             | 268,435,456 .. 34,359,738,367
+|  6    | 68,719,476,736 .. 17,592,186,044,415                      | 34,359,738,368 .. 4,398,046,511,103
+|  7    | 17,592,186,044,416 .. 4,503,599,627,370,495               | 4,398,046,511,104 .. 562,949,953,421,311
+|  8    | 4,503,599,627,370,496 .. 1,152,921,504,606,846,975        | 562,949,953,421,312 .. 72,057,594,037,927,935
+|  9    | 1,152,921,504,606,846,976 .. 18,446,744,073,709,551,616   | 72,057,594,037,927,936 .. 9,223,372,036,854,775,807
+|  10   | N/A                                                       | 9,223,372,036,854,775,808 .. 18,446,744,073,709,551,616
+|===
+
+The maximum size of `bytekey` is 9 bytes, while `varint` is maxed at 10 bytes. However, for smaller values, the `varint` tends to be a bit cheaper. So why chose the `varint` 
+encoding?
+
+The idea is that we can take a `uint64_t` value and encode it to a buffer. Both formats achieve this goal, but there is a very important distinction between them. If we compare
+the buffers of two values generated with `varint` using `memcmp()`, we'll not get a result based on the values. This is because the `varint` output is not going to be ordered
+in the same manner as the values that it encodes.
+
+The `bytekey` format, on the other hand, allows us to directly compare the buffers using `memcmp()` and get result (less than, equals or greater than) that would match the actual
+encoded value. This doesn't matter too much right now, but it will become much more important when we start working with B+Tree, where the sort order of the key _matters_. 
+For that reason, I chose this format for Gavran. 
+
 The API Gavran uses for working with them is shown in <<varint_api>>.
 
 [source]
@@ -530,8 +561,8 @@ include::../include/gavran/internal.h[tags=varint_api]
 
 The `varint_encode()` function return the pointer it received _after_ the write of the number they got. The same is the case for `varint_decode()`. I'm not going to dive into 
 the actual implementation. You can check the source code for that or read about the encoding format. What is important to understand about `varint` is that instead of taking 8 bytes
-to store an `uint64_t` we encode the data so it will take between 1 - 10 bytes. The size of the encoded `varint` depends on the value we encode. The bigger the value, the more bytes
-we need to encode the number. Note that we'll only cross the 8 bytes threshold if the value is larger than `72,057,594,037,927,936` so up until that point, this is an absolute win.
+to store an `uint64_t` we encode the data so it will take between 1 - 9 bytes. The size of the encoded `varint` depends on the value we encode. The bigger the value, the more bytes
+we need to encode the number. Note that we'll only cross the 8 bytes threshold if the value is larger than `1,152,921,504,606,846,975` so up until that point, this is an absolute win.
 
 The `varint` encoding allows us to store the entries in a far more efficient manner, but it come with a different problem. Now that the size of the data isn't fixed, how can we find
 where the relevant entry is. If we were storing the entries in the page as is, we could treat the page as an array with 512 elements and index into that directly using the provided

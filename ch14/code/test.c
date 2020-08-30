@@ -19,6 +19,49 @@ describe(hash) {
     system("rm -f /tmp/db/*");
   }
 
+  it("varint encode") {
+    uint8_t buffer[256];
+    uint64_t l, v;
+
+    v = 3;
+    assert(1 == varint_get_length(v));
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    v = 3546600000;
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    v = 2;
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    v = 100;
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    v = 270;
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    v = 1470;
+    varint_encode(v, buffer);
+    varint_decode(buffer, &l);
+    assert(v == l);
+
+    assert(1 == varint_get_length(2));
+    assert(2 == varint_get_length(255));
+    assert(2 == varint_get_length(100));
+    assert(2 == varint_get_length(270));
+    assert(2 == varint_get_length(1470));
+    assert(3 == varint_get_length(4470));
+  }
+
   it("can write and read multiple values") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};

@@ -157,7 +157,7 @@ describe(containers) {
     { assert(read_item(&db, container_id, item_id, buf2)); }
   }
 
-#define ITEM_ARRAY_SIZE 190
+#define ITEM_ARRAY_SIZE 185
   it("force page defrag") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};

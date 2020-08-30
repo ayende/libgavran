@@ -137,11 +137,10 @@ static result_t btree_create_root_page(
   btree_init_metadata(*metadata, page_flags_tree_branch);
 
   size_t req_size =
-      varint_get_length(0) + 0 + varint_get_length(p->page_num);
+      varint_get_length(0) + 0 + varint_get_length(new.page_num);
   uint8_t* val_p =
       btree_insert_to_page(p, *metadata, 0, (uint16_t)req_size);
-  *val_p++ = 0;  // key size
-  varint_encode(new.page_num, val_p);
+  varint_encode(new.page_num, varint_encode(0, val_p));
   ensure(btree_stack_push(&tx->state->tmp_stack, p->page_num, 0));
 
   memcpy(p, &new, sizeof(page_t));

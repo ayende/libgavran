@@ -31,7 +31,7 @@
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },
       "args": [
-        "btree"
+        "containers"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
