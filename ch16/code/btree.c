@@ -473,9 +473,45 @@ result_t btree_cursor_search(btree_cursor_t* c) {
   ensure(btree_stack_push(
       &c->tx->state->tmp_stack, p.page_num, kvp.position));
 
+  // <1>
   memcpy(&c->stack, &c->tx->state->tmp_stack, sizeof(btree_stack_t));
   memset(&c->tx->state->tmp_stack, 0, sizeof(btree_stack_t));
 
+  return success();
+}
+
+static result_t btree_iterante_next_page(btree_cursor_t* c, page_t* p,
+    page_metadata_t** metadata, int16_t* pos, int16_t step,
+    bool* done) {
+  while (c->stack.index > 0) {
+    ensure(btree_stack_pop(&c->stack, &p->page_num, pos));
+    ensure(txn_get_page_and_metadata(c->tx, p, metadata));
+    assert((*metadata)->tree.page_flags == page_flags_tree_branch);
+    uint16_t max_pos = (*metadata)->tree.floor / sizeof(uint16_t);
+    *pos += step;
+    if (*pos < 0 || *pos >= max_pos) {
+      continue;  // go up...
+    }
+    ensure(btree_stack_push(&c->stack, p->page_num, *pos));
+    p->page_num = btree_get_val_at(p, *metadata, (uint16_t)*pos);
+    ensure(txn_get_page_and_metadata(c->tx, p, metadata));
+    // go down all branches
+    while ((*metadata)->tree.page_flags == page_flags_tree_branch) {
+      max_pos           = (*metadata)->tree.floor / sizeof(uint16_t);
+      uint16_t edge_pos = step > 0 ? 0 : (max_pos - 1);
+      ensure(btree_stack_push(
+          &c->stack, p->page_num, (int16_t)edge_pos));
+      p->page_num = btree_get_val_at(p, *metadata, edge_pos);
+      ensure(txn_get_page_and_metadata(c->tx, p, metadata));
+    }
+    if (step > 0) {
+      *pos = ~0;
+    } else {
+      *pos = ~(int16_t)((*metadata)->tree.floor / sizeof(uint16_t));
+    }
+    return success();
+  }
+  *done = true;
   return success();
 }
 
@@ -493,50 +529,24 @@ static result_t btree_iterate(btree_cursor_t* c, int8_t step) {
       pos = ~pos;
       // we are moving to previous, but we were on greater than search
       if (step < 0) pos--;
-    } else {
-      pos += step;
     }
     if (pos >= 0 && pos < max_pos) {  // still same page
       c->key.address =
           varint_decode(p.address + positions[pos], &c->key.size);
       varint_decode(c->key.address + c->key.size, &c->val);
       c->has_val = true;
-      ensure(btree_stack_push(&c->stack, p.page_num, pos));
+      ensure(btree_stack_push(&c->stack, p.page_num, pos + step));
       return success();
     }
-    while (true) {
-      if (c->stack.index == 0) {
-        c->has_val = false;
-        return success();  // done
-      }
-      ensure(btree_stack_pop(&c->stack, &p.page_num, &pos));
-      ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
-      assert(metadata->tree.page_flags == page_flags_tree_branch);
-      max_pos = metadata->tree.floor / sizeof(uint16_t);
-      pos += step;
-      if (pos < 0 || pos >= max_pos) {
-        continue;  // go up...
-      }
-      ensure(btree_stack_push(&c->stack, p.page_num, pos));
-      p.page_num = btree_get_val_at(&p, metadata, (uint16_t)pos);
-      ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
-      // go down all branches
-      while (metadata->tree.page_flags == page_flags_tree_branch) {
-        max_pos           = metadata->tree.floor / sizeof(uint16_t);
-        uint16_t edge_pos = step > 0 ? 0 : (max_pos - 1);
-        ensure(btree_stack_push(
-            &c->stack, p.page_num, (int16_t)edge_pos));
-        p.page_num = btree_get_val_at(&p, metadata, edge_pos);
-        ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
-      }
-      if (step > 0) {
-        pos = ~0;
-      } else {
-        pos = ~(int16_t)(metadata->tree.floor / sizeof(uint16_t));
-      }
+    bool done = false;
+    ensure(btree_iterante_next_page(
+        c, &p, &metadata, &pos, step, &done));
+    if (done) {
+      c->has_val = false;
       break;
     }
   }
+  return success();
 }
 
 result_t btree_get_next(btree_cursor_t* cursor) {

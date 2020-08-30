@@ -850,11 +850,37 @@ We also have the option of starting the iteration from a given key using `btree_
 It is also important to note that once we are done using the cursor, we _must_ free it using `btree_free_cursor()`. 
 
 Before we dive into the implementation of iteration on the B+Tree, I think a usage example would be a better idea. Take a look at <<get_last_hour_entries>>, where we are
-showing off a 
+showing off how we can scan a B+Tree from a particular value forward.
 
 [source]
-[[get_last_hour_entries]]
+[[get_last_entries]]
 .`btree.c` - Iterating a B+Tree from a particular point in time
 -----
-include::./code/btree.c[tags=get_last_hour_entries]
+include::./code/btree.c[tags=get_last_entries]
 -----
+<1> Using `varint_encode()` to encode the start value in a manner that would sort lexically and setting up the cursor search.
+<2> Initializing the cursor and pointing it to the value we search (or immediately afterward, if the value doesn't exists).
+<3> Setting up a defered `btree_free_cursor()` for the cursor at the end of the scope.
+<4> Moving to the next element (matching to the key we searched for the first time).
+<5> Checking if we found a value using `has_val` and getting the actual value using `val`.
+
+The code in <<get_last_entries>> has a bit of scaffolding, but I want to focus on the actual search and the scan in the end. We first setup the cursor with the key we want to start
+the scan process from. Then we start calling `btree_get_next()` in a loop, moving between the entries of the tree in sorted order.
+
+The fact that we can do that gives us a tremendous amount of power and flexibility. In this case, the keys for the B+Tree are actually `time_t` values and we search the tree for
+all entries after a particular moment in time. With forward and backward iteration, you can build very sophisticated operations on top of Gavran's B+Trees. 
+I'm also demonstrating how to use the `varint` encoding we talked about in the Extendible Hash Table chapter for sorting. 
+
+Now that we understand the API, let's see how that is actually implemented, shall we? Take a look at <<btree_cursor_search>> which setup the cursor to start the search on the
+provided key.
+
+[source]
+[[btree_cursor_search]]
+.`btree.c` - Setting up the cursor to search from a particular key
+-----
+include::./code/btree.c[tags=btree_cursor_search]
+-----
+<1> Moving the ownership of the path traversal stack from the transaction to the cursor.
+
+The code in `btree_cursor_search()` is interesting, because most of it is already familiar to us. We start by issuing the usual search in the tree using `btree_get_leaf_page_for()`
+and push the current page to the transaction's stack as well. Then we do something quite strange. We _move_ the stack from the transaction to the cursor. 

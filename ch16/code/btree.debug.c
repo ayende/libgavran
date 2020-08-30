@@ -72,7 +72,7 @@ implementation_detail result_t btree_dump_tree(
   if (metadata->tree.page_flags == page_flags_tree_branch) {
     ensure(btree_dump_branch_page(tx, &p, metadata, max));
   } else {
-    // btree_dump_page(&p, metadata, max);
+    btree_dump_page(&p, metadata, max);
   }
   return success();
 }

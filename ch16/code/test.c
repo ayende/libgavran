@@ -12,30 +12,42 @@
 #include <gavran/internal.h>
 #include <gavran/test.h>
 
-// tag::get_last_hour_entries[]
-// typedef void (*callback_t)(uint64_t);
+// tag::get_last_entries[]
+typedef void (*callback_t)(uint64_t v, void* state);
 
-// static result_t get_last_hour_entries(
-//     db_t* db, uint64_t tree_id, callback_t callback) {
-//   txn_t tx;
-//   ensure(txn_create(db, TX_READ, &tx));
-//   defer(txn_close, tx);
-//   time_t an_hour_ago    = time(0) - (60 * 60);
-//   uint64_t big_endian   = bswap_64(an_hour_ago);
-//   btree_cursor_t cursor = {
-//       .key     = {.address = &big_endian, .size =
-//       sizeof(uint64_t)}, .tree_id = tree_id, .tx      = &tx,
-//   };
-//   ensure(btree_cursor_search(&cursor));
-//   defer(btree_free_cursor, cursor);
-//   while (true) {
-//     ensure(btree_get_next(&cursor));
-//     if (cursor.has_val == false) break;
-//     callback(cursor.val);
-//   }
-//   return success();
-// }
-// end::get_last_hour_entries[]
+static void count_items(uint64_t v, void* state) {
+  (void)v;
+  (*((uint32_t*)state))++;
+}
+
+static result_t get_last_entries(db_t* db, uint64_t tree_id,
+    time_t time, callback_t callback, void* state) {
+  txn_t tx;
+  ensure(txn_create(db, TX_READ, &tx));
+  defer(txn_close, tx);
+  uint8_t buffer[10];
+  // <1>
+  uint64_t start = (uint64_t)time;
+  varint_encode(start, buffer);
+  btree_cursor_t cursor = {
+      .key = {.address = buffer, .size = varint_get_length(start)},
+      .tree_id = tree_id,
+      .tx      = &tx,
+  };
+  // <2>
+  ensure(btree_cursor_search(&cursor));
+  // <3>
+  defer(btree_free_cursor, cursor);
+  while (true) {
+    // <4>
+    ensure(btree_get_next(&cursor));
+    // <5>
+    if (cursor.has_val == false) break;
+    callback(cursor.val, state);
+  }
+  return success();
+}
+// end::get_last_entries[]
 
 // tag::tests16[]
 
@@ -53,6 +65,39 @@ describe(btree) {
     errors_clear();
     system("mkdir -p /tmp/db");
     system("rm -f /tmp/db/*");
+  }
+
+  it("records over time") {
+    db_t db;
+    db_options_t options = {.minimum_size = 4 * 1024 * 1024};
+    assert(db_create("/tmp/db/try", &options, &db));
+    defer(db_close, db);
+    uint64_t tree_id;
+    assert(create_btree(&db, &tree_id));
+    uint64_t yesterday = (uint64_t)(time(0) - 24 * 60 * 60);
+
+    {
+      txn_t w;
+      assert(txn_create(&db, TX_WRITE, &w));
+      defer(txn_close, w);
+      uint8_t buffer[10];
+
+      for (size_t i = 0; i < 24; i++) {
+        uint64_t t = (yesterday + (60 * 60 * i));
+        varint_encode(t, buffer);
+        btree_val_t set = {.tree_id = tree_id,
+            .key = {.address = buffer, .size = varint_get_length(t)},
+            .val = (uint64_t)i};
+        assert(btree_set(&w, &set, 0));
+      }
+
+      assert(txn_commit(&w));
+    }
+    uint32_t count           = 0;
+    uint64_t three_hours_ago = yesterday + (21 * 60 * 60);
+    assert(get_last_entries(
+        &db, tree_id, three_hours_ago, count_items, &count));
+    assert(count == 3);
   }
 
   it("set out of order") {
@@ -235,7 +280,7 @@ describe(btree) {
             .key = {.address = "0000", .size = 4}};
         assert(btree_cursor_search(&it));
         defer(btree_free_cursor, it);
-        for (uint32_t j = 1; j < 10 * 1000; j++) {
+        for (uint32_t j = 0; j < 10 * 1000; j++) {
           sprintf(buffer, "%04d", j);
           assert(btree_get_next(&it));
           assert(it.has_val);
