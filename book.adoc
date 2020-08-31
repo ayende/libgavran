@@ -115,3 +115,9 @@ include::./ch15/ch15.adoc[]
 :!figure-number:
 :!listing-number:  
 include::./ch16/ch16.adoc[]
+
+:figure-caption: Figure 17,
+:listing-caption: Listing 17,
+:!figure-number:
+:!listing-number:  
+include::./ch17/ch17.adoc[]

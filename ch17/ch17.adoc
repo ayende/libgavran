@@ -1,0 +1,22 @@
+== Tables
+
+In this part of the book, we have created so far the following data structures:
+
+* Extendible hash table - `map<uint64_t key, uint64_t val>` 
+* Containers - `map<uint64_t key, span_t val>` 
+* B+Trees - `sorted_map<span_t key, uint64_t val>`
+
+These form the building blocks that we need to store complex data inside of Gavran. The question is how? Each one of them independently make sense for its own purposes, but they
+are really limited.
+
+We can use the hash to do a lookup by key, but the result is just a `uint64_t`. And if the key isn't a numeric value, we'll need to hash it to a `uint64_t` key first. How useful
+is that? 
+And a container can store an arbitrary amount of data, but you can only look it up using an opaque `uint64_t` key. That is great to store things, but how will you get the data
+back? 
+And a B+Tree allows us to use arbitrary byte strings (`span_t`) to look up the matching numeric value as well as perform iterations. But again, what use is there in an `uint64_t`?
+
+If we compose all three of those features together, on the other hand, we might be getting somewhere. We are going to merge these three features together to create the Table 
+abstraction. A table is just a container along with associated hash or B+Tree. The idea is that the container will store the data, and the B+Tree or the hash will serve as indexes
+for the data.
+
+Let's look at the API for defining a table first, then we'll discuss exactly how all of this works. 

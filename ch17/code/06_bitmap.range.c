@@ -1,0 +1,1 @@
+../../ch06/code/bitmap.range.c

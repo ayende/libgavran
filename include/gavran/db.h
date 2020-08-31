@@ -441,3 +441,41 @@ result_t btree_get_prev(btree_cursor_t *cursor);
 result_t btree_free_cursor(btree_cursor_t *cursor);
 enable_defer(btree_free_cursor);
 // end::btree_cursor_api[]
+
+// tag::table_api[]
+typedef enum __attribute__((__packed__)) index_type {
+  index_type_container,
+  index_type_btree,
+  index_type_hash
+} index_type_t;
+
+typedef struct table_schema {
+  char *name;
+  index_type_t *types;
+  uint64_t *index_ids;
+  uint16_t count;
+  uint8_t padding[6];
+} table_schema_t;
+
+result_t table_create_anonymous(txn_t *tx, table_schema_t *schema);
+result_t table_drop_anonymous(txn_t *tx, table_schema_t *schema);
+result_t table_create(txn_t *tx, table_schema_t *schema);
+result_t table_drop(txn_t *tx, char *table_name);
+result_t table_get_schema(
+    txn_t *tx, char *table_name, table_schema_t *schema);
+table_schema_t table_root_schema(void);
+// end::table_api[]
+
+typedef struct table_item {
+  table_schema_t *schema;
+  uint64_t item_id;
+  span_t *entries;
+  uint16_t number_of_entries;
+  uint16_t index_to_use;
+  uint8_t padding[4];
+  span_t result;
+} table_item_t;
+result_t table_set(txn_t *tx, table_item_t *item);
+result_t table_del(txn_t *tx, table_item_t *item);
+
+result_t table_get(txn_t *tx, table_item_t *item);

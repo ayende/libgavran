@@ -26,12 +26,12 @@
       "name": "(gdb) Launch",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceRoot}/ch16/code/build/gavran",
+      "program": "${workspaceRoot}/ch17/code/build/gavran",
       "sourceFileMap": {
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },
       "args": [
-        "btree"
+        "tables"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
