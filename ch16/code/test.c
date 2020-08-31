@@ -50,7 +50,6 @@ static result_t get_last_entries(db_t* db, uint64_t tree_id,
 // end::get_last_entries[]
 
 // tag::tests16[]
-
 static result_t create_btree(db_t* db, uint64_t* tree_id) {
   txn_t w;
   ensure(txn_create(db, TX_WRITE, &w));
@@ -74,7 +73,7 @@ describe(btree) {
     defer(db_close, db);
     uint64_t tree_id;
     assert(create_btree(&db, &tree_id));
-    uint64_t yesterday = (uint64_t)(time(0) - 24 * 60 * 60);
+    time_t yesterday = (time(0) - 24 * 60 * 60);
 
     {
       txn_t w;
@@ -83,7 +82,7 @@ describe(btree) {
       uint8_t buffer[10];
 
       for (size_t i = 0; i < 24; i++) {
-        uint64_t t = (yesterday + (60 * 60 * i));
+        uint64_t t = ((uint64_t)yesterday + (60 * 60 * i));
         varint_encode(t, buffer);
         btree_val_t set = {.tree_id = tree_id,
             .key = {.address = buffer, .size = varint_get_length(t)},
@@ -93,8 +92,8 @@ describe(btree) {
 
       assert(txn_commit(&w));
     }
-    uint32_t count           = 0;
-    uint64_t three_hours_ago = yesterday + (21 * 60 * 60);
+    uint32_t count         = 0;
+    time_t three_hours_ago = yesterday + (21 * 60 * 60);
     assert(get_last_entries(
         &db, tree_id, three_hours_ago, count_items, &count));
     assert(count == 3);

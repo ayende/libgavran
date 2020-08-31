@@ -152,7 +152,8 @@ If the keys are arbitrary data, how can we sort on them? We are going to use the
 be sortable in lexical order using their raw binary value. It would be simple to provide a comparison function to the B+Tree to allow for more complex comparisons, but 
 I find that it is usually only make things more complex to the implementor and the user alike. 
 
-The fact that the keys are opaque bytes has some interesting implications on sorting when using numbers, for examples. We'll address this in detail later in this chapter.
+The fact that the keys are opaque bytes has some interesting implications on sorting when using numbers, for examples. That is why we used the `bytekey` format when we
+decided how to structure our `varint`. They are lexically sorted in their encoded state.
 
 We ensure that all our keys fit the required criteria using the code in <<btree_validate_key>>. 
 
@@ -207,11 +208,11 @@ We start at the middle of the `positions` array and we split the remaining range
 return the position immediately. 
 
 If we _don't_ have a match, we have to return where the value _should_ go. If the `last_match` we had was smaller than the current value, then the value needs to be on the 
-_following_ position, so we increment it. Finally, we can return the bitwise complement to the position, to indicate a missing value. The `\~` operator allows us to distinguish
-between a value that was found in the page or not. But why not return `-1` or something similar?
+_following_ position, so we increment it. Finally, we can return the bitwise complement to the position, to indicate a missing value. The +++~+++ operator allows 
+us to distinguish between a value that was found in the page or not. But why not return `-1` or something similar?
 
-We are going to use `btree_search_pos_in_page()` to tell us where we should be _placing_ a value in the page, not just where it _is_. Using `\~` allows us to do the work of
-searching in the page just once. Why does this matter? We'll be calling to `btree_search_pos_in_page()`  a _lot_. 
+We are going to use `btree_search_pos_in_page()` to tell us where we should be _placing_ a value in the page, not just where it _is_. Using bitwise complement (+++~+++) 
+allows us to do the work of searching in the page just once. Why does this matter? We'll be calling to `btree_search_pos_in_page()`  a _lot_. 
 If you'll run the B+Tree code under a profiler, you are very likely to find this function in your hot spots. Any optimization in the search is going to have a big impact on
 our B+Tree performance.
 
@@ -465,7 +466,7 @@ We use the `ref.key` to hold the key that will be inserted to the parent page an
 in the new page. 
 
 [IMPORTANT]
-.You can make a _single_ change to the tree
+.You can make a *single* change to the tree at a time
 ====
 An interesting implication of the fact that an insert to a page can cause a page split is that we have a hard time to do multiple operations on the page at the same
 time. For example, if we wanted to modify two keys in the parent page, we might run into a case where the first key would cause a page split in the parent page, which
@@ -854,9 +855,9 @@ showing off how we can scan a B+Tree from a particular value forward.
 
 [source]
 [[get_last_entries]]
-.`btree.c` - Iterating a B+Tree from a particular point in time
+.`test.c` - Iterating a B+Tree from a particular point in time
 -----
-include::./code/btree.c[tags=get_last_entries]
+include::./code/test.c[tags=get_last_entries]
 -----
 <1> Using `varint_encode()` to encode the start value in a manner that would sort lexically and setting up the cursor search.
 <2> Initializing the cursor and pointing it to the value we search (or immediately afterward, if the value doesn't exists).
@@ -884,3 +885,89 @@ include::./code/btree.c[tags=btree_cursor_search]
 
 The code in `btree_cursor_search()` is interesting, because most of it is already familiar to us. We start by issuing the usual search in the tree using `btree_get_leaf_page_for()`
 and push the current page to the transaction's stack as well. Then we do something quite strange. We _move_ the stack from the transaction to the cursor. 
+Why are we doing this?
+
+Remember when I said that frequent memory allocations are a usual source for hot spots in your programs? We can avoid allocating and freeing the stack for the cursor in most 
+cases if we simply move the stack's ownership from the transaction to the cursor. The `btree_get_leaf_page_for()` is already writing to the transaction's path stack as it works 
+and we can simply move that to the cursor and use that. You can also see in <<btree_cursor_search>> that the actual implementation of iterating over the tree is done using the
+`btree_iterate()` function, which accepts the direction in which it should go. You can see how that looks like in <<btree_iterate>>.
+
+[source]
+[[btree_iterate]]
+.`btree.c` - Moving from one entry to the next while iterating on the tree
+-----
+include::./code/btree.c[tags=btree_iterate]
+-----
+
+In `btree_iterate()` is called repeatedly to get the next (or previous) item in the tree. It keeps its state between calls in the cursor's stack. Most importantly, the current
+page and the position of the next item to yield. We take advantage of the way `btree_search_pos_in_page()` works when dealing with missing values. The `btree_search_pos_in_page()`
+will always point to an entry that is _equals or greater_ than the provided key. That means that if we don't have a match key, we'll use bitwise complement to point to where the
+next greater value should go. 
+
+When iterating over the tree, we'll flip the negative `pos` value to know where we should start. Note that if we are iterating in reverse and the value is negative, it means 
+that we are actually pointing to an element _past_ the key that we want, so we go back one step and only then yield. 
+Before we return to the caller, we setup the _next_ call on the following position. This continue in this manner as long as there are entries in the page to return.
+
+When we run out of entries in the page, it is time to go to the _next_ page, which is the responsibility of `btree_iterate_next_page()`, shown on <<btree_iterate_next_page>>.
+
+[source]
+[[btree_iterate_next_page]]
+.`btree.c` - Finding the next page to continue the iteration from
+-----
+include::./code/btree.c[tags=btree_iterate_next_page]
+-----
+
+The work of the `btree_iterate_next_page()` is very similar to how we handle page splits and merges. It runs through the cursor stack, which represents the traversal path in
+the tree and use that to find the next page to scan for entries. Because the pages in the tree are sorted, that means that we can easily go forward and backward through the 
+tree with minimal amount of work required. 
+
+The function will go up to the parent page and then down to the next page, borrowing down until it reaches a leaf page. It might be easier to think about this approach as a 
+breadth first scan of the pages tree. 
+
+Iterating from a known key works quite nicely when we _have_ a key, but it turns out that it is _really_ common to want to start the iteration process at the start or end of
+the tree. Gavran provides dedicated API for this common scenario. You can see how that works in <<btree_cursor_at>>.
+
+[source]
+[[btree_cursor_at]]
+.`btree.c` - Setting the starting point of the iteration at the start or the end of the tree
+-----
+include::./code/btree.c[tags=btree_cursor_at]
+-----
+
+The `btree_cursor_at()` function will simply go to the leftmost or rightmost page on each branch, until it hit a leaf page, storing the path in the transaction's stack. Then
+we move the stack to the cursor and we can call `btree_get_next()` or `btree_get_prev()` to do the actual iteration.
+
+The final topic to discuss with regards to iterations and cursor is how to _free_ a cursor. This is shown in <<btree_free_cursor>>.
+
+[source]
+[[btree_free_cursor]]
+.`btree.c` - Freeing a cursor and returning its memory to the transaction
+-----
+include::./code/btree.c[tags=btree_free_cursor]
+-----
+
+The code in `btree_free_cursor()` isn't actually freeing the cursor's memory in most cases. If you are using a single cursor at a time, the `btree_cursor_search()` will move the
+ownership of the stack from the transaction to the cursor. The `btree_free_cursor()` will check if there isn't a new stack on the transaction and if there isn't, will move the
+ownership back to the transaction.
+
+The idea is that we enable two key scenarios:
+
+* If you have just a single cursor at a time, we can avoid allocating an additional stack.
+* If you have interleaved operations (multiple cursors at once, searching items while iterating, etc), a new stack will be created on the transaction and freeing the cursor will
+  actually free the memory of the stack.
+
+This is _it_, we have a fully fleshed out B+Tree implementation that is capable of doing quite a lot for us. We still need to bring all the pieces together so you can see how they
+all fit to a cohesive hole, but I hope that you are starting to see how each one of the pieces fit together.
+
+=== Unit tests
+
+When testing B+Trees, we need to try to hit each one of the possible edge cases in the system. You can see that the tests write data in ascending and descending orders, delete items
+from the middle of the tree and use various sizes for the keys (to affect the depth of the tree). There are _many_ more tests that can be written, but I want to give you just enough
+tests to understand the API and its usage and not try to turn this into an exhaustive list of options.
+
+[source]
+[[tests16]]
+.`test.c` - Testing the behavior of the B+Tree
+-----
+include::./code/test.c[tags=tests16]
+-----
