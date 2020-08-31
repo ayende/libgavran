@@ -16,7 +16,7 @@ table_schema_t table_root_schema() {
 }
 
 result_t table_create_anonymous(txn_t *tx, table_schema_t *schema) {
-  ensure(schema->count > 0);
+  ensure(schema->count > 1);
   ensure(schema->types[0] == index_type_container);
   ensure(container_create(tx, &schema->index_ids[0]));
   for (size_t i = 1; i < schema->count; i++) {
@@ -197,12 +197,28 @@ result_t table_set(txn_t *tx, table_item_t *item) {
         break;
       }
       case index_type_hash: {
+        ensure(item->entries[i].size < 512);
+        uint8_t buffer[10 /*item_id*/ + 3 /* entry_size*/ +
+                       512 /*entry_bytes*/ +
+                       10 /*next_id*/];  // max size of entry
+        uint8_t *end = varint_encode(item->entries[i].size,
+            varint_encode(c_item.item_id, buffer));
+        memcpy(end, item->entries[i].address, item->entries[i].size);
+        end += item->entries[i].size;
+
+        hash_val_t get = {.hash_id = item->schema->index_ids[i],
+            .key = table_compute_hash_for(&item->entries[i])};
+        ensure(hash_get(tx, &get));
+        end = varint_encode(get.has_val ? get.val : 0, end);
+        container_item_t ref = {
+            .container_id = item->schema->index_ids[0],
+            .data         = {
+                .address = buffer, .size = (size_t)(end - buffer)}};
+        ensure(container_item_put(tx, &ref));
         hash_val_t set = {
             .key = table_compute_hash_for(&item->entries[i]),
-            .val = c_item.item_id};
-        hash_val_t old = {0};
-        ensure(hash_set(tx, &set, &old));
-        ensure(old.has_val == false, msg("Duplicate value"));
+            .val = ref.item_id};
+        ensure(hash_set(tx, &set, 0));
         break;
       }
       case index_type_container:
@@ -275,9 +291,27 @@ result_t table_get(txn_t *tx, table_item_t *item) {
           .hash_id = item->schema->index_ids[item->index_to_use],
           .key     = table_compute_hash_for(item->entries)};
       ensure(hash_get(tx, &get));
-      if (get.has_val == false) goto no_entry_found;
-      item->item_id = get.val;
-      goto get_from_container;
+      while (true) {
+        if (get.has_val == false) goto no_entry_found;
+        container_item_t ref = {.item_id = get.val,
+            .container_id = item->schema->index_ids[0]};
+        ensure(container_item_get(tx, &ref));
+        item->result.address = varint_decode(
+            varint_decode(ref.data.address, &item->item_id),
+            &item->result.size);
+        if (item->entries->size == item->result.size &&
+            memcmp(item->entries->address, item->result.address,
+                item->entries->size) == 0) {
+          goto get_from_container;  // found match
+        }
+        if (item->result.address + item->result.size ==
+            ref.data.address + ref.data.size) {  // end of data
+          get.has_val = false;
+        } else {
+          varint_decode(
+              item->result.address + item->result.size, &get.val);
+        }
+      }
     }
     default:
       failed(EINVAL, msg("Uknown index type"));
