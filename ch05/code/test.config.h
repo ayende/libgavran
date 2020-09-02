@@ -1,0 +1,1 @@
+#define FIRST_USABLE_PAGE 2

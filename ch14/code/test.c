@@ -204,6 +204,20 @@ describe(hash) {
         assert(hv_read.val == i + 3);
       }
 
+      uint64_t pages[10] = {6, 12, 5, 9, 8, 13, 14, 11, 12, 18};
+      for (size_t i = 0; i < 10; i++) {
+        page_t p = {.page_num = pages[i]};
+        page_metadata_t* metadata;
+        assert(txn_get_page_and_metadata(&w, &p, &metadata));
+        int c         = 0;
+        hash_val_t it = {0};
+        while (true) {
+          if (hash_page_get_next(&p, &it) == false) break;
+          c++;
+        }
+        assert(c == metadata->hash.number_of_entries);
+      }
+
       // check iteration
       pages_map_t* map;
       assert(pagesmap_new(8, &map));

@@ -8,6 +8,8 @@
 #include <gavran/db.h>
 #include <gavran/test.h>
 
+#include "test.config.h"
+
 // tag::tests06[]
 describe(metadata_tests) {
   before_each() {
@@ -29,11 +31,11 @@ describe(metadata_tests) {
     page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 4};
     assert(txn_allocate_page(&tx, &p1, &metadata, 0));
-    assert(p1.page_num == 2);
+    assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 4};
     assert(txn_allocate_page(&tx, &p2, &metadata, 0));
-    assert(p2.page_num == 6);
+    assert(p2.page_num == FIRST_USABLE_PAGE + 4);
   }
 
   it("will not allocate on metadata boundary (small)") {
@@ -49,7 +51,7 @@ describe(metadata_tests) {
     page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
     assert(txn_allocate_page(&tx, &p1, &metadata, 0));
-    assert(p1.page_num == 2);
+    assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
     assert(txn_allocate_page(&tx, &p2, &metadata, 0));
@@ -73,7 +75,7 @@ describe(metadata_tests) {
 
     page_t p2 = {.number_of_pages = 32};
     assert(txn_allocate_page(&tx, &p2, &metadata, 0));
-    assert(p2.page_num == 2);
+    assert(p2.page_num == FIRST_USABLE_PAGE);
   }
 
   it("after move to next range will still use existing range") {
@@ -89,7 +91,7 @@ describe(metadata_tests) {
     page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
     assert(txn_allocate_page(&tx, &p1, &metadata, 0));
-    assert(p1.page_num == 2);
+    assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
     assert(txn_allocate_page(&tx, &p2, &metadata, 0));
@@ -97,7 +99,7 @@ describe(metadata_tests) {
 
     page_t p3 = {.number_of_pages = 16};
     assert(txn_allocate_page(&tx, &p3, &metadata, 0));
-    assert(p3.page_num == 98);
+    assert(p3.page_num == FIRST_USABLE_PAGE + 96);
   }
 
   it("can free and reuse") {
@@ -113,13 +115,13 @@ describe(metadata_tests) {
     page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
     assert(txn_allocate_page(&tx, &p1, &metadata, 0));
-    assert(p1.page_num == 2);
+    assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
     assert(txn_allocate_page(&tx, &p2, &metadata, 0));
-    metadata->overflow.page_flags = page_flags_overflow;
+    metadata->overflow.page_flags      = page_flags_overflow;
     metadata->overflow.number_of_pages = 32;
-    metadata->overflow.size_of_value = 32 * PAGE_SIZE;
+    metadata->overflow.size_of_value   = 32 * PAGE_SIZE;
     assert(p2.page_num == 129);
     assert(txn_free_page(&tx, &p2));
 

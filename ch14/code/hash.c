@@ -54,9 +54,11 @@ static bool hash_get_from_page(page_t* p, page_metadata_t* metadata,
     uint8_t* cur = buckets[idx].data;
     while (cur < end) {
       uint64_t k, v;
-      cur = varint_decode(varint_decode(cur, &k), &v);
+      cur           = varint_decode(varint_decode(cur, &k), &v);
+      uint8_t flags = *cur++;
       if (k == kvp->key) {
-        kvp->val = v;
+        kvp->val   = v;
+        kvp->flags = flags;
         return true;
       }
     }
@@ -70,12 +72,13 @@ static bool hash_get_from_page(page_t* p, page_metadata_t* metadata,
 implementation_detail bool hash_page_get_next(
     page_t* p, hash_val_t* it) {
   hash_bucket_t* buckets = p->address;
-  uint64_t idx           = it->iter_state / sizeof(hash_bucket_t);
+  uint64_t idx = it->iter_state.pos_in_page / sizeof(hash_bucket_t);
   if (idx >= BUCKETS_IN_PAGE) {
     it->has_val = false;
     return false;
   }
-  uint16_t offset = it->iter_state % sizeof(hash_bucket_t);
+  uint16_t offset =
+      it->iter_state.pos_in_page % sizeof(hash_bucket_t);
   while (offset >= buckets[idx].bytes_used) {
     idx++;
     offset = 0;
@@ -87,13 +90,15 @@ implementation_detail bool hash_page_get_next(
   uint8_t* start = buckets[idx].data + offset;
   uint8_t* end =
       varint_decode(varint_decode(start, &it->key), &it->val);
+  it->flags     = *end++;
   it->has_val   = true;
   uint32_t size = (uint32_t)(end - start);
   if (size + offset == buckets[idx].bytes_used) {
-    it->iter_state = (uint32_t)((idx + 1) * sizeof(hash_bucket_t));
+    it->iter_state.pos_in_page =
+        (uint16_t)((idx + 1) * sizeof(hash_bucket_t));
   } else {
-    it->iter_state =
-        (uint32_t)(idx * sizeof(hash_bucket_t) + offset + size);
+    it->iter_state.pos_in_page =
+        (uint16_t)(idx * sizeof(hash_bucket_t) + offset + size);
   }
   return true;
 }
@@ -161,6 +166,7 @@ static bool hash_set_in_page(page_t* p, page_metadata_t* metadata,
   uint8_t buffer[20];
   uint8_t* buf_end =
       varint_encode(set->val, varint_encode(set->key, buffer));
+  *buf_end++             = set->flags;
   uint8_t size           = (uint8_t)(buf_end - buffer);
   hash_bucket_t* buckets = p->address;
   set->has_val           = true;
@@ -175,13 +181,15 @@ static bool hash_set_in_page(page_t* p, page_metadata_t* metadata,
     uint8_t* cur = buckets[idx].data;
     while (cur < end) {
       uint64_t k, v;
-      uint8_t* start = cur;
-      cur            = varint_decode(varint_decode(cur, &k), &v);
+      uint8_t* start   = cur;
+      cur              = varint_decode(varint_decode(cur, &k), &v);
+      uint8_t old_flag = *cur++;
       if (k != set->key) continue;
       if (old) {
         old->has_val = true;
         old->key     = k;
         old->val     = v;
+        old->flags   = old_flag;
       }
       if (v == set->val) return true;
       if (hash_try_update_in_page(
@@ -217,6 +225,7 @@ static void hash_compact_buckets(
       uint64_t k, v;
       uint8_t* start = cur;
       cur            = varint_decode(varint_decode(cur, &k), &v);
+      cur++;  // flags
       uint64_t k_idx =
           (hash_permute_key(k) >> depth) % BUCKETS_IN_PAGE;
       if (k_idx == idx) continue;
@@ -257,9 +266,11 @@ static bool hash_remove_from_page(page_t* p,
       uint64_t k, v;
       uint8_t* start = cur;
       cur            = varint_decode(varint_decode(cur, &k), &v);
+      uint8_t flags  = *cur++;
       if (k == del->key) {
         del->has_val = true;
         del->val     = v;
+        del->flags   = flags;
         hash_remove_in_bucket(buckets + idx, start, end, cur);
         metadata->hash.number_of_entries--;
         metadata->hash.bytes_used -= (uint16_t)(cur - start);
@@ -621,22 +632,21 @@ result_t hash_get_next(
     it->has_val = hash_page_get_next(&p, it);
     return success();
   }
-  uint64_t hashed_key = hash_permute_key(it->key);
-  uint64_t index =
-      KEY_TO_BUCKET(hashed_key, metadata->hash_dir.depth);
   uint64_t* buckets = p.address;
   do {
-    page_t hash_page = {.page_num = buckets[index]};
+    page_t hash_page = {
+        .page_num = buckets[it->iter_state.page_index]};
     ensure(txn_get_page(tx, &hash_page));
     if (hash_page_get_next(&hash_page, it)) return success();
     ensure(pagesmap_put_new(state, &hash_page));
-    it->iter_state = 0;
+    it->iter_state.pos_in_page = 0;
     do {
-      if (++index >= metadata->hash_dir.number_of_buckets) {
+      if (++it->iter_state.page_index >=
+          metadata->hash_dir.number_of_buckets) {
         it->has_val = false;
         return success();
       }
-      hash_page.page_num = buckets[index];
+      hash_page.page_num = buckets[it->iter_state.page_index];
       if (pagesmap_lookup(*state, &hash_page) == false)
         break;  // didn't see this page, yet
     } while (true);

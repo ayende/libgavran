@@ -8,10 +8,12 @@
 #include <gavran/db.h>
 #include <gavran/test.h>
 
+#include "test.config.h"
+
 // tag::tests09[]
 
-static result_t write_to_wal_only(const char* path,
-                                  uint64_t* last_wal_position) {
+static result_t write_to_wal_only(
+    const char* path, uint64_t* last_wal_position) {
   db_t db;
   db_options_t options = {.minimum_size = 4 * 1024 * 1024};
   ensure(db_create(path, &options, &db));
@@ -44,7 +46,7 @@ static result_t assert_no_content(const char* path) {
   ensure(txn_create(&db, TX_READ, &rtx));
   defer(txn_close, rtx);
   char zero[PAGE_SIZE] = {0};
-  for (size_t i = 3; i < 10; i++) {
+  for (size_t i = FIRST_USABLE_PAGE; i < 10; i++) {
     page_t p = {.page_num = i};
     ensure(txn_raw_get_page(&rtx, &p));
     ensure(memcmp(zero, p.address, PAGE_SIZE) == 0);
@@ -64,8 +66,8 @@ describe(diff_and_compression) {
     assert(write_to_wal_only("/tmp/db/try", &last_wal_pos));
     // corrupt the WAL
     file_handle_t* handle;
-    assert(pal_create_file("/tmp/db/try-a.wal", &handle,
-                           pal_file_creation_flags_none));
+    assert(pal_create_file(
+        "/tmp/db/try-a.wal", &handle, pal_file_creation_flags_none));
     char* buffer = "snow";
     assert(pal_write_file(handle, last_wal_pos - 12, buffer, 4));
     assert(pal_close_file(handle));
@@ -78,8 +80,8 @@ describe(diff_and_compression) {
     assert(write_to_wal_only("/tmp/db/try", &last_wal_pos));
     // truncate the WAL
     file_handle_t* handle;
-    assert(pal_create_file("/tmp/db/try-a.wal", &handle,
-                           pal_file_creation_flags_none));
+    assert(pal_create_file(
+        "/tmp/db/try-a.wal", &handle, pal_file_creation_flags_none));
     assert(pal_set_file_size(handle, 0, last_wal_pos - 10000));
     assert(pal_close_file(handle));
 
@@ -101,9 +103,9 @@ describe(diff_and_compression) {
         page_t p = {.number_of_pages = 1};
         page_metadata_t* metadata;
         assert(txn_allocate_page(&wtx, &p, &metadata, 0));
-        page = p.page_num;
-        metadata->overflow.page_flags = page_flags_overflow;
-        metadata->overflow.size_of_value = PAGE_SIZE;
+        page                               = p.page_num;
+        metadata->overflow.page_flags      = page_flags_overflow;
+        metadata->overflow.size_of_value   = PAGE_SIZE;
         metadata->overflow.number_of_pages = 1;
         memset(p.address, 'a', PAGE_SIZE);
         assert(txn_commit(&wtx));
@@ -129,9 +131,9 @@ describe(diff_and_compression) {
         page_metadata_t* metadata;
         assert(txn_allocate_page(&wtx, &p, &metadata, 0));
         assert(p.page_num == page);
-        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.page_flags      = page_flags_overflow;
         metadata->overflow.number_of_pages = 2;
-        metadata->overflow.size_of_value = PAGE_SIZE * 2;
+        metadata->overflow.size_of_value   = PAGE_SIZE * 2;
         memset(p.address, 'b', PAGE_SIZE);
         memset(p.address + PAGE_SIZE, 'c', PAGE_SIZE);
         assert(txn_commit(&wtx));
@@ -173,9 +175,9 @@ describe(diff_and_compression) {
         page_t p = {.number_of_pages = 3};
         page_metadata_t* metadata;
         assert(txn_allocate_page(&wtx, &p, &metadata, 0));
-        page = p.page_num;
-        metadata->overflow.page_flags = page_flags_overflow;
-        metadata->overflow.size_of_value = PAGE_SIZE;
+        page                               = p.page_num;
+        metadata->overflow.page_flags      = page_flags_overflow;
+        metadata->overflow.size_of_value   = PAGE_SIZE;
         metadata->overflow.number_of_pages = 3;
         memset(p.address, 'a', PAGE_SIZE * 3);
         assert(txn_commit(&wtx));
@@ -201,9 +203,9 @@ describe(diff_and_compression) {
         page_metadata_t* metadata;
         assert(txn_allocate_page(&wtx, &p, &metadata, 0));
         assert(p.page_num == page);
-        metadata->overflow.page_flags = page_flags_overflow;
+        metadata->overflow.page_flags      = page_flags_overflow;
         metadata->overflow.number_of_pages = 1;
-        metadata->overflow.size_of_value = PAGE_SIZE;
+        metadata->overflow.size_of_value   = PAGE_SIZE;
         memset(p.address, 'b', PAGE_SIZE);
         assert(txn_commit(&wtx));
       }

@@ -387,10 +387,15 @@ typedef struct hash_val {
   uint64_t hash_id;
   uint64_t key;
   uint64_t val;
+  struct {
+    uint32_t page_index;
+    uint16_t pos_in_page;
+    uint8_t padding[2];
+  } iter_state;
   bool has_val;
   bool hash_id_changed;
-  uint8_t padding[2];
-  uint32_t iter_state;
+  uint8_t flags;
+  uint8_t padding[5];
 } hash_val_t;
 
 result_t hash_create(txn_t *tx, uint64_t *hash_id);
@@ -411,7 +416,8 @@ typedef struct btree_val {
   int16_t position;
   int8_t last_match;
   bool has_val;
-  uint8_t padding[4];
+  uint8_t flags;
+  uint8_t padding[3];
 } btree_val_t;
 
 result_t btree_create(txn_t *tx, uint64_t *tree_id);
@@ -430,7 +436,8 @@ typedef struct btree_cursor {
   span_t key;
   uint64_t val;
   bool has_val;
-  uint8_t padding[7];
+  uint8_t flags;
+  uint8_t padding[6];
 } btree_cursor_t;
 
 result_t btree_cursor_at_start(btree_cursor_t *cursor);

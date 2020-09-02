@@ -33,8 +33,8 @@ static void print_hash_page(
   hash_val_t it = {0};
   while (hash_page_get_next(p, &it)) {
     print_bits(f, hash_permute_key(it.key), metadata->hash.depth);
-    fprintf(f, " \\| %ld (%ld)= %ld\\l", it.key,
-        hash_permute_key(it.key), it.val);
+    fprintf(f, " \\| %ld (%ld)= %ld (flags: %d)\\l", it.key,
+        hash_permute_key(it.key), it.val, it.flags);
   }
   fprintf(f, "\"]\n");
 }

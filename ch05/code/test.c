@@ -8,6 +8,8 @@
 #include <gavran/db.h>
 #include <gavran/test.h>
 
+#include "test.config.h"
+
 // tag::allocate_page_and_use_it[]
 static result_t allocate_page_and_use_it(const char* path) {
   // <1>
@@ -67,15 +69,15 @@ describe(allocation_tests) {
     page_metadata_t* ignored;
     page_t p = {.number_of_pages = 1};
     assert(txn_allocate_page(&tx, &p, &ignored, 0));
-    assert(p.page_num == 2);
+    assert(p.page_num == FIRST_USABLE_PAGE);
     assert(txn_allocate_page(&tx, &p, &ignored, 0));
-    assert(p.page_num == 3);
+    assert(p.page_num == FIRST_USABLE_PAGE + 1);
   }
 
   it("can allocate until space runs out") {
     db_t db;
-    db_options_t options = {.minimum_size = 128 * 1024,
-                            .maximum_size = 128 * 1024};
+    db_options_t options = {
+        .minimum_size = 128 * 1024, .maximum_size = 128 * 1024};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -83,7 +85,7 @@ describe(allocation_tests) {
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
-    for (size_t i = 0; i < 14; i++) {
+    for (size_t i = 0; i < 16 - FIRST_USABLE_PAGE; i++) {
       page_t p = {.number_of_pages = 1};
       assert(txn_allocate_page(&tx, &p, &ignored, 0));
     }
@@ -119,9 +121,9 @@ describe(allocation_tests) {
     assert(txn_allocate_page(&tx, &p, &metadata, 0));
     if (metadata) {
       // not relevant for this chapter, will be in others
-      metadata->overflow.page_flags = page_flags_overflow;
+      metadata->overflow.page_flags      = page_flags_overflow;
       metadata->overflow.number_of_pages = 1;
-      metadata->overflow.size_of_value = 8000;
+      metadata->overflow.size_of_value   = 8000;
     }
 
     uint64_t page_num = p.page_num;

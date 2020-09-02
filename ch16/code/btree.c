@@ -108,6 +108,9 @@ static result_t btree_defrag(page_t* p, page_metadata_t* metadata) {
     uint16_t cur_pos = positions[i];
     uint8_t* end     = varint_decode(
         varint_decode(tmp + cur_pos, &size) + size, &size);
+    if (metadata->tree.page_flags == page_flags_tree_leaf) {
+      end++;  // flags
+    }
     uint16_t entry_size = (uint16_t)(end - (tmp + cur_pos));
     metadata->tree.ceiling -= entry_size;
     positions[i] = metadata->tree.ceiling;
@@ -152,20 +155,25 @@ static result_t btree_create_root_page(
 
 // tag::btree_get_entry_at[]
 static void btree_get_entry_at(page_t* p, page_metadata_t* metadata,
-    uint16_t pos, span_t* key, uint64_t* val, span_t* entry) {
+    uint16_t pos, span_t* key, uint64_t* val, span_t* entry,
+    uint8_t* flags) {
   uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
   assert(pos < max_pos);
   uint16_t* positions = p->address;
   entry->address      = p->address + positions[pos];
   key->address        = varint_decode(entry->address, &key->size);
-  void* end           = varint_decode(key->address + key->size, val);
-  entry->size         = (size_t)(end - entry->address);
+  uint8_t* end        = varint_decode(key->address + key->size, val);
+  if (metadata->tree.page_flags == page_flags_tree_leaf) {
+    *flags = *end++;
+  }
+  entry->size = (size_t)(end - (uint8_t*)entry->address);
 }
 static uint64_t btree_get_val_at(
     page_t* p, page_metadata_t* metadata, uint16_t pos) {
   span_t key, entry;
   uint64_t val;
-  btree_get_entry_at(p, metadata, pos, &key, &val, &entry);
+  uint8_t flags;
+  btree_get_entry_at(p, metadata, pos, &key, &val, &entry, &flags);
   return val;
 }
 // end::btree_get_entry_at[]
@@ -179,7 +187,9 @@ static result_t btree_get_leftmost_key(txn_t* tx, page_t* p,
   }
   span_t entry;
   uint64_t val;
-  btree_get_entry_at(p, metadata, 0, leftmost_key, &val, &entry);
+  uint8_t flags;
+  btree_get_entry_at(
+      p, metadata, 0, leftmost_key, &val, &entry, &flags);
   return success();
 }
 // end::btree_get_leftmost_key[]
@@ -192,10 +202,11 @@ static result_t btree_split_page_in_half(page_t* p,
   uint16_t* positions   = p->address;
   uint16_t* o_positions = other->address;
   uint64_t val;
+  uint8_t flags;
   span_t key, entry;
   for (uint16_t idx = max_pos / 2, o_idx = 0; idx < max_pos;
        idx++, o_idx++) {
-    btree_get_entry_at(p, *metadata, idx, &key, &val, &entry);
+    btree_get_entry_at(p, *metadata, idx, &key, &val, &entry, &flags);
     o_metadata->tree.ceiling -= entry.size;
     memcpy(other->address + o_metadata->tree.ceiling, entry.address,
         entry.size);
@@ -208,7 +219,8 @@ static result_t btree_split_page_in_half(page_t* p,
   size_t removed = (max_pos - (max_pos / 2));
   memset(positions + (max_pos / 2), 0, removed * sizeof(uint16_t));
   (*metadata)->tree.floor -= removed * sizeof(uint16_t);
-  btree_get_entry_at(other, o_metadata, 0, &ref->key, &val, &entry);
+  btree_get_entry_at(
+      other, o_metadata, 0, &ref->key, &val, &entry, &flags);
   if (memcmp(ref->key.address, set->key.address,
           MIN(set->key.size, ref->key.size)) < 0) {
     memcpy(p, other, sizeof(page_t));
@@ -295,7 +307,10 @@ static result_t btree_append_to_page(txn_t* tx, page_t* p,
       p, metadata, set->position, (uint16_t)req_size);
   uint8_t* key_start = varint_encode(set->key.size, dst);
   memcpy(key_start, set->key.address, set->key.size);
-  varint_encode(set->val, key_start + set->key.size);
+  uint8_t* end = varint_encode(set->val, key_start + set->key.size);
+  if (metadata->tree.page_flags == page_flags_tree_leaf) {
+    *end = set->flags;
+  }
   return success();
 }
 // end::btree_append_to_page[]
@@ -305,16 +320,23 @@ static result_t btree_try_update_in_place(page_t* p,
     page_metadata_t* metadata, size_t req_size, btree_val_t* set,
     btree_val_t* old, bool* updated) {
   span_t key, entry;
+  uint8_t flags;
   uint64_t old_val;
-  btree_get_entry_at(
-      p, metadata, (uint16_t)set->position, &key, &old_val, &entry);
+  btree_get_entry_at(p, metadata, (uint16_t)set->position, &key,
+      &old_val, &entry, &flags);
   if (old) {
     old->has_val = true;
     old->val     = old_val;
+    old->flags   = flags;
   }
   if (req_size <= entry.size) {  // can fit old location
-    void* val_end = varint_encode(set->val, key.address + key.size);
-    size_t diff   = (size_t)((entry.address + entry.size) - val_end);
+    uint8_t* val_end =
+        varint_encode(set->val, key.address + key.size);
+    if (metadata->tree.page_flags == page_flags_tree_leaf) {
+      *val_end++ = set->flags;
+    }
+    size_t diff =
+        (size_t)(((uint8_t*)entry.address + entry.size) - val_end);
     memset(val_end, 0, diff);
     metadata->tree.free_space += (uint16_t)diff;
     *updated = true;
@@ -334,7 +356,7 @@ static result_t btree_set_in_page(txn_t* tx, uint64_t page_num,
   ensure(txn_modify_page(tx, &p));
   ensure(txn_modify_metadata(tx, page_num, &metadata));
   size_t req_size = varint_get_length(set->key.size) + set->key.size +
-                    varint_get_length(set->val);
+                    varint_get_length(set->val) + 1 /*flags*/;
   if (set->position >= 0) {  // update
     bool updated = false;
     ensure(btree_try_update_in_place(
@@ -417,8 +439,8 @@ result_t btree_get(txn_t* tx, btree_val_t* kvp) {
     return success();
   }
   span_t key, entry;
-  btree_get_entry_at(
-      &p, metadata, (uint16_t)kvp->position, &key, &kvp->val, &entry);
+  btree_get_entry_at(&p, metadata, (uint16_t)kvp->position, &key,
+      &kvp->val, &entry, &kvp->flags);
   kvp->has_val = true;
   return success();
 }
@@ -510,7 +532,9 @@ static result_t btree_iterate(btree_cursor_t* c, int8_t step) {
     if (pos >= 0 && pos < max_pos) {  // still same page
       c->key.address =
           varint_decode(p.address + positions[pos], &c->key.size);
-      varint_decode(c->key.address + c->key.size, &c->val);
+      uint8_t* end =
+          varint_decode(c->key.address + c->key.size, &c->val);
+      c->flags   = *end++;
       c->has_val = true;
       ensure(btree_stack_push(&c->stack, p.page_num, pos + step));
       return success();
@@ -569,7 +593,8 @@ static uint64_t btree_remove_entry(
     page_t* p, page_metadata_t* metadata, uint16_t pos) {
   span_t key, entry;
   uint64_t val;
-  btree_get_entry_at(p, metadata, pos, &key, &val, &entry);
+  uint8_t flags;
+  btree_get_entry_at(p, metadata, pos, &key, &val, &entry, &flags);
   memset(entry.address, 0, entry.size);
   uint16_t* positions = p->address;
   memmove(positions + pos, positions + pos + 1,
@@ -591,7 +616,8 @@ static result_t btree_balance_entries(page_t* p1, page_metadata_t* m1,
   size_t total_moved  = 0;
   for (; p2_pos < max_p2_pos; p2_pos++) {
     span_t key, entry;
-    btree_get_entry_at(p2, m2, p2_pos, &key, &val, &entry);
+    uint8_t flags;
+    btree_get_entry_at(p2, m2, p2_pos, &key, &val, &entry, &flags);
     if (m1->tree.free_space < entry.size + sizeof(uint16_t)) {
       break;  // no more room
     }
@@ -681,12 +707,13 @@ static result_t btree_merge_pages(txn_t* tx, page_t* p,
   uint64_t val;
   span_t entry;
   btree_val_t ref = {.val = sibling->page_num};
-
+  uint8_t flags;
   ensure(txn_modify_page(tx, parent));
   ensure(txn_modify_metadata(tx, parent->page_num, &parent_metadata));
 
   btree_remove_entry(parent, parent_metadata, sibling_pos);
-  btree_get_entry_at(sibling, s_metadata, 0, &ref.key, &val, &entry);
+  btree_get_entry_at(
+      sibling, s_metadata, 0, &ref.key, &val, &entry, &flags);
   btree_search_pos_in_page(parent, parent_metadata, &ref);
   ensure(btree_set_in_page(tx, parent->page_num, &ref, 0));
   return success();
