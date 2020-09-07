@@ -34,18 +34,42 @@ result_t multiple_vals(uint64_t amount) {
       ensure(btree_multi_append(&tx, &set));
     }
 
-    uint64_t count    = 0;
-    btree_cursor_t it = {.tree_id = tree_id,
-        .tx                       = &tx,
-        .key = {.address = key, .size = strlen(key)}};
-    ensure(btree_multi_cursor_search(&it));
-    while (true) {
-      ensure(btree_multi_get_next(&it));
-      if (it.has_val == false) break;
-      count++;
-      ensure(count == it.val);
+    {
+      uint64_t count    = 0;
+      btree_cursor_t it = {.tree_id = tree_id,
+          .tx                       = &tx,
+          .key = {.address = key, .size = strlen(key)}};
+      ensure(btree_multi_cursor_search(&it));
+      while (true) {
+        ensure(btree_multi_get_next(&it));
+        if (it.has_val == false) break;
+        count++;
+        ensure(count == it.val);
+      }
+      ensure(count == amount);
     }
-    ensure(count == amount);
+
+    for (size_t i = 1; i < amount; i += 2) {
+      btree_val_t del = {.tree_id = tree_id,
+          .val                    = i,
+          .key = {.address = key, .size = strlen(key)}};
+      ensure(btree_multi_del(&tx, &del));
+    }
+
+    {
+      uint64_t count    = 0;
+      btree_cursor_t it = {.tree_id = tree_id,
+          .tx                       = &tx,
+          .key = {.address = key, .size = strlen(key)}};
+      ensure(btree_multi_cursor_search(&it));
+      while (true) {
+        ensure(btree_multi_get_next(&it));
+        if (it.has_val == false) break;
+        count += 2;
+        ensure(count == it.val);
+      }
+      ensure(count == amount);
+    }
   }
   return success();
 }

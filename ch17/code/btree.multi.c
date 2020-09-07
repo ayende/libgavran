@@ -10,9 +10,8 @@ typedef struct multi_search_args {
   span_t key_buffer;
   uint64_t nested_id;
   uint64_t val;
-  uint8_t pos;
-  bool forward;
-  uint8_t padding[6];
+  bool has_val;
+  uint8_t padding[7];
 } multi_search_args_t;
 
 typedef enum __attribute__((__packed__)) btree_multi_flags {
@@ -74,32 +73,27 @@ static result_t btree_convert_to_nested(
 
 static result_t btree_multi_search_entry(
     txn_t *tx, btree_val_t *get, multi_search_args_t *args) {
-  args->key_buffer.size = get->key.size + 2;  // rec sep + pos
-  ensure(txn_alloc_temp(
-      tx, args->key_buffer.size, &args->key_buffer.address));
+  args->key_buffer.size = get->key.size + 1;     // rec sep
+  ensure(txn_alloc_temp(tx, get->key.size + 10,  // max used buffer
+      &args->key_buffer.address));
   btree_cursor_t it = {
       .tx = tx, .tree_id = get->tree_id, .key = args->key_buffer};
   memcpy(args->key_buffer.address, get->key.address, get->key.size);
   *(uint8_t *)(args->key_buffer.address + get->key.size) =
       RECORD_SEPARATOR;
-  *(uint8_t *)(args->key_buffer.address + get->key.size + 1) =
-      args->pos;
   ensure(btree_cursor_search(&it));  // this searches _after_ the key
   defer(btree_free_cursor, it);
-  if (args->forward) {
-    ensure(btree_get_next(&it));
-  } else {
-    ensure(btree_get_prev(&it));
-  }
-  if (it.has_val == false || it.key.size != args->key_buffer.size ||
+  ensure(btree_get_next(&it));
+  if (it.has_val == false ||
       memcmp(args->key_buffer.address, it.key.address,
-          args->key_buffer.size - 1)) {
-    args->pos = 0;  // not a match, start from scratch
+          args->key_buffer.size)) {
+    args->has_val = false;
   } else if (it.flags == btree_multi_flags_nested) {
     args->nested_id = it.val;
+    args->has_val   = true;
   } else {
-    args->pos = *(uint8_t *)(it.key.address + it.key.size - 1);
-    args->val = it.val;
+    args->val     = it.val;
+    args->has_val = true;
   }
   return success();
 }
@@ -118,13 +112,10 @@ static result_t btree_multi_append_entry(
 }
 
 result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
-  uint8_t key_buf[10];
-  multi_search_args_t args = {.forward = false, .pos = UINT8_MAX};
+  multi_search_args_t args = {0};
   ensure(btree_multi_search_entry(tx, set, &args));
-  if (!args.pos && ~args.nested_id) {  // first time
-    return btree_multi_append_entry(tx, set, &args.key_buffer, 1);
-  }
   if (args.nested_id) {  // nested tree
+    uint8_t key_buf[10];
     varint_encode(set->val, key_buf);
     btree_val_t nested = {.tree_id = args.nested_id,
         .key                       = {
@@ -132,76 +123,72 @@ result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
     ensure(btree_set(tx, &nested, 0));
     return success();
   }
+  void *end = varint_encode(
+      set->val, args.key_buffer.address + set->key.size + 1);
+  btree_val_t nested = {.tree_id = set->tree_id,
+      .key = {.address = args.key_buffer.address,
+          .size        = (size_t)(end - args.key_buffer.address)},
+      .val = set->val};
+  ensure(btree_set(tx, &nested, 0));
 
-  btree_cursor_t it     = {.is_uniquifier_search = true,
-      .uniquifier_cursor_pos                 = 0,
-      .tree_id                               = set->tree_id,
-      .tx                                    = tx,
-      .key                                   = set->key};
-  uint8_t available_pos = 0;
-  uint8_t prev_pos      = 1;
-  for (size_t i = 0; i < 16; i++) {
-    ensure(btree_multi_get_next(&it));
-    if (it.has_val == false) {  // done scanning
-      if (!available_pos) available_pos = prev_pos + 1;
-      return btree_multi_append_entry(
-          tx, set, &args.key_buffer, available_pos);
-    }
-    if (it.val == set->val) return success();  // value already exists
-    if (((it.uniquifier_cursor_pos - 1) - prev_pos) > 1) {
-      available_pos = prev_pos + 1;
-    }
-    prev_pos = it.uniquifier_cursor_pos - 1;
+  size_t count         = 0;
+  args.key_buffer.size = set->key.size + 1;
+  btree_cursor_t it    = {
+      .tree_id = set->tree_id, .key = args.key_buffer, .tx = tx};
+  ensure(btree_cursor_search(&it));
+  while (true) {
+    ensure(btree_get_next(&it));
+    // check if we moved past the right key
+    if (it.has_val == false) break;
+    if (it.key.size <= args.key_buffer.size) break;
+    if (memcmp(it.key.address, args.key_buffer.address,
+            args.key_buffer.size))
+      break;
+    count++;
   }
-  {
-    // scanned through 16 items, better create nested tree at this
-    // point
+
+  if (count >= 16) {  // enough items that we should move to nested
     ensure(btree_convert_to_nested(
         tx, set->tree_id, &args.key_buffer, &args.nested_id));
-    varint_encode(set->val, key_buf);
-    btree_val_t nested = {.tree_id = args.nested_id,
-        .key                       = {
-            .address = key_buf, .size = varint_get_length(set->val)}};
-    ensure(btree_set(tx, &nested, 0));
   }
   return success();
 }
 
 result_t btree_multi_cursor_search(btree_cursor_t *cursor) {
-  btree_val_t get = {.tree_id = cursor->tree_id, .key = cursor->key};
-  multi_search_args_t args = {.forward = false, .pos = UINT8_MAX};
-  ensure(btree_multi_search_entry(cursor->tx, &get, &args));
-
-  if (args.nested_id) {
-    cursor->tree_id = args.nested_id;
+  void *address;
+  ensure(txn_alloc_temp(cursor->tx,
+      cursor->key.size + 10,  // max used buffer
+      &address));
+  memcpy(address, cursor->key.address, cursor->key.size);
+  *(uint8_t *)(address + cursor->key.size) = RECORD_SEPARATOR;
+  span_t k                                 = cursor->key;
+  cursor->key.address                      = address;
+  cursor->key.size++;
+  ensure(btree_cursor_search(cursor));
+  ensure(btree_get_next(cursor));
+  cursor->key = k;
+  if (cursor->has_val == false) return success();
+  if (cursor->flags == btree_multi_flags_nested) {
+    cursor->tree_id = cursor->val;
     ensure(btree_cursor_at_start(cursor));
     return success();
   }
-  cursor->is_uniquifier_search  = true;
-  cursor->uniquifier_cursor_pos = 0;
+  cursor->is_uniquifier_search = true;
+  int16_t pos;
+  uint64_t page_num;
+  ensure(btree_stack_pop(&cursor->stack, &page_num, &pos));
+  pos = ~pos;  // reversing the btree_get_next() call
+  ensure(btree_stack_push(&cursor->stack, page_num, pos));
   return success();
 }
 
 result_t btree_multi_get_next(btree_cursor_t *cursor) {
+  span_t k = cursor->key;
+  ensure(btree_get_next(cursor));
   if (cursor->is_uniquifier_search == false) {
-    span_t k = cursor->key;
-    ensure(btree_get_next(cursor));
     varint_decode(cursor->key.address, &cursor->val);
-    cursor->key = k;
-    return success();
   }
-
-  btree_val_t get = {.tree_id = cursor->tree_id, .key = cursor->key};
-  multi_search_args_t args = {
-      .forward = true, .pos = cursor->uniquifier_cursor_pos};
-  ensure(btree_multi_search_entry(cursor->tx, &get, &args));
-  if (args.pos) {
-    cursor->uniquifier_cursor_pos = args.pos + 1;  // setup next item
-    cursor->val                   = args.val;
-    cursor->has_val               = true;
-  } else {
-    cursor->has_val = false;
-  }
+  cursor->key = k;
   return success();
 }
 
@@ -229,40 +216,29 @@ static result_t btree_drop_nested(
 }
 
 result_t btree_multi_del(txn_t *tx, btree_val_t *del) {
-  multi_search_args_t args = {.forward = true};
+  multi_search_args_t args = {0};
   ensure(btree_multi_search_entry(tx, del, &args));
+  if (args.has_val == false) return success();
+
   if (args.nested_id) {
+    uint8_t key_buf[10];
+    varint_encode(del->val, key_buf);
     btree_val_t nested = {.tree_id = args.nested_id,
-        .key = {.address = &del->val, .size = sizeof(uint64_t)}};
+        .key                       = {
+            .address = key_buf, .size = varint_get_length(del->val)}};
     ensure(btree_del(tx, &nested));
     page_metadata_t *metadata;
     ensure(txn_get_metadata(tx, args.nested_id, &metadata));
-    if (metadata->tree.free_space == PAGE_SIZE) {
-      // empty tree, can drop nested tree and delete entry
-      ensure(btree_drop_nested(tx, del->tree_id, args.nested_id));
-      btree_val_t del_nested = {
-          .tree_id = del->tree_id, .key = args.key_buffer};
-      ensure(btree_del(tx, &del_nested));
-      return success();
-    }
+    if (metadata->tree.free_space < PAGE_SIZE) return success();
+    // empty tree, can drop nested tree and delete entry
+    ensure(btree_drop_nested(tx, del->tree_id, args.nested_id));
+  } else {
+    void *end = varint_encode(
+        del->val, args.key_buffer.address + args.key_buffer.size + 1);
+    args.key_buffer.size = (size_t)(end - args.key_buffer.address);
   }
-  if (args.pos != 0) {
-    btree_cursor_t it = {.tree_id = del->tree_id,
-        .is_uniquifier_search     = true,
-        .tx                       = tx,
-        .key                      = del->key};
-    while (true) {
-      ensure(btree_multi_get_next(&it));
-      if (it.has_val == false) break;
-      if (it.val == del->val) {
-        *(uint8_t *)(args.key_buffer.address + args.key_buffer.size -
-                     1)        = it.uniquifier_cursor_pos;
-        btree_val_t del_nested = {
-            .tree_id = del->tree_id, .key = args.key_buffer};
-        ensure(btree_del(tx, &del_nested));
-        break;
-      }
-    }
-  }
+  btree_val_t del_nested = {
+      .tree_id = del->tree_id, .key = args.key_buffer};
+  ensure(btree_del(tx, &del_nested));
   return success();
 }

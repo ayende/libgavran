@@ -443,8 +443,7 @@ typedef struct btree_cursor {
   bool has_val;
   uint8_t flags;
   bool is_uniquifier_search;
-  uint8_t uniquifier_cursor_pos;
-  uint8_t padding[4];
+  uint8_t padding[5];
 } btree_cursor_t;
 
 result_t btree_cursor_at_start(btree_cursor_t *cursor);
