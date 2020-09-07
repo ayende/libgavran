@@ -11,9 +11,10 @@ following function: `result_t record_ip_access(state_t* state, char* ip_address,
 of IP addresses and just focus on the code in <<record_ips>>.
 
 [source]
+[[record_ips]]
 .Recording IP addresses
 ----
-time_t now = time(0);
+time_t now = 1600000000; // Sep 13, 2020
 
 ensure(record_ip_access(state, "127.0.0.1", now - 60));
 ensure(record_ip_access(state, "127.0.0.1", now));
@@ -35,7 +36,22 @@ use for the B+Tree. This is exposed by the API shown in <<btree_multi_api>>.
 include::../include/gavran/db.h[tags=btree_multi_api]
 ----
 
-The idea is that instead of writing the key as the user supplied it, we'll extend it with a unique value. This might be easier to explain if we'll see the code that is involved 
+You can see that the API in <<btree_multi_api>> doesn't have a `set` function but an `append` one. We also don't have a way to `get` an item from a multi value, but we have to 
+iterate to get all the values. The API surface is quite different, even if the underlying implementation isn't that different. 
+
+Conceptually, what we are going to do is to change the key that the user provided us. So the three calls we have in <<record_ips>> would result in the following entries 
+
+The idea is that instead of writing the key as the user supplied it, we'll extend it with a unique value. Here are the actual B+Tree entries after inserting three records:
+
+* `127.0.0.1|1` -> 1599999940
+* `127.0.0.1|2` -> 1600000000
+* `127.0.0.1|3` -> 1600000060
+
+Because we have the `|1` postfix to the key, we are able to store multiple values on the same "key". 
+
+
+
+This might be easier to explain if we'll see the code that is involved 
 with adding a multi value to the tree. You can see that in <<btree_multi_append>>.
 
 

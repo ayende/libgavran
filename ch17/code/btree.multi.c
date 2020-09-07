@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <byteswap.h>
 #include <string.h>
 
 #include <gavran/db.h>
@@ -40,23 +41,25 @@ static result_t btree_create_nested(
 
 static result_t btree_convert_to_nested(
     txn_t *tx, uint64_t tree_id, span_t *buf, uint64_t *nested_id) {
-  uint8_t key_buf[10];
-  *(uint8_t *)(buf->address + buf->size - 1) = 0;
   ensure(btree_create_nested(tx, tree_id, nested_id));
+  uint8_t key_buf[10];
   btree_val_t set = {
-      .tree_id = *nested_id, .key = {.size = sizeof(uint64_t)}};
+      .key = {.address = key_buf, .size = 0}, .tree_id = *nested_id};
   btree_val_t del   = {.tree_id = tree_id};
   btree_cursor_t it = {.tree_id = tree_id, .tx = tx};
   while (true) {
+    memset(buf->address + buf->size - sizeof(uint64_t), 0,
+        sizeof(uint64_t));
     it.key = *buf;  // search first match for key
     ensure(btree_cursor_search(&it));
     ensure(btree_get_next(&it));
     if (it.has_val == false) break;
     if (it.key.size != buf->size) break;
-    if (memcmp(it.key.address, buf->address, buf->size - 1)) break;
-    varint_encode(it.val, key_buf);
-    set.key.address = key_buf;
-    set.key.size    = varint_get_length(it.val);
+    if (memcmp(it.key.address, buf->address,
+            buf->size - sizeof(uint64_t)))
+      break;
+    uint8_t *end = varint_encode(it.val, key_buf);
+    set.key.size = (size_t)(end - key_buf);
     ensure(btree_set(tx, &set, 0));  // add to nested
     del.key = it.key;
     ensure(btree_del(tx, &del));  // remove from root tree
@@ -73,20 +76,23 @@ static result_t btree_convert_to_nested(
 
 static result_t btree_multi_search_entry(
     txn_t *tx, btree_val_t *get, multi_search_args_t *args) {
-  args->key_buffer.size = get->key.size + 1;     // rec sep
-  ensure(txn_alloc_temp(tx, get->key.size + 10,  // max used buffer
-      &args->key_buffer.address));
+  args->key_buffer.size = get->key.size + 9;  // max used buffer
+  ensure(txn_alloc_temp(
+      tx, args->key_buffer.size, &args->key_buffer.address));
   btree_cursor_t it = {
       .tx = tx, .tree_id = get->tree_id, .key = args->key_buffer};
   memcpy(args->key_buffer.address, get->key.address, get->key.size);
   *(uint8_t *)(args->key_buffer.address + get->key.size) =
       RECORD_SEPARATOR;
+  memset(args->key_buffer.address + args->key_buffer.size -
+             sizeof(uint64_t),
+      0, sizeof(uint64_t));
   ensure(btree_cursor_search(&it));  // this searches _after_ the key
   defer(btree_free_cursor, it);
   ensure(btree_get_next(&it));
   if (it.has_val == false ||
       memcmp(args->key_buffer.address, it.key.address,
-          args->key_buffer.size)) {
+          args->key_buffer.size - sizeof(uint64_t))) {
     args->has_val = false;
   } else if (it.flags == btree_multi_flags_nested) {
     args->nested_id = it.val;
@@ -98,21 +104,8 @@ static result_t btree_multi_search_entry(
   return success();
 }
 
-static result_t btree_multi_append_entry(
-    txn_t *tx, btree_val_t *set, span_t *buf, uint8_t pos) {
-  *(uint8_t *)(buf->address + buf->size - 1) = pos;
-  btree_val_t uniq                           = {
-      .tree_id = set->tree_id,
-      .key     = *buf,
-      .flags   = btree_multi_flags_uniquifier,
-      .val     = set->val,
-  };
-  ensure(btree_set(tx, &uniq, 0));
-  return success();
-}
-
 result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
-  multi_search_args_t args = {0};
+  multi_search_args_t args = {.has_val = false};
   ensure(btree_multi_search_entry(tx, set, &args));
   if (args.nested_id) {  // nested tree
     uint8_t key_buf[10];
@@ -123,26 +116,29 @@ result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
     ensure(btree_set(tx, &nested, 0));
     return success();
   }
-  void *end = varint_encode(
-      set->val, args.key_buffer.address + set->key.size + 1);
+  uint64_t rev = bswap_64(set->val);
+  memcpy(args.key_buffer.address + args.key_buffer.size -
+             sizeof(uint64_t),
+      &rev, sizeof(uint64_t));
   btree_val_t nested = {.tree_id = set->tree_id,
-      .key = {.address = args.key_buffer.address,
-          .size        = (size_t)(end - args.key_buffer.address)},
-      .val = set->val};
+      .key                       = args.key_buffer,
+      .val                       = set->val};
   ensure(btree_set(tx, &nested, 0));
 
-  size_t count         = 0;
-  args.key_buffer.size = set->key.size + 1;
-  btree_cursor_t it    = {
+  size_t count = 0;
+  memset(args.key_buffer.address + args.key_buffer.size -
+             sizeof(uint64_t),
+      0, sizeof(uint64_t));
+  btree_cursor_t it = {
       .tree_id = set->tree_id, .key = args.key_buffer, .tx = tx};
   ensure(btree_cursor_search(&it));
   while (true) {
     ensure(btree_get_next(&it));
     // check if we moved past the right key
     if (it.has_val == false) break;
-    if (it.key.size <= args.key_buffer.size) break;
+    if (it.key.size != args.key_buffer.size) break;
     if (memcmp(it.key.address, args.key_buffer.address,
-            args.key_buffer.size))
+            args.key_buffer.size - sizeof(uint64_t)))
       break;
     count++;
   }
@@ -155,19 +151,22 @@ result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
 }
 
 result_t btree_multi_cursor_search(btree_cursor_t *cursor) {
-  void *address;
-  ensure(txn_alloc_temp(cursor->tx,
-      cursor->key.size + 10,  // max used buffer
-      &address));
-  memcpy(address, cursor->key.address, cursor->key.size);
-  *(uint8_t *)(address + cursor->key.size) = RECORD_SEPARATOR;
-  span_t k                                 = cursor->key;
-  cursor->key.address                      = address;
-  cursor->key.size++;
+  span_t buf = {.size = cursor->key.size + 1 + sizeof(uint64_t)};
+  ensure(txn_alloc_temp(cursor->tx, buf.size, &buf.address));
+  memcpy(buf.address, cursor->key.address, cursor->key.size);
+  *(uint8_t *)(buf.address + cursor->key.size) = RECORD_SEPARATOR;
+  memset(
+      buf.address + buf.size - sizeof(uint64_t), 0, sizeof(uint64_t));
+  cursor->key = buf;
   ensure(btree_cursor_search(cursor));
   ensure(btree_get_next(cursor));
-  cursor->key = k;
   if (cursor->has_val == false) return success();
+  if (cursor->key.size != buf.size ||
+      memcmp(cursor->key.address, buf.address,
+          buf.size - sizeof(uint64_t))) {
+    cursor->has_val = false;
+    return success();
+  }
   if (cursor->flags == btree_multi_flags_nested) {
     cursor->tree_id = cursor->val;
     ensure(btree_cursor_at_start(cursor));
@@ -177,8 +176,7 @@ result_t btree_multi_cursor_search(btree_cursor_t *cursor) {
   int16_t pos;
   uint64_t page_num;
   ensure(btree_stack_pop(&cursor->stack, &page_num, &pos));
-  pos = ~pos;  // reversing the btree_get_next() call
-  ensure(btree_stack_push(&cursor->stack, page_num, pos));
+  ensure(btree_stack_push(&cursor->stack, page_num, pos - 1));
   return success();
 }
 
@@ -187,6 +185,12 @@ result_t btree_multi_get_next(btree_cursor_t *cursor) {
   ensure(btree_get_next(cursor));
   if (cursor->is_uniquifier_search == false) {
     varint_decode(cursor->key.address, &cursor->val);
+  } else if (cursor->has_val) {
+    if (cursor->key.size != k.size ||
+        memcmp(cursor->key.address, k.address,
+            k.size - sizeof(uint64_t))) {
+      cursor->has_val = false;
+    }
   }
   cursor->key = k;
   return success();
@@ -216,7 +220,7 @@ static result_t btree_drop_nested(
 }
 
 result_t btree_multi_del(txn_t *tx, btree_val_t *del) {
-  multi_search_args_t args = {0};
+  multi_search_args_t args = {.has_val = false};
   ensure(btree_multi_search_entry(tx, del, &args));
   if (args.has_val == false) return success();
 
@@ -233,9 +237,10 @@ result_t btree_multi_del(txn_t *tx, btree_val_t *del) {
     // empty tree, can drop nested tree and delete entry
     ensure(btree_drop_nested(tx, del->tree_id, args.nested_id));
   } else {
-    void *end = varint_encode(
-        del->val, args.key_buffer.address + args.key_buffer.size + 1);
-    args.key_buffer.size = (size_t)(end - args.key_buffer.address);
+    uint64_t rev = bswap_64(del->val);
+    memcpy(args.key_buffer.address + args.key_buffer.size -
+               sizeof(uint64_t),
+        &rev, sizeof(uint64_t));
   }
   btree_val_t del_nested = {
       .tree_id = del->tree_id, .key = args.key_buffer};
