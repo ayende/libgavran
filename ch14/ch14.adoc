@@ -165,15 +165,19 @@ include::../include/gavran/db.h[tags=hash_api]
 There are a few things that we need to discuss about this API. You can see that we're going to allow to create and drop a hash table. You'll usually only create such a hash
 table once and keep it for very long time. This is similar to tables in a relational database, you tend to _not_ drop them on a whim. In order to reference a particular
 hash table, you'll need its `hash_id`, which is passed via `hash_val_t` to all the operations that we can do on the hash.
+
+[IMPORTANT]
+.The `flags` field
+====
+The `hash_val_t` has three fields that are of particular interest to us. The `key`, `val` and `flags` fields are all set by the user and persisted to the table. In other words,
+the actual model for the hash table is `map<uint64_t key, { uint64_t val, uint8_t flags}>`.
+
+The hash table simply persists the `flags` and `val` values. The idea is that callers can use the `flags` to provide some additional meaning about the _type_ of value that is 
+stored in the hash table. We'll see how that is used in Chapter 17.
+====
+
+
 The rest of the API consists of the usual CRUd operations and not really interesting in terms of design.
-
-[TIP]
-.The structure of a hash page
-====
-An extendible hash table is composed of two aspects. The directory, which we'll implement using an array of `uint64_t`. But what about the hash pages? These we are going to
-implement in a very different manner. For now, I'm going to hide their actual usage behind internal API, but I'll discuss how they are built in detail later in the chapter.
-====
-
 We'll start by looking at how we create a new hash table, which you can see in <<hash_create>>. 
 
 [source]
@@ -186,6 +190,13 @@ include::./code/hash.c[tags=hash_create]
 There isn't _much_ being done in <<hash_create>>. We allocate a page, mark is as a hash page using `page_flags_hash` and set the `hash_id` to be the newly allocated page number.
 In other words, we use the page number of the allocated page as the `hash_id` of the hash table. We also create a hash _page_, and not a directory. But the whole _point_ is to
 use a directory. What is going on here?
+
+[TIP]
+.The structure of a hash page
+====
+An extendible hash table is composed of two aspects. The directory, which we'll implement using an array of `uint64_t`. But what about the hash pages? These we are going to
+implement in a very different manner. For now, I'm going to hide their actual usage behind internal API, but I'll discuss how they are built in detail later in the chapter.
+====
 
 An extendible hash table requires a minimum of three pages (24KB) to work. One page for the directory, one for the even keys and one for the odd keys. That is at `depth` of `1`,
 of course. We expect to be able to fit about a thousand entires into a single page, and it seems a shame to waste three pages upfront. So I'm going to start the hash table as a
@@ -500,7 +511,7 @@ in the directory. Between invocations of `hash_get_next()` we remember the page 
 
 There is a small trick here. We require that the  `hash_val_t` we accept in this method will be zeroed on the first call (except for the `hash_id`, of course). 
 When we permute a zero, we'll accept a zero. So the first call will always go to index `0`, which is exactly what we want. There is also the `iter_state` we have in `hash_val_t`,
-which is used to remember the iteration position _inside_ a page. 
+which is used to remember the iteration position between calls to the `hash_get_next()` function.
 
 Once we are done scanning a page, we'll add it to the `state` pages map and run through the directory, finding the next page that we haven't seen. It is the caller's responsibility
 to create and destroy the page map for the call. 
@@ -636,11 +647,11 @@ include::./code/hash.c[tags=hash_page_get_next]
 ----
 
 The idea in <<hash_page_get_next>> is that this is a function that is going to be called multiple times. We use the `iter_state` field in the `hash_val_t` to hold the state
-of the iteration in the page between invocations of `hash_page_get_next()`. The `iter_state` holds the position of the _next_ byte that we need to read.
-We continue to do so until we run out of buckets in the page. 
+of the iteration in the page between invocations of `hash_page_get_next()`. The `iter_state` holds the index of the page in the directory and well as the position of the _next_
+byte that we need to read. We continue to do so until we run out of buckets in the page. 
 
-In <<hash_get_next>>, where we iterate over the whole hash table, you can see that we set the `iter_state` to zero when we move between pages. That ensure that we scan through
-each page from the start all the way to the end.
+In <<hash_get_next>>, where we iterate over the whole hash table, you can see that we set the `iter_state.pos_in_page` to zero when we move between pages. That ensure that 
+we scan through each page from the start all the way to the end.
 
 Now that we understand how the data is structured on a `hash` page, let's see how we _add_ the entries to the page.
 

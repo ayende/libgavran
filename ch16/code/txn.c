@@ -558,6 +558,7 @@ result_t txn_close(txn_t *tx) {
     db->active_write_tx = 0;
   }
   txn_clear_working_set(tx);
+  op_result_t *res = btree_stack_free(&tx->state->tmp.stack);
   // end::working_set_txn_close[]
   if (!(tx->state->flags & TX_COMMITED)) {  // rollback
     // <1>

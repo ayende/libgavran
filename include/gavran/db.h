@@ -83,6 +83,8 @@ typedef struct tree_page {
   uint16_t floor;
   uint16_t ceiling;
   uint16_t free_space;
+  uint64_t next_nested;
+  uint64_t prev_nested;
 } tree_page_t;
 
 typedef struct hash_page_directory {
@@ -278,6 +280,12 @@ typedef struct btree_stack {
 } btree_stack_t;
 // end::btree_stack_t[]
 
+typedef struct reusable_buffer {
+  void *address;
+  size_t size;
+  size_t used;
+} reusable_buffer_t;
+
 // tag::txn_state_t[]
 typedef struct txn_state {
   uint64_t tx_id;
@@ -291,7 +299,10 @@ typedef struct txn_state {
   txn_state_t *next_tx;
   void *shipped_wal_record;
   uint64_t can_free_after_tx_id;
-  btree_stack_t tmp_stack;
+  struct {
+    reusable_buffer_t buffer;
+    btree_stack_t stack;
+  } tmp;
   uint32_t usages;
   db_flags_t flags;
 } txn_state_t;
@@ -351,12 +362,6 @@ result_t txn_get_metadata(
 result_t txn_modify_metadata(
     txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
 // end::metadata_api[]
-
-typedef struct reusable_buffer {
-  void *address;
-  size_t size;
-  size_t used;
-} reusable_buffer_t;
 
 result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
     uint64_t tx_id, span_t *wal_record);
@@ -437,7 +442,9 @@ typedef struct btree_cursor {
   uint64_t val;
   bool has_val;
   uint8_t flags;
-  uint8_t padding[6];
+  bool is_uniquifier_search;
+  uint8_t uniquifier_cursor_pos;
+  uint8_t padding[4];
 } btree_cursor_t;
 
 result_t btree_cursor_at_start(btree_cursor_t *cursor);
@@ -448,6 +455,13 @@ result_t btree_get_prev(btree_cursor_t *cursor);
 result_t btree_free_cursor(btree_cursor_t *cursor);
 enable_defer(btree_free_cursor);
 // end::btree_cursor_api[]
+
+// tag::btree_multi_api[]
+result_t btree_multi_append(txn_t *tx, btree_val_t *set);
+result_t btree_multi_del(txn_t *tx, btree_val_t *del);
+result_t btree_multi_cursor_search(btree_cursor_t *cursor);
+result_t btree_multi_get_next(btree_cursor_t *cursor);
+// end::btree_multi_api[]
 
 // tag::table_api[]
 typedef enum __attribute__((__packed__)) index_type {

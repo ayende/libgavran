@@ -106,6 +106,16 @@ You can see that the API is very similar to the one we have built for hash table
 later on in this chapter. Because B+Trees are ordered, this means that the iteration API is more complex, for now I want to focus on the Read / Write / Delete operations.
 Let's look at the actual implementation and see how that works.
 
+[IMPORTANT]
+.The `flags` fields
+====
+Like the hash table, the B+Tree has a `flags` field that is used to provide additional context for the value that is persisted for a given key. I'm going to show 
+how what this field is used for in the next chapter.
+
+For now, you can treat it as just another piece of data that we need to persist in the B+Tree. Note that this has an important implication on the B+Tree design.
+The `flags` are stored _only_ on the leaf pages. A branch page has no need for a `flags`, after all. 
+====
+
 === Creating a B+Tree
 
 .B+Trees can be complex beasts
@@ -598,7 +608,7 @@ that we have to allocate space for the new entry's `position`. We call `memmove(
 the new entry's offset in the page. 
 
 As you can see, adding an item to the B+Tree isn't a trivial operation. Not so much because of what happens during normal operations but because of the number of edge cases
-that we have to deal with. The fact that we ensured that the maximum size of an entry can be up to `KeyLenSize(2) + KeySize(512) + ValSize(10) = MaxEntry(524)` actually
+that we have to deal with. The fact that we ensured that the maximum size of an entry can be up to `KeyLenSize(2) + KeySize(512) + ValSize(9) + Flags(1) = MaxEntry(524)` actually
 simplify a lot of things. Given that the size of a page is 8KB, we don't need to worry about not being able to double split (splitting the page once, and still not having
 enough room for the value we want to insert) or have to balance the size of entries along with their number, etc.
 

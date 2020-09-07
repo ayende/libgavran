@@ -30,7 +30,9 @@
       "sourceFileMap": {
         "/build/glibc-OTsEL5": "/usr/src/glibc"
       },
-      "args": [],
+      "args": [
+        "multiple_vals"
+      ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],

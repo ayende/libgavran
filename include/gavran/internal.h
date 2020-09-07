@@ -121,3 +121,6 @@ implementation_detail result_t btree_dump_tree(
 
 implementation_detail void btree_dump_page(
     page_t *p, page_metadata_t *metadata, uint16_t max);
+
+implementation_detail result_t txn_alloc_temp(
+    txn_t *tx, size_t min_size, void **buffer);

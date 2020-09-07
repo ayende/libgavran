@@ -1,22 +1,41 @@
-== Tables
+== Multiple values in hashes and trees
 
-In this part of the book, we have created so far the following data structures:
+In the last chapter, we build a B+Tree and earlier in the book we implemented an Extendible Hash Table. When I built them, I stated that they are going to store a single `uint64_t`
+value. 
+In other words, if we compare them to in memory containers,  B+Tree is a `sorted_map<span_t key, uint64_t value>` and the hash table is a 
+`map<uint64_t key, { uint64_t value, uint8_t flags}>`. That works great as long as we have a single value to store, but what happens if we want to have multiple values for 
+the same key?
 
-* Extendible hash table - `map<uint64_t key, uint64_t val>` 
-* Containers - `map<uint64_t key, span_t val>` 
-* B+Trees - `sorted_map<span_t key, uint64_t val>`
+Let's consider a usage scenario for the B+Tree, we want to store a mapping between an IP address and the time of access. I other words, we want to use a B+Tree to implement the 
+following function: `result_t record_ip_access(state_t* state, char* ip_address, time_t access_time)`. For the purpose of discussion, we'll ignore the different possible encodings 
+of IP addresses and just focus on the code in <<record_ips>>.
 
-These form the building blocks that we need to store complex data inside of Gavran. The question is how? Each one of them independently make sense for its own purposes, but they
-are really limited.
+[source]
+.Recording IP addresses
+----
+time_t now = time(0);
 
-We can use the hash to do a lookup by key, but the result is just a `uint64_t`. And if the key isn't a numeric value, we'll need to hash it to a `uint64_t` key first. How useful
-is that? 
-And a container can store an arbitrary amount of data, but you can only look it up using an opaque `uint64_t` key. That is great to store things, but how will you get the data
-back? 
-And a B+Tree allows us to use arbitrary byte strings (`span_t`) to look up the matching numeric value as well as perform iterations. But again, what use is there in an `uint64_t`?
+ensure(record_ip_access(state, "127.0.0.1", now - 60));
+ensure(record_ip_access(state, "127.0.0.1", now));
+ensure(record_ip_access(state, "127.0.0.1", now + 60));
+----
 
-If we compose all three of those features together, on the other hand, we might be getting somewhere. We are going to merge these three features together to create the Table 
-abstraction. A table is just a container along with associated hash or B+Tree. The idea is that the container will store the data, and the B+Tree or the hash will serve as indexes
-for the data.
+As you can see in <<record_ips>>, we have a problem. We need to record _multiple_ values for the same key. Right now, the B+Tree code cannot handle this scenario at all. Each key
+has a single value, that is all. So how can we store multiple entries for the same key? 
 
-Let's look at the API for defining a table first, then we'll discuss exactly how all of this works. 
+The answer, for B+Trees, is actually quite simple: We aren't going to. Yet we still want to allow the code in <<record_ips>> to work, so what should we do?
+
+A key observation here is that we don't _need_ to store all the values in a single key. To be rather more exact, the key provided to us by the caller doesn't have to be the key we
+use for the B+Tree. This is exposed by the API shown in <<btree_multi_api>>.
+
+[source]
+[[btree_multi_api]]
+.`gavran/db.h` - API for working with multiple values per key in a B+Tree
+----
+include::../include/gavran/db.h[tags=btree_multi_api]
+----
+
+The idea is that instead of writing the key as the user supplied it, we'll extend it with a unique value. This might be easier to explain if we'll see the code that is involved 
+with adding a multi value to the tree. You can see that in <<btree_multi_append>>.
+
+
