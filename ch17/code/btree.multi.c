@@ -47,6 +47,7 @@ static result_t btree_convert_to_nested(
       .key = {.address = key_buf, .size = 0}, .tree_id = *nested_id};
   btree_val_t del   = {.tree_id = tree_id};
   btree_cursor_t it = {.tree_id = tree_id, .tx = tx};
+  defer(btree_free_cursor, it);
   while (true) {
     memset(buf->address + buf->size - sizeof(uint64_t), 0,
         sizeof(uint64_t));
@@ -131,6 +132,7 @@ result_t btree_multi_append(txn_t *tx, btree_val_t *set) {
       0, sizeof(uint64_t));
   btree_cursor_t it = {
       .tree_id = set->tree_id, .key = args.key_buffer, .tx = tx};
+  defer(btree_free_cursor, it);
   ensure(btree_cursor_search(&it));
   while (true) {
     ensure(btree_get_next(&it));

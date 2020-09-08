@@ -39,6 +39,7 @@ result_t multiple_vals(uint64_t amount) {
       btree_cursor_t it = {.tree_id = tree_id,
           .tx                       = &tx,
           .key = {.address = key, .size = strlen(key)}};
+      defer(btree_free_cursor, it);
       ensure(btree_multi_cursor_search(&it));
       while (true) {
         ensure(btree_multi_get_next(&it));
@@ -61,6 +62,7 @@ result_t multiple_vals(uint64_t amount) {
       btree_cursor_t it = {.tree_id = tree_id,
           .tx                       = &tx,
           .key = {.address = key, .size = strlen(key)}};
+      defer(btree_free_cursor, it);
       ensure(btree_multi_cursor_search(&it));
       while (true) {
         ensure(btree_multi_get_next(&it));

@@ -461,7 +461,8 @@ static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
   page_metadata_t* metadata;
   btree_stack_t* stack = &c->tx->state->tmp.stack;
   ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
-  btree_stack_clear(stack);
+  // handle cursor reuse for multiple queries
+  ensure(btree_free_cursor(c));
   while (metadata->tree.page_flags == page_flags_tree_branch) {
     uint16_t max_pos = metadata->tree.floor / sizeof(uint16_t);
     int16_t pos      = start ? 0 : (int16_t)max_pos - 1;
@@ -590,6 +591,7 @@ result_t btree_free_cursor(btree_cursor_t* cursor) {
   if (cursor->stack.size == 0) return success();  // already freed
   if (cursor->tx->state->tmp.stack.size == 0) {
     // can reuse memory
+    btree_stack_clear(&cursor->stack);
     memcpy(&cursor->tx->state->tmp.stack, &cursor->stack,
         sizeof(btree_stack_t));
     return success();
