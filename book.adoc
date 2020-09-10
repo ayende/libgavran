@@ -20,7 +20,7 @@ To Rachel, with my love.
 To Tamar, who think such topics are "soooo boring", I hope you change your mind.
 
 To Shahar, who would always fall asleep when I talked about the book, hopefully you'll like it better when you grow up.
-
+////
 :figure-caption: Figure 1,
 :listing-caption: Listing 1,
 include::./intro/intro.adoc[]
@@ -115,7 +115,7 @@ include::./ch15/ch15.adoc[]
 :!figure-number:
 :!listing-number:  
 include::./ch16/ch16.adoc[]
-
+////
 :figure-caption: Figure 17,
 :listing-caption: Listing 17,
 :!figure-number:

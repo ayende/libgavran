@@ -607,6 +607,7 @@ result_t txn_register_cleanup_action(cleanup_callback_t **head,
 }
 // end::txn_register_cleanup_action[]
 
+// tag::txn_alloc_temp[]
 implementation_detail result_t txn_alloc_temp(
     txn_t *tx, size_t min_size, void **buffer) {
   if (tx->state->tmp.buffer.size < min_size) {
@@ -617,3 +618,4 @@ implementation_detail result_t txn_alloc_temp(
   *buffer = tx->state->tmp.buffer.address;
   return success();
 }
+// end::txn_alloc_temp[]

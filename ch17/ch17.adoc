@@ -1,4 +1,4 @@
-== Multiple values in hashes and trees
+== Storing multiple values per key
 
 In the last chapter, we build a B+Tree and earlier in the book we implemented an Extendible Hash Table. When I built them, I stated that they are going to store a single `uint64_t`
 value. 
@@ -31,9 +31,13 @@ use for the B+Tree. This is exposed by the API shown in <<btree_multi_api>>.
 
 [source]
 [[btree_multi_api]]
-.`gavran/db.h` - API for working with multiple values per key in a B+Tree
+.`gavran/db.h` & `btree.multi.c` - API for working with multiple values per key in a B+Tree
 ----
+// from gavran/db.h
 include::../include/gavran/db.h[tags=btree_multi_api]
+
+// from btree.multi.c
+include::./code/btree.multi.c[tags=multi_search_args]
 ----
 
 You can see that the API in <<btree_multi_api>> doesn't have a `set` function but an `append` one. We also don't have a way to `get` an item from a multi value, but we have to 
@@ -43,15 +47,331 @@ Conceptually, what we are going to do is to change the key that the user provide
 
 The idea is that instead of writing the key as the user supplied it, we'll extend it with a unique value. Here are the actual B+Tree entries after inserting three records:
 
-* `127.0.0.1|1` -> 1599999940
-* `127.0.0.1|2` -> 1600000000
-* `127.0.0.1|3` -> 1600000060
+* `127.0.0.1,1599999940` -> 1599999940
+* `127.0.0.1,1600000000` -> 1600000000
+* `127.0.0.1,1600000060` -> 1600000060
 
-Because we have the `|1` postfix to the key, we are able to store multiple values on the same "key". 
+Because we have the `,1599999940` postfix to the key, we are able to store multiple values on the same "key". I'm actually using the value
+of the key that the user specified as part of the actual key that is written to the B+Tree. The idea behind that is that this gives us a
+simple way to create a set. 
 
+=== Building a B+Tree to hold multiple values per key
 
+The key `127.0.0.1,1599999940` is how we _think_ about the multiple values, but that isn't how we actually store them. The key is actually
+built using the following manner: `key + byteswap(val)`. Let's see what we are actually doing here. We extend the key by 8 bytes and append
+the value in big endian format. The reason we use big endian is to allow us to get natural sort order using `memcmp()` for the keys. 
 
-This might be easier to explain if we'll see the code that is involved 
-with adding a multi value to the tree. You can see that in <<btree_multi_append>>.
+I didn't use `varint` encoding here for a reason. If all the keys are extended by exactly 8 bytes, we can compare the actual size of the key
+to the expected size of the key and ensure that we aren't confused a longer key with identical prefix. Because I'm using big endian format
+for the values, we ensure that the final key that is written to the B+Tree is sorted.
 
+.The conceptual data format for multi values in B+Tree
+****
+The usual B+Tree can be thought of as a `sorted_map<span_t key, { uint64_t val, uint8_t flags} >`. A B+Tree for multiple values, on 
+the other hand, is more similar to `sorted_map<span_t key, sorted_set<uint64_t>>`. The idea is that we are going to allow multiple values
+for the same key, and we are able to iterate over them in sorted order.
+
+Note that we don't have a `flags` value here, because we are using the `flags` value in order to _implement_ multi values.
+
+We are storing and retrieving the values in a sorted order mostly because this is a nice side affect of the implementation decision. It ends
+up a good decision, because there are _many_ scenarios where getting the values in sorted order can be very helpful.
+****
+
+Let's take a look at <<btree_multi_append>> and see how thing work. I'm starting with this function because it allows me to showcase all the
+ways that we handle multiple values in a single tree. 
+
+[source]
+[[btree_multi_append]]
+.`btree.multi.c` - Appending a multi value to a B+Tree
+----
+include::./code/btree.multi.c[tags=btree_multi_append]
+----
+<1> Check the key and find what type of values are currently stored in the B+Tree.
+<2> If we are using nested values, set the value in the nested tree.
+<3> Add the value with uniquifier to the B+Tree.
+<4> Move to nested mode if there are enough entries with the same key.
+
+At the `btree_multi_search_entry()` at the start of <<btree_multi_append>> we allocate a buffer that is capable of holding the key size plus
+eight bytes. This buffer is stored in the `args.buf` field and the key is copied to the start of the buffer. We search the B+Tree for other keys
+with this prefix to figure out how we are supposed to write to the tree, more on that later.
+
+I'm going to skip this now to look at the third point in <<btree_multi_append>>, we reverse the value and append it to the key and then set the
+key in the B+Tree. Note that we mark the entry as `btree_multi_flags_uniquifier`, because the value of the entry is used to create a unique key for the
+value. 
+
+.Range scans in B+Tree
+****
+B+Trees are sorted. That is a very important aspect of how they work, but so far we haven't actually _done_ much with them. Here, we are going to start
+using this property a lot. 
+
+Because all the multi values for a particular key share the same prefix, we are able to search for them easily. First, do a lookup for the key that we
+want to find, then find all the values that has the appropriate size and the same prefix. This is very cheap to do and the building block of many operations
+on B+Trees. 
+****
+
+The downside of the uniquifier approach is that it duplicates a lot of information. The key `127.0.0.1` is 9 characters in size, and if we add the 8 bytes of
+the value, we end up with 17 bytes for a key. Let's assume that we have to track a _lot_ of accesses for a given IP, what would be the overhead of multi values?
+
+Well, at 17 bytes per entry (excluding the cost of the value), we are going to take over 16MB (!) of space just for the keys when we need to store a million entries
+for a particular IP. The situation is worse with IPv6, where we've values such as: `2001:0dc5:72a3:0000:0000:802e:3370:73E4`. In this case, we'll use about 45MB of
+disk space just to hold the keys with million records. I believe the official term for this kind of behavior is: "this sucks!".
+
+The code in <<btree_multi_append>> is a lot more complex than simply appending the value to the key and storing that in the tree. That is meant to handle this exact
+scenario. At a certain point, the overhead of duplicating the key grow high enough that we have to take another approach. This is actually the second point in 
+<<btree_multi_append>>. 
+
+If the `btree_multi_search_entry()` indicates that we are using a nested tree, we are going to take the value and store that as a _key_ (using `varint`) in the nested
+tree. That can be confusing, so let's dig into what is going on here. At a certain point in time, we'll convert the keys + values that are stored as a flat list in the
+root tree into a nested tree. 
+
+That nested tree is used solely for holding the values of a particular key. In other words, we'll have a `127.0.0.1` key in the root tree, whose value would be a `tree_id`
+that would be used to hold the values for that key. And because we need to store just the values, we can simply encode them using `varint` and store them in the _keys_ of
+the nested tree. That will allow us to do scans and ordered iterations on the values associated with a key very cheaply. You can see the different formats in <<multi_formats>>.
+
+.Comparing the different formats of multiple values per key
+[[multi_formats]]
+[cols="2a,2a", options="header"]
+|===
+| Key + value, flat list | Key -> `tree_id`, nested tree
+| * `127.0.0.1,1599999940` -> 1599999940
+* `127.0.0.1,1600000000` -> 1600000000
+* `127.0.0.1,1600000060` -> 1600000060
+[cols="2a,2a", options="header"]
+| `127.0.0.1` -> `tree_id`  (see table below)
+!===
+! Key ! Value
+! `1599999940` ! 0
+! `1600000000` ! 0
+!`1600000060` ! 0
+!===
+|===
+
+One of the more important parts in `btree_multi_append()` is the call to `btree_multi_search_entry()`. This is where we find how we store the values for a particular key. Let's
+look at how this is done in <<btree_multi_search_entry>>. 
+
+[source]
+[[btree_multi_search_entry]]
+.`btree.multi.c` - Finding the appropriate entry in multiple entries 
+----
+include::./code/btree.multi.c[tags=btree_multi_search_entry]
+----
+
+The first step in `btree_multi_search_entry()` is to call to `txn_alloc_temp()`. This is an unfamiliar function for us, but a very important one. To avoid the need to continuously
+allocate and free small buffers, we have the `tx\->state\->tmp.buffer` field. Just like the `tx\->state\->tmp.stack` field, the idea is that we allocate this once for the lifetime
+of the transaction and avoid having to call `malloc()` and `free()` all the time. You can see the implementation of this in <<txn_alloc_tmp>>. The temp buffer is freed when the transaction
+is closed. Note that this is a transaction shared buffer. In other words, it is likely that it will be used by multiple parties and we can only assume that it isn't modified while
+it is our control. We cannot assume that it will retain its value between calls to the public API of Gavran.
+
+We copy the key that we are searching for to the temporary buffer and zero the remaining size (8 bytes). If the key that we are looking for is `127.0.0.1` (9 bytes) and the final key
+we'll get is `127.0.0.1\0\0\0\0\0\0\0\0`. The last 8 bytes are zeroed. We try to match the first key that match this key or are higher. We use the cursor API we use for this will find
+us _a_ key that is equal or greater to this key. It isn't necessarily a _useful_ key, though. For example, it may find us a key whose value is `127.0.0.2`, since that is greater than
+`127.0.0.1\0\0\0\0\0\0\0\0`.
+
+For that reason, we check that the key we find is valid. It has the right size and the prefix match to the key we are searching for. The next step is to check the `flags` of the entry.
+A multi value entry should have either `btree_multi_flags_nested` or `btree_multi_flags_uniquifier` as it `flags` value. The `btree_multi_flags_nested` flag means that the `val` of 
+the entry is the `tree_id` of a nested tree. And the `btree_multi_flags_uniquifier` flag means that we have added a the value as a uniquifier to the key. 
+
+[TIP]
+.Dealing with shared prefixes
+====
+One of the things that we have to worry about is what to do with shared prefixes in a multi value B+Tree. If one key is `127.0.0.1` and another key is `127.0.0.1\0`, for example. 
+That is a _valid_ key, after all. 
+
+We handle this appending a fixed size to all such keys and comparing the expected key size to the key that is actually in the tree. We also validate that the flags value of the
+tree is set to one of the expected values before accepting it as a multi value key.
+====
+
+[source]
+[[txn_alloc_temp]]
+.`txn.c` - Allocating temporary buffer at the transaction scope
+----
+include::./code/txn.c[tags=txn_alloc_temp]
+----
+
+=== Using a nested tree to optimize key duplication for multiple values
+
+Going back to <<btree_multi_append>>, we talked about the first three points. Checking an entry, adding an item to the nested tree and adding an entry with a uniquifier. The last
+action in `btree_multi_append()` is checking if we have too many uniquifiers with `btree_convert_to_nested_if_needed`, shown on <<btree_convert_to_nested_if_needed>>.
+
+[source]
+[[btree_convert_to_nested_if_needed]]
+.`btree.multi.c` - Checking if we have enough uniquifiers entries that it is worth to convert to a nested tree
+----
+include::./code/btree.multi.c[tags=btree_convert_to_nested_if_needed]
+----
+
+The code in `btree_convert_to_nested_if_needed()` simply scans through the tree searching for uniquifiers entries and count all of them. If we have more than 16 such entries, we'll
+convert the entries into a nested tree using the `btree_convert_to_nested()` function.
+
+Why do we have a limit of 16 uniquifiers entries before converting to a nested tree? A nested tree is going to take at least one page, so that would be 8KB. Using the IP example we
+have been using so far, 16 entries would have a cost of just 272 bytes. That is a big difference from 8KB, so why make the change so early?
+
+The cost of `btree_convert_to_nested_if_needed()` is linear to the number of uniquifiers items in the tree. The larger the number of uniquifiers entries we allow, the more expensive
+it is to add a new entry and then scan the tree to count the number of items that match the shared prefix. We could think of a few ways to avoid this issue, of course, but they are 
+fairly complex. 
+
+The deciding factor, however, is that common distribution patterns we have for multi value entries:
+
+* One
+* Few
+* Lots and lots and lots
+
+When we have to deal with multiple values for a single key, if there are more than a few (which I explicitly don't define but is very small, in most cases) repetitions, we'll have _lots_
+of repetitions. In that case, it is better to switch early to the more efficient manner of encoding multiple values.
+
+With a nested tree, millions values for `127.0.0.1` will not take 16MB, they will take a maximum of 8MB and usually a lot less. The same will hold true for 
+`2001:0dc5:72a3:0000:0000:802e:3370:73E4`. With millions of entries, we'll use exactly the same size as for `127.0.0.1`, since we only need to repeat the key once. 
+
+.Integer encoding options
+****
+It is worth noting that the manner we encode the values in the nested tree isn't ideal for the purpose. We need a mutable data structure to allow for efficient appends and removal
+from the set of values for a particular key. If we had better control over the access patterns, I might have chosen a different approach.
+
+Another way to handle this scenario is to use Roaring Bitmap, which allows to efficiently encoding sets. https://github.com/lemire/streamvbyte[StreamVByte] is an integer encoding
+scheme that allows to compress integers and decode them at a rate of 15GB/sec. The problem is that it expects to work in batch mode and isn't helpful if you have a lot of mutations
+over the data set. There are other encoding formats such as `FastPFor`, which has better compression rate, but are slower to decode.
+****
+
+The actual conversion of the uniquifiers entries to a nested B+Tree is done in `btree_convert_to_nested()` and is shown on <<btree_convert_to_nested>>.
+
+[source]
+[[btree_convert_to_nested]]
+.`btree.multi.c` - Converting the uniquifiers entries to a nested tree
+----
+include::./code/btree.multi.c[tags=btree_convert_to_nested]
+----
+
+In `btree_convert_to_nested()` we crete a nested tree (we'll look exactly how that works in a bit) and iterate over the root tree. We take all the values that has the key prefix
+we are working on and write them to the nested tree. We write the _values_ as keys using `varint` encoding, leaving the actual `val` and `flags` zeroed. That is because we need to
+track just the values associated with the key (the timestamps for the IP recorded, in our example). Using `varint` encoding gives us interesting advantages:
+
+* We use less space than otherwise would be required.
+* We keep the data in sorted order, which helps iteration.
+* The keys are unique, which means that we have much easier time adding and removing items to the set.
+
+You'll note that we are working in somewhat of a strange fashion in the `btree_convert_to_nested()` function. We have a `while` loop and we keep searching the root tree on each 
+iteration. Why is that?
+
+We are calling `btree_del()` on the root tree, which will _invalidate_ the iterator that we use. In order to get the next item, we have to search again to find the next entry that
+match the query. As usual, the `btree_cursor_search()` find the first key that is equals or greater than the key that we are searching. The key we are using in `btree_cursor_search()`
+is the key prefix plus 8 bytes of zeros, so we'll scan to find all the uniquifiers for a particular key. When we find a value that isn't a uniquifier or doesn't have the right size
+and prefix, we'll complete the process.
+
+The last action on `btree_cursor_search()` is to update the root tree with the `tree_id` of the nested tree with the `btree_multi_flags_nested` flag. Note that we use the `buf`'s key
+value, which is the key prefix with 8 zero bytes appended. 
+
+Creating a nested tree done in the `btree_create_nested()` function and is more involved than simply calling to the `btree_create()` function. Let's look at <<btree_create_nested>> to
+see what is going on here.
+
+[source]
+[[btree_create_nested]]
+.`btree.multi.c` - Creating a nested tree and wiring it for release when the root tree is released
+----
+include::./code/btree.multi.c[tags=btree_create_nested]
+----
+
+Most of the work inside of `btree_create_nested()` is done to add the newly create tree to the list of nested tree on the root tree. Why do we need that? This is required to make it
+cheap to remove a tree using `btree_drop()` when it has nested trees. Otherwise, we would need to scan the whole tree and inspect all its data. By keeping a separate list of nested
+trees, we have a much easier time handling this scenario. 
+Let's look deeper into deleting items from a multi value tree.
+
+=== Deleting a value from a multi value B+Tree
+
+After looking into appending a value to a key, let's look at the other side, removing a value from a key. This is done using the `btree_multi_del()` function, shown on <<btree_multi_del>>.
+Note that in this case, unlike the usual `btree_del()` call, the `val` field in the `btree_val_t` instance is important. This is the value that we'll remove from the key.
+
+[source]
+[[btree_multi_del]]
+.`btree.multi.c` - Removing a single value from a key (and doing cleanup if needed)
+----
+include::./code/btree.multi.c[tags=btree_multi_del]
+----
+
+The code in `btree_multi_del()` starts by calling to `btree_multi_search_entry()`. If we couldn't find a matching value, there is nothing to do and we can return immediately. If there
+_is_ a value, we need to check if this is a nested tree or a uniquifier value. If we aren't using a nested tree, we'll set the key buffer to the uniquifier value and remove it from the
+tree.
+
+If we _are_ using a nested tree, however, we have a more complex workflow. First, we remove the value from the nested tree keys, then we check if the nested tree is completely empty.
+If it has any values, we'll leave it as is. In other words, if a multi value key has enough values to grow to a nested tree, it will not be downgraded to uniquifiers entries. It is 
+only when the number of entries in the nested tree reaches zero that we'll remove the nested tree. Dropping the nested tree, which is done on <<btree_drop_nested>>. 
+
+[source]
+[[btree_drop_nested]]
+.`btree.multi.c` - Removing a single nested B+Tree and unhooking it from the root tree's list
+----
+include::./code/btree.multi.c[tags=btree_drop_nested]
+----
+
+The process is pretty simple, we remove the nested tree that we are about the delete from the linked list of nested trees on the root page and then delete the nested tree directly.
+I also had to change the `btree_drop()` code, which is shown on <<btree_drop_only>>.
+
+[source]
+[[btree_drop_only]]
+.`btree.c` - When removing a B+Tree, also remove all its nested trees
+----
+include::./code/btree.c[tags=btree_drop_only]
+----
+
+This completes the process of adding and removing  multiple values to the same B+Tree, but there is still quite a bit of functionality on the table.
+
+=== Iterating over multiple values per key using B+Tree
+
+We have appended multiple values to a key in the previous section of this chapter. What we haven't done yet is read the data back. When using multi value trees, we don't have a `get`
+or a `read` operations, we can only iterate over the values for a particular key. The iteration over the values of a key in our implementation has the following properties:
+
+* If the value does not exists, you'll get an empty iteration.
+* The values are iterated in ascending value order.
+
+This hold true whatever you are using uniquifiers entries or a nested tree and isn't exposed to the outside world. We provide two API calls to allow iterating over the values of
+a key. Let's start by looking into `btree_multi_cursor_search()`, shown on <<btree_multi_cursor_search>>.
+
+[source]
+[[btree_multi_cursor_search]]
+.`btree.multi.c` - Creating a cursor to iterate over the values of a particular key
+----
+include::./code/btree.multi.c[tags=btree_multi_cursor_search]
+----
+
+We start by calling to `txn_alloc_temp()` to allocate a temporary buffer that we'll use to setup the actual multi value key in. This is a transaction shared value which is used
+only for the duration of this function. We construct an internal cursor `it` that we use to search the root tree for the first entry that equals or is greater than our search key.
+We validate that it is a proper prefix for what we want to search on and then we check whatever we are looking at a nested tree or not.
+
+In the case of a nested tree, the iteration is very simple. We free the `it` cursor and direct the `cursor` instance we got to go over all the nested tree. We tell the `cursor`
+to start the iteration at the beginning of the tree and the rest of the work would be simply iterating over a tree as usual. Note that we free the `it` cursor early (even though
+we have the free registered in a `defer` call) because we want to avoid two concurrent cursors. That would force us to allocate and we can avoid it. 
+
+For uniquifiers entries, on the other hand, we can search in the root tree. We go back one step (to undo the existing `btree_get_next()` call and move the ownership of the cursor
+stack from the `it` internal cursor to the `cursor` instance that was provided by the caller. 
+
+The `btree_multi_cursor_search()` merely setup the cursor, in order to actually iterate over it, you need to call to `btree_multi_get_next()`, shown on <<btree_multi_get_next>>.
+
+[source]
+[[btree_multi_get_next]]
+.`btree.multi.c` - Getting the next value from a 
+----
+include::./code/btree.multi.c[tags=btree_multi_get_next]
+----
+
+The first thing we do in `btree_multi_get_next()` is to check if `has_val` is set to false. This can happen if there was no entry found for the key. It isn't _strictly_ necessary,
+but I find that it makes it easier to understand what is going on here. 
+We copy the user provided key to the side. This is because we are going to be iterating over the cursor and that would change the value in `cursor\->key`. We then step to the next
+entry in the cursor. 
+
+If we are iterating over a nested tree, we start the iteration placed just before the beginning, which means that we can just iterate over all the entries in the nested tree. As a 
+reminder, the _keys_ in the nested tree represent the values that we stored for the key in the root tree, so we decode them to the `cursor\->val` field and we are done. 
+When we are running over uniquifiers entries, we scan through the root tree and check that we are still on the same prefix as we are search on. In this case, the value in the cursor
+is also one of the values on the key, so we can return that directly.
+
+[IMPORTANT]
+.Remember to call `btree_free_cursor()` on the multi value key cursors
+====
+Just like when you are using `btree_cursor_search()` and `btree_get_next()`, the cursor that we use for `btree_multi_cursor_search()` and `btree_multi_get_next()` _has_ to be freed
+after usage using `btree_free_cursor()`. 
+This makes sense, since we _are_ using `btree_cursor_search()` to implement `btree_multi_cursor_search()`. 
+====
+
+This concludes the work required to handle multiple values per key using B+Trees. We are going to extend the same API for handling multiple values for when we use our Extendible Hash
+Table.
+
+=== Building a hash that will hold multiple values per key
 

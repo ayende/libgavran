@@ -412,6 +412,7 @@ static result_t btree_free_page_recursive(
   ensure(txn_free_page(tx, &p));
   return success();
 }
+// tag::btree_drop_only[]
 result_t btree_drop(txn_t* tx, uint64_t tree_id) {
   page_metadata_t* metadata;
   ensure(txn_get_metadata(tx, tree_id, &metadata));
@@ -424,6 +425,7 @@ result_t btree_drop(txn_t* tx, uint64_t tree_id) {
   }
   return btree_free_page_recursive(tx, tree_id);
 }
+// end::btree_drop_only[]
 // end::btree_drop[]
 
 // tag::btree_set[]
@@ -478,7 +480,7 @@ static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
   int16_t leaf_max_pos = metadata->tree.floor / sizeof(uint16_t);
   ensure(btree_stack_push(&c->tx->state->tmp.stack, p.page_num,
       ~(start ? 0 : leaf_max_pos)));
-
+  c->has_val = metadata->tree.floor > 0;
   memcpy(&c->stack, stack, sizeof(btree_stack_t));
   memset(stack, 0, sizeof(btree_stack_t));
   return success();
@@ -594,6 +596,7 @@ result_t btree_free_cursor(btree_cursor_t* cursor) {
     btree_stack_clear(&cursor->stack);
     memcpy(&cursor->tx->state->tmp.stack, &cursor->stack,
         sizeof(btree_stack_t));
+    memset(&cursor->stack, 0, sizeof(btree_stack_t));
     return success();
   }
   return btree_stack_free(&cursor->stack);

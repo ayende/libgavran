@@ -395,7 +395,8 @@ typedef struct hash_val {
   struct {
     uint32_t page_index;
     uint16_t pos_in_page;
-    uint8_t padding[2];
+    bool iterating_nested;
+    uint8_t padding;
   } iter_state;
   bool has_val;
   bool hash_id_changed;
@@ -412,6 +413,15 @@ result_t hash_del(txn_t *tx, hash_val_t *del);
 result_t hash_get_next(
     txn_t *tx, pages_map_t **state, hash_val_t *it);
 // end::hash_api[]
+
+// tag::hash_multi_api[]
+result_t hash_multi_append(
+    txn_t *tx, hash_val_t *set, uint64_t container_id);
+result_t hash_multi_del(
+    txn_t *tx, hash_val_t *del, uint64_t container_id);
+result_t hash_multi_get_next(txn_t *tx, pages_map_t **state,
+    hash_val_t *it, uint64_t container_id);
+// end::hash_multi_api[]
 
 // tag::btree_api[]
 typedef struct btree_val {

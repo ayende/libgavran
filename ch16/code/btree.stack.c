@@ -43,6 +43,7 @@ result_t btree_stack_peek(
 result_t btree_stack_free(btree_stack_t* s) {
   free(s->positions);
   free(s->pages);
+  memset(s, 0, sizeof(btree_stack_t));
   return success();
 }
 void btree_stack_clear(btree_stack_t* s) {
