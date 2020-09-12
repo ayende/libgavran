@@ -416,11 +416,11 @@ static result_t btree_free_page_recursive(
 result_t btree_drop(txn_t* tx, uint64_t tree_id) {
   page_metadata_t* metadata;
   ensure(txn_get_metadata(tx, tree_id, &metadata));
-  uint64_t nested = metadata->tree.next_nested;
+  uint64_t nested = metadata->tree.nested.next;
   while (nested) {
     ensure(txn_get_metadata(tx, nested, &metadata));
     uint64_t old_nested = nested;
-    nested              = metadata->tree.next_nested;
+    nested              = metadata->tree.nested.next;
     ensure(btree_free_page_recursive(tx, old_nested));
   }
   return btree_free_page_recursive(tx, tree_id);

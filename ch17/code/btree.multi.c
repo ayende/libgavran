@@ -27,14 +27,14 @@ static result_t btree_create_nested(
   page_metadata_t *root, *nested;
   ensure(txn_modify_metadata(tx, root_tree_id, &root));
   ensure(txn_modify_metadata(tx, *nested_tree_id, &nested));
-  if (root->tree.next_nested) {
-    page_metadata_t *next_nested;
+  if (root->tree.nested.next) {
+    page_metadata_t *nested_next;
     ensure(txn_modify_metadata(
-        tx, root->tree.next_nested, &next_nested));
-    next_nested->tree.prev_nested = *nested_tree_id;
+        tx, root->tree.nested.next, &nested_next));
+    nested_next->tree.nested.prev = *nested_tree_id;
   }
-  nested->tree.next_nested = root->tree.next_nested;
-  root->tree.next_nested   = *nested_tree_id;
+  nested->tree.nested.next = root->tree.nested.next;
+  root->tree.nested.next   = *nested_tree_id;
   return success();
 }
 // end::btree_create_nested[]
@@ -223,24 +223,23 @@ result_t btree_multi_get_next(btree_cursor_t *cursor) {
 
 // tag::btree_drop_nested[]
 static result_t btree_drop_nested(
-    txn_t *tx, uint64_t tree_id, uint64_t nested_tree_id) {
-  page_metadata_t *root, *nested;
-  ensure(txn_modify_metadata(tx, tree_id, &root));
+    txn_t *tx, uint64_t nested_tree_id) {
+  page_metadata_t *nested;
   ensure(txn_modify_metadata(tx, nested_tree_id, &nested));
-  if (nested->tree.next_nested) {
-    page_metadata_t *next_nested;
+  if (nested->tree.nested.next) {
+    page_metadata_t *nested_next;
     ensure(txn_modify_metadata(
-        tx, nested->tree.next_nested, &next_nested));
-    next_nested->tree.prev_nested = nested->tree.prev_nested;
+        tx, nested->tree.nested.next, &nested_next));
+    nested_next->tree.nested.prev = nested->tree.nested.prev;
   }
-  if (nested->tree.prev_nested) {
-    page_metadata_t *prev_nested;
+  if (nested->tree.nested.prev) {
+    page_metadata_t *nested_prev;
     ensure(txn_modify_metadata(
-        tx, nested->tree.prev_nested, &prev_nested));
-    prev_nested->tree.next_nested = nested->tree.next_nested;
+        tx, nested->tree.nested.prev, &nested_prev));
+    nested_prev->tree.nested.next = nested->tree.nested.next;
   }
-  nested->tree.next_nested = 0;
-  nested->tree.prev_nested = 0;
+  nested->tree.nested.next = 0;
+  nested->tree.nested.prev = 0;
   ensure(btree_drop(tx, nested_tree_id));
   return success();
 }
@@ -262,7 +261,7 @@ result_t btree_multi_del(txn_t *tx, btree_val_t *del) {
     ensure(txn_get_metadata(tx, args.nested_id, &metadata));
     if (metadata->tree.floor) return success();
     // empty tree, can drop nested tree and delete entry
-    ensure(btree_drop_nested(tx, del->tree_id, args.nested_id));
+    ensure(btree_drop_nested(tx, args.nested_id));
     memset(args.buf.address + args.buf.size - sizeof(uint64_t), 0,
         sizeof(uint64_t));
   } else {

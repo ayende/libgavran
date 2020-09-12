@@ -78,7 +78,6 @@ describe(hash) {
         hash_val_t hv_write = {
             .hash_id = hash_id, .key = i, .val = i + 3};
         assert(hash_set(&w, &hv_write, 0));
-        hash_id = hv_write.hash_id;
       }
 
       for (size_t i = 0; i < 16; i++) {
@@ -130,16 +129,11 @@ describe(hash) {
       defer(txn_close, w);
       uint64_t hash_id;
       assert(hash_create(&w, &hash_id));
-      bool hash_id_changed = false;
-      hash_val_t hv_write  = {.hash_id = hash_id};
+      hash_val_t hv_write = {.hash_id = hash_id};
       for (size_t i = 0; i < 12 * 1024; i++) {
         hv_write.key = i * 1024;
         hv_write.val = i;
         assert(hash_set(&w, &hv_write, 0));
-        if (hv_write.hash_id_changed) {
-          hash_id         = hv_write.hash_id;
-          hash_id_changed = true;
-        }
         hash_val_t hv_read = {.hash_id = hash_id};
         assert(hash_get(&w, &hv_read) && hv_read.has_val &&
                hv_read.val == 0);
@@ -153,7 +147,6 @@ describe(hash) {
       fclose(f);
       */
 
-      assert(hash_id_changed);
       hash_val_t hv_read = {.hash_id = hash_id};
       for (size_t i = 0; i < 12 * 1024; i++) {
         hv_read.key = i * 1024;
@@ -180,7 +173,6 @@ describe(hash) {
         hash_val_t hv_write = {
             .hash_id = hash_id, .key = i * 513, .val = i + 3};
         assert(hash_set(&w, &hv_write, 0));
-        hash_id = hv_write.hash_id;
       }
       for (size_t i = 0; i < 12 * 1024; i++) {
         hash_val_t hv_read = {.hash_id = hash_id, .key = i * 513};

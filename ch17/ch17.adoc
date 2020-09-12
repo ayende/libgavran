@@ -375,3 +375,85 @@ Table.
 
 === Building a hash that will hold multiple values per key
 
+I also want to allow us to store multiple values when using a hash. Conceptually, I want to build a `map<uint64_t key, set<uint64_t> values>` collection. Each key in the hash table
+may point to one or more values and we want to be able to append and remove to them at will. That turns out to be a somewhat tricker task. When adding multiple values to the B+Tree, 
+I took advantage on the fact that I could _extend_ the key to add uniquifiers to the actual key we store in the B+Tree. With the hash table, there is no good way to mimic this approach. 
+For that reason, using a multi value hash table is going to take cooperation between two data structure that we already built: the hash table and the container. 
+
+The idea is simple. When we store a multi value in the hash table, we are going to use the `flags` to distinguish the types of values we have. The following options are allowed:
+
+* `hash_multi_single` - The usual mode, in which the `key` and the `val` are stored directly in the hash table.
+* `hash_multi_packed` - The `key` is stored in the hash, but the `val` points to an `item_id` which is a buffer that contain many values for that particular key.
+* `hash_multi_nested` - The `key` is store in the hash, and the `val` is a `hash_id` of a nested hash table. Entries in the nested hash table has their `val` set to zero
+  and the `key` actually hold the multi values for the root key. This is similar to the nested B+Tree from the previous section.
+
+The API that we expose the the users is shown in <<hash_multi_api>>. Unlike the B+Tree API, the multi hash API isn't able to operate solely within the constraints of its root data
+structure and needs assistance from an associated container. We'll see exactly why shortly.
+
+[source]
+[[hash_multi_api]]
+.`gavran/db.h` - API for working with multiple values per key in a hash table
+----
+include::../include/gavran/db.h[tags=hash_multi_api]
+----
+
+You can see that this is similar to the multi value API for B+Tree, with the same behaviors. You can append a value to a key, delete a value from a key or iterate over all the values
+of a key. We'll start looking into the implementation of the multi value hash table in <<hash_multi_append>>.
+
+[source]
+[[hash_multi_append]]
+.`hash.multi.c` - Appending a value to a key in a multi value hash
+----
+include::./code/hash.multi.c[tags=hash_multi_append]
+----
+<1> There are no entries for the provided `key`, so we can simple enter a value to the root hash table as usual, tagging it as `hash_multi_single`. 
+<2> There is a single value in the hash table, if it is the same as the existing value, we can do nothing. Otherwise, we'll convert the value into a `hash_multi_packed` value using 
+    `hash_multi_set_single()`. 
+<3> Adding a value to an already `hash_multi_packed` value using `hash_multi_set_packed()`.
+<4> Adding a value to a nested hash table using `hash_multi_set_nested()`. 
+
+There idea in `hash_multi_append()` is to decide what is the relevant scenario that we run into and call to the appropriate function to handle that. Let's look at `hash_multi_set_single()`
+in <<hash_multi_set_single>>, which will convert a single value into a pair of values.
+
+[source]
+[[hash_multi_set_single]]
+.`hash.multi.c` - Move from storing a single value per key to holding two values for the value in a packed mode
+----
+include::./code/hash.multi.c[tags=hash_multi_set_single]
+----
+
+The code in `hash_multi_set_single()` is quite interesting. We create a buffer and write the existing and new values for the `key` to the buffer. We then create a _container item_ to hold
+that buffer and store the `item_id` of that item in the hash table with a `hash_multi_packed` flag. The idea is that we can't use the hash table to store multiple values, but we can use 
+the container to store those values for us and store a reference to it. 
+
+If we had additional writes to the same key, the `hash_multi_append()` function will direct them to the `hash_multi_set_packed()` function, shown on <<hash_multi_set_packed>>.
+
+[source]
+[[hash_multi_set_packed]]
+.`hash.multi.c` - Append a value to a packed set stored inside a container
+----
+include::./code/hash.multi.c[tags=hash_multi_set_packed]
+----
+
+The code in `hash_multi_set_packed()` will load the existing item's data using its reference `item_id` and scan it. If we have a new value, we'll need to extend the buffer to fit the new
+value. This is done using the `txn_alloc_temp()` function that we are already familiar with. 
+Note that we place a limit on the size of such packed structures. Once we go beyond 128 bytes, we'll move to a nested model. We'll look into that soon, for now, let's see what happens when
+we add an item to packed value.
+
+We allocate the new buffer, copy the existing data and write the new value at the end. Then we update the container's item and update the `item_id` if needed. The values in the packed 
+buffer are not stored in any particular order and we have to scan through the whole buffer each time we append to it. Given that we are talking about a pretty small maximum size, I'm not
+worried about this.
+
+The size limit is 128 bytes, which _is_ small. The idea here, just like with the B+Tree move from uniquifiers to nested trees, is that the data distribution of values means that once you
+go beyond a certain size, you are almost certain going to be growing a lot larger. For that reason, it is best to move to the more efficient model early.
+We convert the value from packed value to a nested hash table in <<hash_multi_set_convert_to_nested>>.
+
+[source]
+[[hash_multi_set_convert_to_nested]]
+.`hash.multi.c` - Convert a packed buffer of values into a nested hash table
+----
+include::./code/hash.multi.c[tags=hash_multi_set_convert_to_nested]
+----
+
+The code in `hash_multi_set_convert_to_nested()` will simply create a new nested hash table and add the values from the packed buffer (and the newly set value) to the nested hash table 
+as keys. After we are done modifying both hash tables, we record the nesting association between them in the same manner we did with nested B+Trees. The root hash table has metadata 

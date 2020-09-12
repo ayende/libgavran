@@ -164,11 +164,9 @@ bool bitmap_search(bitmap_search_state_t *search) {
     return false;  // already scanned it all
   }
 
-  search->input.bitmap      = old_bitmap;
-  search->input.bitmap_size = MIN(old_size,
-      search->internal.search_offset + search->input.space_required);
-
-  // we search _after_, couldn't find anything, maybe before?
-  return bitmap_search_once(search);
+  search->input.bitmap        = old_bitmap;
+  search->input.bitmap_size   = old_size;
+  search->input.near_position = 0;  // search all
+  return bitmap_search(search);
 }
 // end::bitmap_search[]

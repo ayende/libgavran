@@ -77,14 +77,18 @@ typedef enum __attribute__((__packed__)) page_flags {
   page_flags_tree_branch       = 9,
 } page_flags_t;
 
+typedef struct nested_list {
+  uint64_t next;
+  uint64_t prev;
+} nested_list_t;
+
 typedef struct tree_page {
   page_flags_t page_flags;
   uint8_t padding[1];
   uint16_t floor;
   uint16_t ceiling;
   uint16_t free_space;
-  uint64_t next_nested;
-  uint64_t prev_nested;
+  nested_list_t nested;
 } tree_page_t;
 
 typedef struct hash_page_directory {
@@ -93,7 +97,7 @@ typedef struct hash_page_directory {
   uint8_t padding[2];
   uint32_t number_of_buckets;
   uint64_t number_of_entries;
-  uint8_t padding2[16];
+  nested_list_t nested;
 } hash_page_directory_t;
 
 typedef struct hash_page {
@@ -101,7 +105,9 @@ typedef struct hash_page {
   uint8_t depth;
   uint16_t number_of_entries;
   uint16_t bytes_used;
-  uint8_t _padding[26];
+  uint8_t _padding[2];
+  uint64_t dir_page_num;
+  nested_list_t nested;
 } hash_page_t;
 
 // tag::container_page_t[]
@@ -399,9 +405,8 @@ typedef struct hash_val {
     uint8_t padding;
   } iter_state;
   bool has_val;
-  bool hash_id_changed;
   uint8_t flags;
-  uint8_t padding[5];
+  uint8_t padding[6];
 } hash_val_t;
 
 result_t hash_create(txn_t *tx, uint64_t *hash_id);

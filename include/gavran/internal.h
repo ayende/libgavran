@@ -98,7 +98,7 @@ uint8_t *varint_decode(uint8_t *buf, uint64_t *value);
 // end::varint_api[]
 
 implementation_detail bool hash_page_get_next(
-    page_t *p, hash_val_t *it);
+    void *address, hash_val_t *it);
 
 implementation_detail result_t print_hash_table(
     FILE *f, txn_t *tx, uint64_t hash_id);
