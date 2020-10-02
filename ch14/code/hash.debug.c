@@ -23,7 +23,7 @@ static void print_bits(FILE* fd, uint64_t v, int depth) {
   }
 }
 
-static void print_hash_page(
+implementation_detail void print_hash_page(
     FILE* f, page_t* p, page_metadata_t* metadata) {
   fprintf(f,
       "\tbucket_%lu [label=\"Depth: %d, Entries: %d, Bytes Used: "
@@ -31,7 +31,7 @@ static void print_hash_page(
       p->page_num, metadata->hash.depth,
       metadata->hash.number_of_entries, metadata->hash.bytes_used);
   hash_val_t it = {0};
-  while (hash_page_get_next(p, &it)) {
+  while (hash_page_get_next(p->address, &it)) {
     print_bits(f, hash_permute_key(it.key), metadata->hash.depth);
     fprintf(f, " \\| %ld (%ld)= %ld (flags: %d)\\l", it.key,
         hash_permute_key(it.key), it.val, it.flags);

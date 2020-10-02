@@ -196,15 +196,20 @@ describe(hash) {
         assert(hv_read.val == i + 3);
       }
 
-      uint64_t pages[10] = {6, 12, 5, 9, 8, 13, 14, 11, 12, 18};
-      for (size_t i = 0; i < 10; i++) {
+      page_metadata_t* m;
+      assert(txn_get_metadata(&w, hash_id, &m));
+      page_t hash_dir = {.page_num = m->hash.dir_page_num};
+      assert(txn_get_page_and_metadata(&w, &hash_dir, &m));
+      uint64_t* pages = hash_dir.address;
+      assert(m->hash_dir.number_of_buckets);
+      for (size_t i = 0; i < m->hash_dir.number_of_buckets; i++) {
         page_t p = {.page_num = pages[i]};
         page_metadata_t* metadata;
         assert(txn_get_page_and_metadata(&w, &p, &metadata));
         int c         = 0;
         hash_val_t it = {0};
         while (true) {
-          if (hash_page_get_next(&p, &it) == false) break;
+          if (hash_page_get_next(p.address, &it) == false) break;
           c++;
         }
         assert(c == metadata->hash.number_of_entries);
@@ -220,6 +225,9 @@ describe(hash) {
         assert(hash_get_next(&w, &map, &it));
         if (it.has_val == false) break;
         count++;
+        if (it.key / 513 != it.val - 3) {
+          printf("b");
+        }
         assert(it.key / 513 == it.val - 3);
       }
       assert(count == 6 * 1024);
