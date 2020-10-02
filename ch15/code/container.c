@@ -359,10 +359,6 @@ static result_t container_remove_page(txn_t *tx,
   hash_val_t del = {
       .hash_id = header->container.free_list, .key = p->page_num};
   ensure(hash_del(tx, &del));
-  if (del.hash_id_changed) {
-    ensure(txn_modify_metadata(tx, container_id, &header));
-    header->container.free_list = del.hash_id;
-  }
   ensure(txn_free_page(tx, p));
   return success();
 }
@@ -385,10 +381,6 @@ static result_t container_item_del_finalize(txn_t *tx,
     ensure(hash_get(tx, &kvp));
     if (kvp.has_val == false) {
       ensure(hash_set(tx, &kvp, 0));
-      if (kvp.hash_id_changed) {
-        ensure(txn_modify_metadata(tx, item->container_id, &header));
-        header->container.free_list = kvp.hash_id;
-      }
     }
   }
   return success();

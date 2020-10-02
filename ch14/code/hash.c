@@ -704,7 +704,7 @@ result_t hash_get_next(
   ensure(hash_id_to_dir_root(
       tx, it->hash_id, &hash_root, &root_metadata));
   if (root_metadata->common.page_flags == page_flags_hash) {
-    it->has_val = hash_page_get_next(&hash_root, it);
+    it->has_val = hash_page_get_next(hash_root.address, it);
     return success();
   }
   uint64_t* buckets = hash_root.address;
