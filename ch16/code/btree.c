@@ -144,7 +144,7 @@ static result_t btree_create_root_page(
   uint8_t* val_p =
       btree_insert_to_page(p, *metadata, 0, (uint16_t)req_size);
   varint_encode(new.page_num, varint_encode(0, val_p));
-  ensure(btree_stack_push(&tx->state->tmp_stack, p->page_num, 0));
+  ensure(btree_stack_push(&tx->state->tmp.stack, p->page_num, 0));
 
   memcpy(p, &new, sizeof(page_t));
   *metadata = new_metadata;
@@ -248,7 +248,7 @@ static result_t btree_append_to_parent(
 // tag::btree_split_page[]
 static result_t btree_split_page(txn_t* tx, page_t* p,
     page_metadata_t** metadata, btree_val_t* set) {
-  btree_stack_t* stack = &tx->state->tmp_stack;
+  btree_stack_t* stack = &tx->state->tmp.stack;
   if (stack->index == 0) {  // at root
     ensure(btree_create_root_page(tx, p, metadata));
   }
@@ -378,13 +378,13 @@ static result_t btree_get_leaf_page_for(txn_t* tx, btree_val_t* kvp,
   ensure(txn_get_page_and_metadata(tx, p, metadata));
   assert((*metadata)->common.page_flags == page_flags_tree_branch ||
          (*metadata)->common.page_flags == page_flags_tree_leaf);
-  btree_stack_clear(&tx->state->tmp_stack);
+  btree_stack_clear(&tx->state->tmp.stack);
   while ((*metadata)->tree.page_flags == page_flags_tree_branch) {
     btree_search_pos_in_page(p, *metadata, kvp);
     if (kvp->position < 0) kvp->position = ~kvp->position;
     if (kvp->last_match) kvp->position--;  // went too far
     ensure(btree_stack_push(
-        &tx->state->tmp_stack, p->page_num, kvp->position));
+        &tx->state->tmp.stack, p->page_num, kvp->position));
     uint16_t max_pos = (*metadata)->tree.floor / sizeof(uint16_t);
     uint16_t pos     = MIN(max_pos - 1, (uint16_t)kvp->position);
     p->page_num      = btree_get_val_at(p, *metadata, pos);
@@ -450,7 +450,7 @@ result_t btree_get(txn_t* tx, btree_val_t* kvp) {
 static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
   page_t p = {.page_num = c->tree_id};
   page_metadata_t* metadata;
-  btree_stack_t* stack = &c->tx->state->tmp_stack;
+  btree_stack_t* stack = &c->tx->state->tmp.stack;
   ensure(txn_get_page_and_metadata(c->tx, &p, &metadata));
   btree_stack_clear(stack);
   while (metadata->tree.page_flags == page_flags_tree_branch) {
@@ -466,7 +466,7 @@ static result_t btree_cursor_at(btree_cursor_t* c, bool start) {
   }
   assert(metadata->tree.page_flags == page_flags_tree_leaf);
   int16_t leaf_max_pos = metadata->tree.floor / sizeof(uint16_t);
-  ensure(btree_stack_push(&c->tx->state->tmp_stack, p.page_num,
+  ensure(btree_stack_push(&c->tx->state->tmp.stack, p.page_num,
       ~(start ? 0 : leaf_max_pos)));
 
   memcpy(&c->stack, stack, sizeof(btree_stack_t));
@@ -560,11 +560,11 @@ result_t btree_cursor_search(btree_cursor_t* c) {
   page_metadata_t* metadata;
   ensure(btree_get_leaf_page_for(c->tx, &kvp, &p, &metadata));
   ensure(btree_stack_push(
-      &c->tx->state->tmp_stack, p.page_num, kvp.position));
+      &c->tx->state->tmp.stack, p.page_num, kvp.position));
 
   // <1>
-  memcpy(&c->stack, &c->tx->state->tmp_stack, sizeof(btree_stack_t));
-  memset(&c->tx->state->tmp_stack, 0, sizeof(btree_stack_t));
+  memcpy(&c->stack, &c->tx->state->tmp.stack, sizeof(btree_stack_t));
+  memset(&c->tx->state->tmp.stack, 0, sizeof(btree_stack_t));
 
   return success();
 }
@@ -578,9 +578,9 @@ result_t btree_get_prev(btree_cursor_t* cursor) {
 
 // tag::btree_free_cursor[]
 result_t btree_free_cursor(btree_cursor_t* cursor) {
-  if (cursor->tx->state->tmp_stack.size == 0) {
+  if (cursor->tx->state->tmp.stack.size == 0) {
     // can reuse memory
-    memcpy(&cursor->tx->state->tmp_stack, &cursor->stack,
+    memcpy(&cursor->tx->state->tmp.stack, &cursor->stack,
         sizeof(btree_stack_t));
     return success();
   }
@@ -725,12 +725,12 @@ static result_t btree_maybe_merge_pages(
     txn_t* tx, page_t* p, page_metadata_t* metadata) {
   // if page is over 2/3 full, we'll do nothing
   if (metadata->tree.free_space < (PAGE_SIZE / 3) * 2 ||
-      tx->state->tmp_stack.index == 0)  // nothing to merge with
+      tx->state->tmp.stack.index == 0)  // nothing to merge with
     return success();
   int16_t cur_pos;
   page_t parent = {0};
   ensure(btree_stack_pop(
-      &tx->state->tmp_stack, &parent.page_num, &cur_pos));
+      &tx->state->tmp.stack, &parent.page_num, &cur_pos));
   page_metadata_t* parent_metadata;
   ensure(txn_get_page_and_metadata(tx, &parent, &parent_metadata));
   uint16_t max_pos = parent_metadata->tree.floor / sizeof(uint16_t);
