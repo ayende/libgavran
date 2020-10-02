@@ -155,13 +155,6 @@ static result_t hash_multi_set_nested(
     txn_t *tx, hash_val_t *set, uint64_t nested_hash_id) {
   hash_val_t nested = {.hash_id = nested_hash_id, .key = set->val};
   ensure(hash_set(tx, &nested, 0));
-  if (nested.hash_id_changed) {
-    uint64_t old_val = set->val;
-    set->val         = nested.hash_id;
-    set->flags       = hash_multi_nested;
-    ensure(hash_set(tx, set, 0));
-    set->val = old_val;
-  }
   return success();
 }
 
@@ -225,8 +218,7 @@ static result_t hash_multi_del_packed(txn_t *tx, hash_val_t *del,
       if (in_place == false) {
         existing->val = item.item_id;
         ensure(hash_set(tx, existing, 0));
-        del->hash_id         = existing->hash_id;
-        del->hash_id_changed = existing->hash_id_changed;
+        del->hash_id = existing->hash_id;
       }
       return success();
     }
@@ -258,11 +250,6 @@ result_t hash_multi_del(
         ensure(hash_drop_nested(tx, existing.hash_id));
         ensure(hash_del(tx, del));
         return success();
-      }
-      if (existing.hash_id_changed) {
-        del->flags = hash_multi_nested;
-        del->val   = existing.hash_id;
-        ensure(hash_set(tx, del, 0));
       }
       return success();
     default:
