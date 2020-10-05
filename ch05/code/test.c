@@ -24,9 +24,8 @@ static result_t allocate_page_and_use_it(const char* path) {
   defer(txn_close, tx);
 
   // <3>
-  page_metadata_t* ignored;
   page_t page = {0};
-  ensure(txn_allocate_page(&tx, &page, &ignored, 0));
+  ensure(txn_allocate_page(&tx, &page, 0));
 
   // <4>
   strcpy(page.address, "Hello Gavran");
@@ -66,11 +65,10 @@ describe(allocation_tests) {
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
-    page_metadata_t* ignored;
     page_t p = {.number_of_pages = 1};
-    assert(txn_allocate_page(&tx, &p, &ignored, 0));
+    assert(txn_allocate_page(&tx, &p, 0));
     assert(p.page_num == FIRST_USABLE_PAGE);
-    assert(txn_allocate_page(&tx, &p, &ignored, 0));
+    assert(txn_allocate_page(&tx, &p, 0));
     assert(p.page_num == FIRST_USABLE_PAGE + 1);
   }
 
@@ -81,18 +79,17 @@ describe(allocation_tests) {
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
-    page_metadata_t* ignored;
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
     for (size_t i = 0; i < 16 - FIRST_USABLE_PAGE; i++) {
       page_t p = {.number_of_pages = 1};
-      assert(txn_allocate_page(&tx, &p, &ignored, 0));
+      assert(txn_allocate_page(&tx, &p, 0));
     }
 
     {
       page_t p = {.number_of_pages = 1};
-      assert(!txn_allocate_page(&tx, &p, &ignored, 0));  // failed
+      assert(!txn_allocate_page(&tx, &p, 0));  // failed
       size_t count;
       int* codes = errors_get_codes(&count);
       assert(count > 0);
@@ -113,24 +110,23 @@ describe(allocation_tests) {
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
-    page_metadata_t* metadata;
     txn_t tx;
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
     page_t p = {.number_of_pages = 1};
-    assert(txn_allocate_page(&tx, &p, &metadata, 0));
-    if (metadata) {
+    assert(txn_allocate_page(&tx, &p, 0));
+    if (p.metadata) {
       // not relevant for this chapter, will be in others
-      metadata->overflow.page_flags      = page_flags_overflow;
-      metadata->overflow.number_of_pages = 1;
-      metadata->overflow.size_of_value   = 8000;
+      p.metadata->overflow.page_flags      = page_flags_overflow;
+      p.metadata->overflow.number_of_pages = 1;
+      p.metadata->overflow.size_of_value   = 8000;
     }
 
     uint64_t page_num = p.page_num;
 
     assert(txn_free_page(&tx, &p));
 
-    assert(txn_allocate_page(&tx, &p, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p, 0));
     assert(p.page_num == page_num);  // page is reused
   }
 }

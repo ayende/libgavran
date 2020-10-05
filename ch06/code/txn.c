@@ -36,25 +36,22 @@ static result_t txn_get_number_of_pages(
 
 // tag::txn_get_modify_page[]
 result_t txn_get_page(txn_t *tx, page_t *page) {
-  page_metadata_t *metadata;
-  return txn_get_page_and_metadata(tx, page, &metadata);
-}
-
-result_t txn_get_page_and_metadata(
-    txn_t *tx, page_t *page, page_metadata_t **metadata) {
-  ensure(txn_get_metadata(tx, page->page_num, metadata));
-  ensure(txn_get_number_of_pages(*metadata, &page->number_of_pages));
+  page_metadata_t *mt;
+  ensure(txn_get_metadata(tx, page->page_num, &mt));
+  ensure(txn_get_number_of_pages(mt, &page->number_of_pages));
   ensure(txn_raw_get_page(tx, page));
+  page->metadata = mt;
   return success();
 }
 
 result_t txn_modify_page(txn_t *tx, page_t *page) {
   page_metadata_t *metadata;
-  ensure(txn_get_metadata(tx, page->page_num, &metadata));
+  ensure(txn_modify_metadata(tx, page->page_num, &metadata));
   ensure(metadata->common.page_flags != page_flags_free,
       msg("Tried to modify a free page, need to allocate it first"));
   ensure(txn_get_number_of_pages(metadata, &page->number_of_pages));
   ensure(txn_raw_modify_page(tx, page));
+  page->metadata = metadata;
   return success();
 }
 // end::txn_get_modify_page[]

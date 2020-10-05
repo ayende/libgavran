@@ -102,8 +102,7 @@ implementation_detail bool hash_page_get_next(
 
 implementation_detail result_t print_hash_table(
     FILE *f, txn_t *tx, uint64_t hash_id);
-implementation_detail void print_hash_page(
-    FILE *f, page_t *p, page_metadata_t *metadata);
+implementation_detail void print_hash_page(FILE *f, page_t *p);
 implementation_detail uint64_t hash_permute_key(uint64_t x);
 
 // tag::btree_stack_api[]
@@ -126,3 +125,8 @@ implementation_detail void btree_dump_page(
 
 implementation_detail result_t txn_alloc_temp(
     txn_t *tx, size_t min_size, void **buffer);
+
+implementation_detail result_t txn_get_metadata(
+    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
+implementation_detail result_t txn_modify_metadata(
+    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);

@@ -196,23 +196,24 @@ describe(hash) {
         assert(hv_read.val == i + 3);
       }
 
-      page_metadata_t* m;
-      assert(txn_get_metadata(&w, hash_id, &m));
-      page_t hash_dir = {.page_num = m->hash.dir_page_num};
-      assert(txn_get_page_and_metadata(&w, &hash_dir, &m));
+      page_t hash_root = {.page_num = hash_id};
+      assert(txn_get_page(&w, &hash_root));
+      page_t hash_dir = {
+          .page_num = hash_root.metadata->hash.dir_page_num};
+      assert(txn_get_page(&w, &hash_dir));
       uint64_t* pages = hash_dir.address;
-      assert(m->hash_dir.number_of_buckets);
-      for (size_t i = 0; i < m->hash_dir.number_of_buckets; i++) {
+      assert(hash_dir.metadata->hash_dir.number_of_buckets);
+      for (size_t i = 0;
+           i < hash_dir.metadata->hash_dir.number_of_buckets; i++) {
         page_t p = {.page_num = pages[i]};
-        page_metadata_t* metadata;
-        assert(txn_get_page_and_metadata(&w, &p, &metadata));
+        assert(txn_get_page(&w, &p));
         int c         = 0;
         hash_val_t it = {0};
         while (true) {
           if (hash_page_get_next(p.address, &it) == false) break;
           c++;
         }
-        assert(c == metadata->hash.number_of_entries);
+        assert(c == p.metadata->hash.number_of_entries);
       }
 
       // check iteration

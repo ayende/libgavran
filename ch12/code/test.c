@@ -20,18 +20,18 @@ describe(using_32_bits) {
   it("can start in 32 bits mode") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024,
-                            .flags = db_flags_avoid_mmap_io};
+        .flags                            = db_flags_avoid_mmap_io};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
-    assert(db.state->map.address == 0,
-           "No mapping should be generated");
+    assert(
+        db.state->map.address == 0, "No mapping should be generated");
   }
 
   it("can modify data and restart in 32 bits mode") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024,
-                            .flags = db_flags_avoid_mmap_io};
+        .flags                            = db_flags_avoid_mmap_io};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -42,8 +42,7 @@ describe(using_32_bits) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t* metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));
@@ -59,7 +58,7 @@ describe(using_32_bits) {
   it("can use 32 bits and encryption both") {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024,
-                            .flags = db_flags_avoid_mmap_io};
+        .flags                            = db_flags_avoid_mmap_io};
     randombytes_buf(options.encryption_key, 32);
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
@@ -71,8 +70,7 @@ describe(using_32_bits) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t* metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));

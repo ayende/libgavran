@@ -7,8 +7,8 @@
 #include <gavran/internal.h>
 
 // tag::txn_free_space_mark_page[]
-static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
-                                         bool busy) {
+static result_t txn_free_space_mark_page(
+    txn_t *tx, uint64_t page_num, bool busy) {
   page_t p = {.page_num = 0};
   ensure(txn_raw_get_page(tx, &p));
   page_metadata_t *metadata = p.address;
@@ -25,10 +25,8 @@ static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
 // end::txn_free_space_mark_page[]
 
 // tag::txn_allocate_page[]
-result_t txn_allocate_page(txn_t *tx, page_t *page,
-                           page_metadata_t **metadata,
-                           uint64_t nearby_hint) {
-  *metadata = 0;  // unused as for right now
+result_t txn_allocate_page(
+    txn_t *tx, page_t *page, uint64_t nearby_hint) {
   page_t p = {.page_num = 0};
   ensure(txn_raw_get_page(tx, &p));
   page_metadata_t *file_header_metadata = p.address;
@@ -41,12 +39,11 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
   page_t bitmap_page = {.page_num = start};
   ensure(txn_raw_get_page(tx, &bitmap_page));
   bitmap_search_state_t search = {
-      .input = {
-          .bitmap = bitmap_page.address,
-          .bitmap_size = (bitmap_page.number_of_pages * PAGE_SIZE) /
+      .input = {.bitmap = bitmap_page.address,
+          .bitmap_size  = (bitmap_page.number_of_pages * PAGE_SIZE) /
                          sizeof(uint64_t),
           .space_required = page->number_of_pages,
-          .near_position = nearby_hint}};
+          .near_position  = nearby_hint}};
   // <2>
   if (bitmap_search(&search)) {
     page->page_num = search.output.found_position;
@@ -63,7 +60,7 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
 
   // <4>
   failed(ENOSPC, msg("No more room left in the file to allocate"),
-         with(tx->state->db->handle->filename, "%s"));
+      with(tx->state->db->handle->filename, "%s"));
 }
 // end::txn_allocate_page[]
 

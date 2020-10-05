@@ -28,13 +28,12 @@ describe(metadata_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
 
-    page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 4};
-    assert(txn_allocate_page(&tx, &p1, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p1, 0));
     assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 4};
-    assert(txn_allocate_page(&tx, &p2, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p2, 0));
     assert(p2.page_num == FIRST_USABLE_PAGE + 4);
   }
 
@@ -48,13 +47,12 @@ describe(metadata_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
 
-    page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
-    assert(txn_allocate_page(&tx, &p1, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p1, 0));
     assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
-    assert(txn_allocate_page(&tx, &p2, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p2, 0));
     assert(p2.page_num == 129);
   }
 
@@ -68,13 +66,12 @@ describe(metadata_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
 
-    page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 268};
-    assert(txn_allocate_page(&tx, &p1, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p1, 0));
     assert(p1.page_num == 116);
 
     page_t p2 = {.number_of_pages = 32};
-    assert(txn_allocate_page(&tx, &p2, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p2, 0));
     assert(p2.page_num == FIRST_USABLE_PAGE);
   }
 
@@ -88,17 +85,16 @@ describe(metadata_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
 
-    page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
-    assert(txn_allocate_page(&tx, &p1, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p1, 0));
     assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
-    assert(txn_allocate_page(&tx, &p2, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p2, 0));
     assert(p2.page_num == 129);
 
     page_t p3 = {.number_of_pages = 16};
-    assert(txn_allocate_page(&tx, &p3, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p3, 0));
     assert(p3.page_num == FIRST_USABLE_PAGE + 96);
   }
 
@@ -112,21 +108,20 @@ describe(metadata_tests) {
     assert(txn_create(&db, TX_WRITE, &tx));
     defer(txn_close, tx);
 
-    page_metadata_t* metadata;
     page_t p1 = {.number_of_pages = 96};
-    assert(txn_allocate_page(&tx, &p1, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p1, 0));
     assert(p1.page_num == FIRST_USABLE_PAGE);
 
     page_t p2 = {.number_of_pages = 32};
-    assert(txn_allocate_page(&tx, &p2, &metadata, 0));
-    metadata->overflow.page_flags      = page_flags_overflow;
-    metadata->overflow.number_of_pages = 32;
-    metadata->overflow.size_of_value   = 32 * PAGE_SIZE;
+    assert(txn_allocate_page(&tx, &p2, 0));
+    p2.metadata->overflow.page_flags      = page_flags_overflow;
+    p2.metadata->overflow.number_of_pages = 32;
+    p2.metadata->overflow.size_of_value   = 32 * PAGE_SIZE;
     assert(p2.page_num == 129);
     assert(txn_free_page(&tx, &p2));
 
     page_t p3 = {.number_of_pages = 268};
-    assert(txn_allocate_page(&tx, &p3, &metadata, 0));
+    assert(txn_allocate_page(&tx, &p3, 0));
     assert(p3.page_num == 116);
   }
 }

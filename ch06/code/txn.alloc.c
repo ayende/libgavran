@@ -7,11 +7,11 @@
 #include <gavran/internal.h>
 
 // tag::txn_free_space_mark_page[]
-static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
-                                         bool busy) {
-  page_metadata_t *metadata;
-  ensure(txn_get_metadata(tx, 0, &metadata));
-  uint64_t start = metadata->file_header.free_space_bitmap_start;
+static result_t txn_free_space_mark_page(
+    txn_t *tx, uint64_t page_num, bool busy) {
+  page_t zero = {0};
+  ensure(txn_get_page(tx, &zero));
+  uint64_t start = zero.metadata->file_header.free_space_bitmap_start;
 
   uint64_t relevant_free_space_bitmap_page =
       start + page_num / BITS_IN_PAGE;
@@ -24,10 +24,10 @@ static result_t txn_free_space_mark_page(txn_t *tx, uint64_t page_num,
 // end::txn_free_space_mark_page[]
 
 result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
-  page_metadata_t *metadata;
-  ensure(txn_get_metadata(tx, 0, &metadata));
+  page_t zero = {0};
+  ensure(txn_get_page(tx, &zero));
   uint64_t bitmap_start =
-      metadata->file_header.free_space_bitmap_start;
+      zero.metadata->file_header.free_space_bitmap_start;
 
   page_t bitmap_page = {.page_num = bitmap_start};
   ensure(txn_get_page(tx, &bitmap_page));
@@ -36,9 +36,8 @@ result_t txn_is_page_busy(txn_t *tx, uint64_t page_num, bool *busy) {
 }
 
 // tag::txn_allocate_metadata_entry[]
-static result_t txn_allocate_metadata_entry(txn_t *tx,
-                                            uint64_t page_num,
-                                            page_metadata_t **entry) {
+static result_t txn_allocate_metadata_entry(
+    txn_t *tx, uint64_t page_num, page_metadata_t **entry) {
   page_t meta_page = {.page_num = page_num & PAGES_IN_METADATA_MASK};
   bool exists;
   ensure(txn_is_page_busy(tx, meta_page.page_num, &exists));
@@ -52,15 +51,14 @@ static result_t txn_allocate_metadata_entry(txn_t *tx,
   page_flags_t expected = meta_page.page_num ? page_flags_metadata
                                              : page_flags_file_header;
   ensure(self->common.page_flags == expected,
-         msg("Expected page to be metadata page, but wasn't"),
-         with(page_num, "%lu"), with(self->common.page_flags, "%x"));
+      msg("Expected page to be metadata page, but wasn't"),
+      with(page_num, "%lu"), with(self->common.page_flags, "%x"));
 
   page_metadata_t *metadata =
       &self[page_num & ~PAGES_IN_METADATA_MASK];
   ensure(!metadata->common.page_flags,
-         msg("Expected metadata entry to be empty, but was in use"),
-         with(page_num, "%lu"),
-         with(metadata->common.page_flags, "%x"));
+      msg("Expected metadata entry to be empty, but was in use"),
+      with(page_num, "%lu"), with(metadata->common.page_flags, "%x"));
 
   memset(metadata, 0, sizeof(page_metadata_t));
   *entry = metadata;
@@ -69,25 +67,22 @@ static result_t txn_allocate_metadata_entry(txn_t *tx,
 // end::txn_allocate_metadata_entry[]
 
 // tag::txn_allocate_page[]
-result_t txn_allocate_page(txn_t *tx, page_t *page,
-                           page_metadata_t **metadata,
-                           uint64_t nearby_hint) {
-  page_metadata_t *file_header_metadata;
-  ensure(txn_get_metadata(tx, 0, &file_header_metadata));
-  uint64_t start =
-      file_header_metadata->file_header.free_space_bitmap_start;
+result_t txn_allocate_page(
+    txn_t *tx, page_t *page, uint64_t nearby_hint) {
+  page_t zero = {0};
+  ensure(txn_get_page(tx, &zero));
+  uint64_t start = zero.metadata->file_header.free_space_bitmap_start;
 
   if (!page->number_of_pages) page->number_of_pages = 1;
 
   page_t bitmap_page = {.page_num = start};
   ensure(txn_get_page(tx, &bitmap_page));
   bitmap_search_state_t search = {
-      .input = {
-          .bitmap = bitmap_page.address,
-          .bitmap_size = (bitmap_page.number_of_pages * PAGE_SIZE) /
+      .input = {.bitmap = bitmap_page.address,
+          .bitmap_size  = (bitmap_page.number_of_pages * PAGE_SIZE) /
                          sizeof(uint64_t),
           .space_required = page->number_of_pages,
-          .near_position = nearby_hint}};
+          .near_position  = nearby_hint}};
   // <1>
   if ((search.input.space_required & ~PAGES_IN_METADATA_MASK) == 0) {
     // we must use one more in this cases, so the first page
@@ -103,22 +98,23 @@ result_t txn_allocate_page(txn_t *tx, page_t *page,
           tx, search.output.found_position + i, true));
     }
     // <2>
-    ensure(txn_allocate_metadata_entry(tx, page->page_num, metadata));
+    ensure(txn_allocate_metadata_entry(
+        tx, page->page_num, &page->metadata));
     return success();
   }
 
   failed(ENOSPC, msg("No more room left in the file to allocate"),
-         with(tx->state->db->handle->filename, "%s"));
+      with(tx->state->db->handle->filename, "%s"));
 }
 // end::txn_allocate_page[]
 
 // tag::txn_free_space_bitmap_metadata_range_is_free[]
 static result_t txn_free_space_bitmap_metadata_range_is_free(
     txn_t *tx, uint64_t page_num, bool *is_free) {
-  page_metadata_t *file_header_metadata;
-  ensure(txn_get_metadata(tx, 0, &file_header_metadata));
-  uint64_t start =
-      file_header_metadata->file_header.free_space_bitmap_start;
+  page_t zero = {0};
+  ensure(txn_get_page(tx, &zero));
+
+  uint64_t start = zero.metadata->file_header.free_space_bitmap_start;
 
   uint64_t relevant_free_space_bitmap_page =
       start + page_num / BITS_IN_PAGE;
@@ -126,8 +122,8 @@ static result_t txn_free_space_bitmap_metadata_range_is_free(
   page_t bitmap_page = {.page_num = relevant_free_space_bitmap_page};
   ensure(txn_raw_get_page(tx, &bitmap_page));
   uint64_t *bitmap = bitmap_page.address;
-  size_t index = (page_num % BITS_IN_PAGE) / 64;
-  *is_free = bitmap[index] == 1 && bitmap[index + 1] == 0;
+  size_t index     = (page_num % BITS_IN_PAGE) / 64;
+  *is_free         = bitmap[index] == 1 && bitmap[index + 1] == 0;
   return success();
 }
 // end::txn_free_space_bitmap_metadata_range_is_free[]
@@ -152,9 +148,7 @@ result_t txn_free_page(txn_t *tx, page_t *page) {
       page->page_num & PAGES_IN_METADATA_MASK;
   if (metadata_page_num != page->page_num && page->page_num) {
     // <2>
-    page_metadata_t *metadata;
-    ensure(txn_modify_metadata(tx, page->page_num, &metadata));
-    memset(metadata, 0, sizeof(page_metadata_t));
+    memset(page->metadata, 0, sizeof(page_metadata_t));
 
     bool is_free;
     ensure(txn_free_space_bitmap_metadata_range_is_free(

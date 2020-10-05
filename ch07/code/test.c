@@ -9,14 +9,13 @@
 #include <gavran/test.h>
 
 // tag::mvcc[]
-static result_t allocate_and_write_in_page(txn_t* tx,
-                                           uint64_t* page_num) {
+static result_t allocate_and_write_in_page(
+    txn_t* tx, uint64_t* page_num) {
   page_t page = {.number_of_pages = 1};
-  page_metadata_t* metadata;
-  ensure(txn_allocate_page(tx, &page, &metadata, 0));
-  metadata->overflow.page_flags = page_flags_overflow;
-  metadata->overflow.number_of_pages = 1;
-  const char* msg = "Hello Gavran";
+  ensure(txn_allocate_page(tx, &page, 0));
+  page.metadata->overflow.page_flags      = page_flags_overflow;
+  page.metadata->overflow.number_of_pages = 1;
+  const char* msg                         = "Hello Gavran";
   strcpy(page.address, msg);
   *page_num = page.page_num;
   return success();
@@ -45,21 +44,21 @@ static result_t mvcc(const char* path) {
   page_t rp = {.page_num = page_num};
   ensure(txn_get_page(&rtx, &rp));
   ensure(*(char*)rp.address == 0,
-         msg("Cannot see data from later transactions"));
+      msg("Cannot see data from later transactions"));
   return success();
 }
 // end::mvcc[]
 
 // tag::tests07[]
-static result_t write_and_return_read_tx(db_t* db, uint32_t val,
-                                         txn_t* rtx) {
+static result_t write_and_return_read_tx(
+    db_t* db, uint32_t val, txn_t* rtx) {
   txn_t wtx;
   ensure(txn_create(db, TX_WRITE, &wtx));
   defer(txn_close, wtx);
   page_t p = {.page_num = 3};
   ensure(txn_raw_modify_page(&wtx, &p));
   *(uint32_t*)p.address = val;
-  size_t done = 0;
+  size_t done           = 0;
   ensure(txn_commit(&wtx));
   ensure(txn_create(db, TX_READ, rtx));
   try_defer(txn_close, rtx, done);

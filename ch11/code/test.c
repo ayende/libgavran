@@ -10,9 +10,8 @@
 #include <gavran/test.h>
 
 // tag::tests11[]
-static result_t open_file_and_get_map(const char *path,
-                                      file_handle_t **handle,
-                                      span_t *map) {
+static result_t open_file_and_get_map(
+    const char *path, file_handle_t **handle, span_t *map) {
   ensure(pal_create_file(path, handle, pal_file_creation_flags_none));
   map->size = (*handle)->size;
   ensure(pal_mmap(*handle, 0, map));
@@ -20,11 +19,11 @@ static result_t open_file_and_get_map(const char *path,
   return success();
 }
 
-#define open_file_and_map(fname, dest)                          \
-  file_handle_t *CONCAT(file_, __LINE__);                       \
-  assert(open_file_and_get_map(fname, &CONCAT(file_, __LINE__), \
-                               &dest));                         \
-  defer(pal_close_file, CONCAT(file_, __LINE__));               \
+#define open_file_and_map(fname, dest)            \
+  file_handle_t *CONCAT(file_, __LINE__);         \
+  assert(open_file_and_get_map(                   \
+      fname, &CONCAT(file_, __LINE__), &dest));   \
+  defer(pal_close_file, CONCAT(file_, __LINE__)); \
   defer(pal_unmap, dest);
 
 describe(validation_and_encryption) {
@@ -38,7 +37,7 @@ describe(validation_and_encryption) {
     db_t db;
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
     assert(db_create("/tmp/db/try", &options, &db),
-           "failed to create db");
+        "failed to create db");
     defer(db_close, db);
   }
 
@@ -52,8 +51,7 @@ describe(validation_and_encryption) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t *metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));
@@ -91,8 +89,7 @@ describe(validation_and_encryption) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t *metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));
@@ -124,7 +121,7 @@ describe(validation_and_encryption) {
     db_options_t options = {.minimum_size = 4 * 1024 * 1024};
     randombytes_buf(options.encryption_key, 32);
     assert(db_create("/tmp/db/try", &options, &db),
-           "failed to create db");
+        "failed to create db");
     defer(db_close, db);
   }
 
@@ -139,11 +136,10 @@ describe(validation_and_encryption) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t *metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
-    metadata->overflow.page_flags = page_flags_overflow;
-    metadata->overflow.number_of_pages = 1;
-    const char str[] = "Hello From Gavran";
+    assert(txn_allocate_page(&w, &p, 0));
+    p.metadata->overflow.page_flags      = page_flags_overflow;
+    p.metadata->overflow.number_of_pages = 1;
+    const char str[]                     = "Hello From Gavran";
     strcpy(p.address, str);
 
     txn_t leaked;
@@ -173,8 +169,7 @@ describe(validation_and_encryption) {
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
     page_t p = {.number_of_pages = 1};
-    page_metadata_t *metadata;
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));
@@ -186,7 +181,7 @@ describe(validation_and_encryption) {
 
     assert(txn_create(&db, TX_WRITE, &w));
 
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     strcpy(p.address, str);
     assert(txn_commit(&w));
     assert(txn_close(&w));
@@ -195,18 +190,18 @@ describe(validation_and_encryption) {
     span_t mmap;
     open_file_and_map("/tmp/db/try", mmap);
     assert(memmem(mmap.address, mmap.size, "Gavran",
-                  strlen("Gavran")) == 0,
-           "Expected to find NO match");
+               strlen("Gavran")) == 0,
+        "Expected to find NO match");
 
     open_file_and_map("/tmp/db/try-a.wal", mmap);
     assert(memmem(mmap.address, mmap.size, "Gavran",
-                  strlen("Gavran")) == 0,
-           "Expected to find NO match");
+               strlen("Gavran")) == 0,
+        "Expected to find NO match");
 
     open_file_and_map("/tmp/db/try-b.wal", mmap);
     assert(memmem(mmap.address, mmap.size, "Gavran",
-                  strlen("Gavran")) == 0,
-           "Expected to find NO match");
+               strlen("Gavran")) == 0,
+        "Expected to find NO match");
   }
 
   it("on normal db, can find data on disk") {
@@ -218,9 +213,8 @@ describe(validation_and_encryption) {
     txn_t w;
     assert(txn_create(&db, TX_WRITE, &w));
     defer(txn_close, w);
-    page_metadata_t *metadata;
     page_t p = {.number_of_pages = 1};
-    assert(txn_allocate_page(&w, &p, &metadata, 0));
+    assert(txn_allocate_page(&w, &p, 0));
     const char str[] = "Hello From Gavran";
     strcpy(p.address, str);
     assert(txn_commit(&w));

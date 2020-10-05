@@ -17,11 +17,10 @@ static result_t write_a_lot(db_t* db) {
     ensure(txn_create(db, TX_WRITE, &wtx));
     defer(txn_close, wtx);
     for (size_t j = 0; j < 14; j++) {
-      page_metadata_t* metadata;
       page_t p = {.number_of_pages = 1};
-      ensure(txn_allocate_page(&wtx, &p, &metadata, 0));
-      metadata->overflow.page_flags = page_flags_overflow;
-      metadata->overflow.number_of_pages = 1;
+      ensure(txn_allocate_page(&wtx, &p, 0));
+      p.metadata->overflow.page_flags      = page_flags_overflow;
+      p.metadata->overflow.number_of_pages = 1;
       randombytes_buf(p.address, PAGE_SIZE);
     }
     ensure(txn_commit(&wtx));
@@ -51,8 +50,8 @@ describe(size_growth) {
 
   it("WAL will stay within the specified limit") {
     db_t db;
-    db_options_t options = {.minimum_size = 128 * 1024,
-                            .wal_size = 128 * 1024};
+    db_options_t options = {
+        .minimum_size = 128 * 1024, .wal_size = 128 * 1024};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -65,8 +64,8 @@ describe(size_growth) {
 
   it("can grow WAL size") {
     db_t db;
-    db_options_t options = {.minimum_size = 128 * 1024,
-                            .wal_size = 128 * 1024};
+    db_options_t options = {
+        .minimum_size = 128 * 1024, .wal_size = 128 * 1024};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -83,8 +82,8 @@ describe(size_growth) {
 
   it("will use both WAL files and reset the size") {
     db_t db;
-    db_options_t options = {.minimum_size = 128 * 1024,
-                            .wal_size = 128 * 1024};
+    db_options_t options = {
+        .minimum_size = 128 * 1024, .wal_size = 128 * 1024};
     assert(db_create("/tmp/db/try", &options, &db));
     defer(db_close, db);
 
@@ -122,8 +121,8 @@ describe(size_growth) {
     uint64_t page;
     {
       db_t db;
-      db_options_t options = {.minimum_size = 128 * 1024,
-                              .wal_size = 128 * 1024};
+      db_options_t options = {
+          .minimum_size = 128 * 1024, .wal_size = 128 * 1024};
       assert(db_create("/tmp/db/try", &options, &db));
       defer(db_close, db);
 
@@ -133,11 +132,10 @@ describe(size_growth) {
 
       txn_t wtx;
       assert(txn_create(&db, TX_WRITE, &wtx));
-      page_metadata_t* metadata;
       page_t p = {.number_of_pages = 1};
-      assert(txn_allocate_page(&wtx, &p, &metadata, 0));
-      metadata->overflow.page_flags = page_flags_overflow;
-      metadata->overflow.number_of_pages = 1;
+      assert(txn_allocate_page(&wtx, &p, 0));
+      p.metadata->overflow.page_flags      = page_flags_overflow;
+      p.metadata->overflow.number_of_pages = 1;
       strcpy(p.address, "Hello Gavran");
       assert(txn_commit(&wtx));
       page = p.page_num;
@@ -145,16 +143,16 @@ describe(size_growth) {
     {
       // truncate the file
       file_handle_t* handle;
-      assert(pal_create_file("/tmp/db/try", &handle,
-                             pal_file_creation_flags_none));
+      assert(pal_create_file(
+          "/tmp/db/try", &handle, pal_file_creation_flags_none));
       defer(pal_close_file, handle);
       assert(pal_set_file_size(handle, 0, 64 * 1024));
       assert(handle->size == 64 * 1024);
     }
     {
       db_t db;
-      db_options_t options = {.minimum_size = 128 * 1024,
-                              .wal_size = 128 * 1024};
+      db_options_t options = {
+          .minimum_size = 128 * 1024, .wal_size = 128 * 1024};
       assert(db_create("/tmp/db/try", &options, &db));
       defer(db_close, db);
 

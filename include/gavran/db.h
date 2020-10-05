@@ -38,9 +38,12 @@ typedef struct file_header file_header_t;
 
 #define TO_PAGES(size) ROUND_UP(size, PAGE_SIZE)
 
+typedef struct page_metadata page_metadata_t;
+
 typedef struct page {
   void *address;
   void *previous;  // relevant only for modified page
+  page_metadata_t *metadata;
   uint64_t page_num;
   uint32_t number_of_pages;
   uint32_t _padding;
@@ -335,13 +338,11 @@ result_t txn_register_cleanup_action(cleanup_callback_t **head,
     size_t size_of_state);
 
 result_t txn_get_page(txn_t *tx, page_t *page);
-result_t txn_get_page_and_metadata(
-    txn_t *tx, page_t *page, page_metadata_t **metadata);
 result_t txn_modify_page(txn_t *tx, page_t *page);
 
 // tag::tx_allocation[]
-result_t txn_allocate_page(txn_t *tx, page_t *page,
-    page_metadata_t **metadata, uint64_t nearby_hint);
+result_t txn_allocate_page(
+    txn_t *tx, page_t *page, uint64_t nearby_hint);
 result_t txn_free_page(txn_t *tx, page_t *page);
 // end::tx_allocation[]
 
@@ -360,14 +361,6 @@ static inline bool bitmap_is_set(uint64_t *buffer, uint64_t pos) {
   return (buffer[pos / 64] & (1UL << pos % 64)) != 0;
 }
 // end::bit-manipulations[]
-
-// tag::metadata_api[]
-result_t txn_get_metadata(
-    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
-
-result_t txn_modify_metadata(
-    txn_t *tx, uint64_t page_num, page_metadata_t **metadata);
-// end::metadata_api[]
 
 result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
     uint64_t tx_id, span_t *wal_record);
