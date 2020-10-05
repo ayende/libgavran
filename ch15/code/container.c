@@ -19,17 +19,16 @@ static inline size_t container_get_total_size(size_t size) {
 // tag::container_create[]
 result_t container_create(txn_t *tx, uint64_t *container_id) {
   page_t p = {.number_of_pages = 1};
-  page_metadata_t *metadata;
-  ensure(txn_allocate_page(tx, &p, &metadata, 0));
-  metadata->container.page_flags = page_flags_container;
-  metadata->container.floor      = sizeof(uint16_t);
-  metadata->container.ceiling    = PAGE_SIZE;
-  metadata->container.free_space = PAGE_SIZE - sizeof(int16_t);
+  ensure(txn_allocate_page(tx, &p, 0));
+  p.metadata->container.page_flags = page_flags_container;
+  p.metadata->container.floor      = sizeof(uint16_t);
+  p.metadata->container.ceiling    = PAGE_SIZE;
+  p.metadata->container.free_space = PAGE_SIZE - sizeof(int16_t);
 
   hash_val_t set = {.key = p.page_num, .val = 0};
   ensure(hash_create(tx, &set.hash_id));
   ensure(hash_set(tx, &set, 0));
-  metadata->container.free_list = set.hash_id;
+  p.metadata->container.free_list = set.hash_id;
 
   *container_id = p.page_num;
   return success();
@@ -44,9 +43,8 @@ result_t container_drop(txn_t *tx, uint64_t container_id) {
   ensure(hash_drop(tx, header->container.free_list));
   while (page_num) {
     page_t p = {.page_num = page_num};
-    page_metadata_t *metadata;
-    ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-    size_t max_pos     = metadata->container.floor / sizeof(int16_t);
+    ensure(txn_get_page(tx, &p));
+    size_t max_pos = p.metadata->container.floor / sizeof(int16_t);
     int16_t *positions = p.address;
     for (size_t i = 0; i < max_pos; i++) {
       if (positions[i] >= 0) continue;
@@ -57,7 +55,7 @@ result_t container_drop(txn_t *tx, uint64_t container_id) {
       page_t overflow = {.page_num = overflow_page_num};
       ensure(txn_free_page(tx, &overflow));
     }
-    page_num = metadata->container.next;
+    page_num = p.metadata->container.next;
     ensure(txn_free_page(tx, &p));
   }
   return success();
@@ -68,18 +66,17 @@ result_t container_drop(txn_t *tx, uint64_t container_id) {
 static result_t container_allocate_new_page(
     txn_t *tx, uint64_t container_id, uint64_t *page_num) {
   page_t p = {.number_of_pages = 1};
-  page_metadata_t *metadata;
-  ensure(txn_allocate_page(tx, &p, &metadata, container_id));
+  ensure(txn_allocate_page(tx, &p, container_id));
   page_metadata_t *header_metadata;
   ensure(txn_modify_metadata(tx, container_id, &header_metadata));
 
-  metadata->container.page_flags  = page_flags_container;
-  metadata->container.prev        = container_id;
-  metadata->container.next        = header_metadata->container.next;
-  metadata->container.floor       = 0;
-  metadata->container.ceiling     = PAGE_SIZE;
-  metadata->container.free_space  = PAGE_SIZE;
-  header_metadata->container.next = p.page_num;
+  p.metadata->container.page_flags = page_flags_container;
+  p.metadata->container.prev       = container_id;
+  p.metadata->container.next       = header_metadata->container.next;
+  p.metadata->container.floor      = 0;
+  p.metadata->container.ceiling    = PAGE_SIZE;
+  p.metadata->container.free_space = PAGE_SIZE;
+  header_metadata->container.next  = p.page_num;
 
   hash_val_t set = {.hash_id = header_metadata->container.free_list,
       .key                   = p.page_num,
@@ -283,13 +280,12 @@ static result_t container_item_allocate(txn_t *tx,
 // tag::container_item_put_large[]
 static result_t container_item_put_large(
     txn_t *tx, container_item_t *item) {
-  page_metadata_t *metadata;
   page_t p = {.number_of_pages = (uint32_t)TO_PAGES(item->data.size)};
-  ensure(txn_allocate_page(tx, &p, &metadata, item->container_id));
-  metadata->overflow.page_flags         = page_flags_overflow;
-  metadata->overflow.is_container_value = true;
-  metadata->overflow.number_of_pages    = p.number_of_pages;
-  metadata->overflow.size_of_value      = item->data.size;
+  ensure(txn_allocate_page(tx, &p, item->container_id));
+  p.metadata->overflow.page_flags         = page_flags_overflow;
+  p.metadata->overflow.is_container_value = true;
+  p.metadata->overflow.number_of_pages    = p.number_of_pages;
+  p.metadata->overflow.size_of_value      = item->data.size;
   memcpy(p.address, item->data.address, item->data.size);
   uint8_t buffer[10];
   uint8_t *buffer_end  = varint_encode(p.page_num, buffer);
@@ -300,8 +296,8 @@ static result_t container_item_put_large(
   span_t data          = {.size = ref.data.size};
   ensure(container_item_allocate(tx, &ref, &data, /*is_ref*/ true));
   memcpy(data.address, buffer, ref.data.size);
-  metadata->overflow.container_item_id = ref.item_id;
-  item->item_id                        = p.page_num * PAGE_SIZE;
+  p.metadata->overflow.container_item_id = ref.item_id;
+  item->item_id                          = p.page_num * PAGE_SIZE;
   return success();
 }
 // end::container_item_put_large[]
@@ -321,20 +317,19 @@ result_t container_item_put(txn_t *tx, container_item_t *item) {
 
 // tag::container_item_get[]
 result_t container_item_get(txn_t *tx, container_item_t *item) {
-  page_metadata_t *metadata;
   if (item->item_id % PAGE_SIZE == 0) {
     // large item
     page_t p = {.page_num = item->item_id / PAGE_SIZE};
-    ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-    assert(metadata->overflow.page_flags == page_flags_overflow);
-    assert(metadata->overflow.is_container_value);
+    ensure(txn_get_page(tx, &p));
+    assert(p.metadata->overflow.page_flags == page_flags_overflow);
+    assert(p.metadata->overflow.is_container_value);
     item->data.address = p.address;
-    item->data.size    = metadata->overflow.size_of_value;
+    item->data.size    = p.metadata->overflow.size_of_value;
   } else {
     uint64_t index = (item->item_id % PAGE_SIZE) - 1;
     page_t p       = {.page_num = item->item_id / PAGE_SIZE};
-    ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-    assert(metadata->container.page_flags == page_flags_container);
+    ensure(txn_get_page(tx, &p));
+    assert(p.metadata->container.page_flags == page_flags_container);
     int16_t *positions = p.address;
     ensure(positions[index] > 0, msg("invalid item_id"),
         with(item->item_id, "%lu"));
@@ -346,14 +341,15 @@ result_t container_item_get(txn_t *tx, container_item_t *item) {
 // end::container_item_get[]
 
 // tag::container_remove_page[]
-static result_t container_remove_page(txn_t *tx,
-    uint64_t container_id, page_t *p, page_metadata_t *metadata) {
+static result_t container_remove_page(
+    txn_t *tx, uint64_t container_id, page_t *p) {
   page_metadata_t *prev, *next, *header;
-  ensure(txn_modify_metadata(tx, metadata->container.prev, &prev));
-  prev->container.next = metadata->container.next;
-  if (metadata->container.next) {
-    ensure(txn_modify_metadata(tx, metadata->container.prev, &next));
-    prev->container.prev = metadata->container.prev;
+  ensure(txn_modify_metadata(tx, p->metadata->container.prev, &prev));
+  prev->container.next = p->metadata->container.next;
+  if (p->metadata->container.next) {
+    ensure(
+        txn_modify_metadata(tx, p->metadata->container.prev, &next));
+    prev->container.prev = p->metadata->container.prev;
   }
   ensure(txn_get_metadata(tx, container_id, &header));
   hash_val_t del = {
@@ -365,13 +361,14 @@ static result_t container_remove_page(txn_t *tx,
 // end::container_remove_page[]
 
 // tag::container_item_del_finalize[]
-static result_t container_item_del_finalize(txn_t *tx,
-    container_item_t *item, page_t *p, page_metadata_t *m) {
+static result_t container_item_del_finalize(
+    txn_t *tx, container_item_t *item, page_t *p) {
   // can delete this whole page?
-  if (m->container.free_space == PAGE_SIZE &&
+  if (p->metadata->container.free_space == PAGE_SIZE &&
       p->page_num != item->container_id) {
-    ensure(container_remove_page(tx, item->container_id, p, m));
-  } else if (m->container.free_space > item->data.size * 2) {
+    ensure(container_remove_page(tx, item->container_id, p));
+  } else if (p->metadata->container.free_space >
+             item->data.size * 2) {
     // need to wire this again to the allocation chain
     page_metadata_t *header;
     ensure(txn_get_metadata(tx, item->container_id, &header));
@@ -389,23 +386,21 @@ static result_t container_item_del_finalize(txn_t *tx,
 
 // tag::container_item_del[]
 result_t container_item_del(txn_t *tx, container_item_t *item) {
-  page_metadata_t *metadata;
   if (item->item_id % PAGE_SIZE == 0) {
     // large item
     page_t p = {.page_num = item->item_id};
-    ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-    assert(metadata->overflow.page_flags == page_flags_overflow);
-    assert(metadata->overflow.is_container_value);
+    ensure(txn_get_page(tx, &p));
+    assert(p.metadata->overflow.page_flags == page_flags_overflow);
+    assert(p.metadata->overflow.is_container_value);
     container_item_t ref = {.container_id = item->container_id,
-        .item_id = metadata->overflow.container_item_id};
+        .item_id = p.metadata->overflow.container_item_id};
     ensure(container_item_del(tx, &ref));
     ensure(txn_free_page(tx, &p));
   } else {
     uint64_t index = (item->item_id % PAGE_SIZE) - 1;
     page_t p       = {.page_num = item->item_id / PAGE_SIZE};
     ensure(txn_modify_page(tx, &p));
-    ensure(txn_modify_metadata(tx, p.page_num, &metadata));
-    assert(metadata->container.page_flags == page_flags_container);
+    assert(p.metadata->container.page_flags == page_flags_container);
     int16_t *positions = p.address;
     uint64_t size;
     void *end =
@@ -413,9 +408,9 @@ result_t container_item_del(txn_t *tx, container_item_t *item) {
     item->data.size = (size_t)(end - p.address - positions[index]);
     memset(p.address + positions[index], 0, item->data.size);
     positions[index] = 0;
-    metadata->container.free_space +=
+    p.metadata->container.free_space +=
         (uint16_t)(item->data.size + sizeof(uint16_t));
-    ensure(container_item_del_finalize(tx, item, &p, metadata));
+    ensure(container_item_del_finalize(tx, item, &p));
   }
   return success();
 }
@@ -447,11 +442,10 @@ result_t container_get_next(txn_t *tx, container_item_t *item) {
   uint64_t page_num;
   ensure(container_get_next_item_id(tx, item, &page_num));
   while (page_num) {
-    page_metadata_t *metadata;
     page_t p = {.page_num = page_num};
-    ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-    assert(metadata->common.page_flags == page_flags_container);
-    size_t max_pos     = metadata->container.floor / sizeof(uint16_t);
+    ensure(txn_get_page(tx, &p));
+    assert(p.metadata->common.page_flags == page_flags_container);
+    size_t max_pos = p.metadata->container.floor / sizeof(uint16_t);
     int16_t *positions = p.address;
     for (size_t i = (item->item_id % PAGE_SIZE) - 1; i < max_pos;
          i++) {
@@ -469,7 +463,7 @@ result_t container_get_next(txn_t *tx, container_item_t *item) {
           varint_decode(p.address + positions[i], &item->data.size);
       return success();
     }
-    page_num      = metadata->container.next;
+    page_num      = p.metadata->container.next;
     item->item_id = page_num * PAGE_SIZE + 1;
   }
   memset(&item->data, 0, sizeof(span_t));

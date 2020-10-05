@@ -4,18 +4,15 @@
 #include <gavran/db.h>
 #include <gavran/internal.h>
 
-implementation_detail void btree_dump_page(
-    page_t* p, page_metadata_t* metadata, uint16_t max) {
-  (void)p;
-  (void)metadata;
-  char* type = metadata->tree.page_flags == page_flags_tree_branch
+implementation_detail void btree_dump_page(page_t* p, uint16_t max) {
+  char* type = p->metadata->tree.page_flags == page_flags_tree_branch
                    ? "branch"
                    : "leaf";
   printf("Page #%lu (%s) (%lu entries) (space: %d) [%d to %d]\n",
-      p->page_num, type, metadata->tree.floor / sizeof(uint16_t),
-      metadata->tree.free_space, metadata->tree.floor,
-      metadata->tree.ceiling);
-  uint16_t max_pos    = metadata->tree.floor / sizeof(uint16_t);
+      p->page_num, type, p->metadata->tree.floor / sizeof(uint16_t),
+      p->metadata->tree.free_space, p->metadata->tree.floor,
+      p->metadata->tree.ceiling);
+  uint16_t max_pos    = p->metadata->tree.floor / sizeof(uint16_t);
   uint16_t* positions = p->address;
   for (uint16_t i = 0; i < MIN(max / 2, max_pos); i++) {
     uint64_t key_size, val;
@@ -38,12 +35,12 @@ implementation_detail void btree_dump_page(
 }
 
 static result_t btree_dump_branch_page(
-    txn_t* tx, page_t* p, page_metadata_t* metadata, uint16_t max) {
+    txn_t* tx, page_t* p, uint16_t max) {
   printf("Page #%lu (branch) (%lu entries) (space: %d) [%d to %d]\n",
-      p->page_num, metadata->tree.floor / sizeof(uint16_t),
-      metadata->tree.free_space, metadata->tree.floor,
-      metadata->tree.ceiling);
-  uint16_t max_pos    = metadata->tree.floor / sizeof(uint16_t);
+      p->page_num, p->metadata->tree.floor / sizeof(uint16_t),
+      p->metadata->tree.free_space, p->metadata->tree.floor,
+      p->metadata->tree.ceiling);
+  uint16_t max_pos    = p->metadata->tree.floor / sizeof(uint16_t);
   uint16_t* positions = p->address;
   for (uint16_t i = 0; i < max_pos; i++) {
     uint64_t key_size, val;
@@ -67,12 +64,11 @@ static result_t btree_dump_branch_page(
 implementation_detail result_t btree_dump_tree(
     txn_t* tx, uint64_t tree_id, uint16_t max) {
   page_t p = {.page_num = tree_id};
-  page_metadata_t* metadata;
-  ensure(txn_get_page_and_metadata(tx, &p, &metadata));
-  if (metadata->tree.page_flags == page_flags_tree_branch) {
-    ensure(btree_dump_branch_page(tx, &p, metadata, max));
+  ensure(txn_get_page(tx, &p));
+  if (p.metadata->tree.page_flags == page_flags_tree_branch) {
+    ensure(btree_dump_branch_page(tx, &p, max));
   } else {
-    btree_dump_page(&p, metadata, max);
+    btree_dump_page(&p, max);
   }
   return success();
 }
