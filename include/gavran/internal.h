@@ -99,6 +99,8 @@ uint8_t *varint_decode(uint8_t *buf, uint64_t *value);
 
 implementation_detail bool hash_page_get_next(
     void *address, hash_val_t *it);
+implementation_detail result_t hash_drop_one(
+    txn_t *tx, uint64_t hash_id);
 
 implementation_detail result_t print_hash_table(
     FILE *f, txn_t *tx, uint64_t hash_id);

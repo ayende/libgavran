@@ -2,8 +2,8 @@
 
 In the last chapter, we build a B+Tree and earlier in the book we implemented an Extendible Hash Table. When I built them, I stated that they are going to store a single `uint64_t`
 value. 
-In other words, if we compare them to in memory containers,  B+Tree is a `sorted_map<span_t key, uint64_t value>` and the hash table is a 
-`map<uint64_t key, { uint64_t value, uint8_t flags}>`. That works great as long as we have a single value to store, but what happens if we want to have multiple values for 
+In other words, if we compare them to in memory containers,  B+Tree is a `sorted_map<span_t key, { uint64_t value, uint8_t flags }>` and the hash table is a 
+`map<uint64_t key, { uint64_t value, uint8_t flags }>`. That works great as long as we have a single value to store, but what happens if we want to have multiple values for 
 the same key?
 
 Let's consider a usage scenario for the B+Tree, we want to store a mapping between an IP address and the time of access. I other words, we want to use a B+Tree to implement the 
@@ -67,7 +67,7 @@ for the values, we ensure that the final key that is written to the B+Tree is so
 
 .The conceptual data format for multi values in B+Tree
 ****
-The usual B+Tree can be thought of as a `sorted_map<span_t key, { uint64_t val, uint8_t flags} >`. A B+Tree for multiple values, on 
+The usual B+Tree can be thought of as a `sorted_map<span_t key, { uint64_t val, uint8_t flags } >`. A B+Tree for multiple values, on 
 the other hand, is more similar to `sorted_map<span_t key, sorted_set<uint64_t>>`. The idea is that we are going to allow multiple values
 for the same key, and we are able to iterate over them in sorted order.
 
@@ -156,7 +156,7 @@ look at how this is done in <<btree_multi_search_entry>>.
 include::./code/btree.multi.c[tags=btree_multi_search_entry]
 ----
 
-The first step in `btree_multi_search_entry()` is to call to `txn_alloc_temp()`. This is an unfamiliar function for us, but a very important one. To avoid the need to continuously
+The first step in `btree_multi_search_entry()` is to call to `txn_alloc_temp()`. To avoid the need to continuously
 allocate and free small buffers, we have the `tx\->state\->tmp.buffer` field. Just like the `tx\->state\->tmp.stack` field, the idea is that we allocate this once for the lifetime
 of the transaction and avoid having to call `malloc()` and `free()` all the time. You can see the implementation of this in <<txn_alloc_tmp>>. The temp buffer is freed when the transaction
 is closed. Note that this is a transaction shared buffer. In other words, it is likely that it will be used by multiple parties and we can only assume that it isn't modified while
@@ -398,7 +398,9 @@ include::../include/gavran/db.h[tags=hash_multi_api]
 ----
 
 You can see that this is similar to the multi value API for B+Tree, with the same behaviors. You can append a value to a key, delete a value from a key or iterate over all the values
-of a key. We'll start looking into the implementation of the multi value hash table in <<hash_multi_append>>.
+of a key. It is interesting to note that multi hash is working in _conjunction_ with the container, it doesn't _own_ the container. This is important, since it means that a single
+container can be used to handle several multi value hash tables, for example.
+We'll start looking into the implementation of the multi value hash table in <<hash_multi_append>>.
 
 [source]
 [[hash_multi_append]]
@@ -456,4 +458,164 @@ include::./code/hash.multi.c[tags=hash_multi_set_convert_to_nested]
 ----
 
 The code in `hash_multi_set_convert_to_nested()` will simply create a new nested hash table and add the values from the packed buffer (and the newly set value) to the nested hash table 
-as keys. After we are done modifying both hash tables, we record the nesting association between them in the same manner we did with nested B+Trees. The root hash table has metadata 
+as keys. After we are done modifying both hash tables, we record the nesting association between them in the same manner we did with nested B+Trees. The parent hash table's metadata has
+a linked list of associated hash tables. This is managed by the `hash_multi_write_nested_hash()` function, shown on <<hash_multi_write_nested_hash>>.
+
+[source]
+[[hash_multi_write_nested_hash]]
+.`hash.multi.c` - Record the new hash table to the list of nested tables in the parent hash table
+----
+include::./code/hash.multi.c[tags=hash_multi_write_nested_hash]
+----
+
+We need to keep track of those nested hash tables to allow us to efficiently drop them when we drop the parent table. Otherwise, we'll need to scan through all the values that we have in
+the hash table. By keeping track of the nested hash tables, we can directly drop them. 
+
+The final piece of work we still have to review to support adding multiple values per hash key is what happens when we add a multi value when the key is nested. This is handled in the
+`hash_multi_set_nested()` function shown on <<hash_multi_set_nested>>.
+
+[source]
+[[hash_multi_set_nested]]
+.`hash.multi.c` - Add a value to a nested hash table
+----
+include::./code/hash.multi.c[tags=hash_multi_set_nested]
+----
+
+The isn't much in <<hash_multi_set_nested>>, since we simply utilize the existing API to store the new multi value in the nested table as a key. This conclude the exploration of how we
+handle appending a new value to a multi hash. Let's look at how we handle the other side, reading items from a multi value hash table. Unlike the usual hash API, we don't have a 
+function to get the value for a key. A single key may have any number of values, after all. For that reason, we have the `hash_multi_get_next()` method, which allows us to iterate over
+all the values of a particular key. This is shown on <<hash_multi_get_next>>.
+
+==== Iterating over multiple values per key
+
+It is important to note that this iteration, unlike the one done using the iteration using `btree_multi_get_next()` isn't done in order. We are getting the values in an arbitrary order
+that may _change_. In other words, you can't assume that two iteration of `hash_multi_get_next()` will return the results in the same order. There may have been an addition to the 
+key which pushed it from packed to nested mode, which will change the order of iteration, for example.
+
+[source]
+[[hash_multi_get_next]]
+.`hash.multi.c` - Going over all the values of a particular key
+----
+include::./code/hash.multi.c[tags=hash_multi_get_next]
+----
+
+The code in <<hash_multi_get_next>> is complicated by the fact that we need to handle quite a few different states and support re-entry to the function. We keep the state of the 
+iteration in the `iter_state` structure inside the `hash_val_t`. The first thing we do in `hash_multi_get_next()` is check if we are iterating over a nested hash table using the
+`iterating_nested` field. This is initially set to `false`, so we'll ignore it for now.
+
+We get the relevant key from the hash table and check if it exists. If it doesn't, we'll stop the iteration. In other words, iterating over a key that doesn't exists will not 
+return an error, just an empty set of results. If the value exists, we check the `flags` of the value to decide how to deal with it. For `hash_multi_single` we'll return the
+current value and setup things up so the _next_ call will end the iteration.
+
+For `hash_multi_nested` flag, we know that the value in the hash table is the nested table `hash_id`, we update the hash table we search for and set `iterating_nested` to `true`. 
+Then we recurse into the function again. This time, since `iterating_nested` is set to `true`, the condition at the start of the function applies and we'll use the standard 
+iteration process for hash tables on the nested hash table. It is important to understand that the work here is simply to find what the actual nested hash table is and then 
+forward all the rest of the work to it.
+
+The final option we have here is the `hash_multi_packed` flag. In this case, we have multiple values stored inside a container, which we handle by calling to 
+`hash_multi_get_next_packed()`. You can see how that works in <<hash_multi_get_next_packed>>.
+
+[source]
+[[hash_multi_get_next_packed]]
+.`hash.multi.c` - Iterating over a set of packed values
+----
+include::./code/hash.multi.c[tags=hash_multi_get_next_packed]
+----
+
+In `hash_multi_get_next_packed()` we grab the packed value from the container and then read the next one. We keep the position we are on in the packed value using the `pos_in_page` 
+field. Once we have read past the size of the value in the container, we know we can stop the iteration process.
+
+.Iteration efficiencies of multi hash values
+****
+The way I structured the code here probably leaves some performance optimizations on the table. We have to do a lookup on the primary hash table on each call to `hash_multi_get_next()`
+for example. That isn't something I'm too worried about, though. In most cases, we are going to either end up with small number of items or a lot of them. In other words, I'm not 
+expecting a lot of values to be packed. It is either going to be a single value or _many_ values, which means that we'll end up with a nested hash table.
+
+The cost of iteration on the nested hash table is checking a single field on each call to `hash_multi_get_next()`. In practice, I expect the cost to be nil, especially once you take
+into account branch prediction. Optimizing single and packed options, on the other hand, would require us to make the `hash_val_t` structure larger to carry more state. 
+The `hash_val_t` structure isn't big enough that this would be a major issue, but I avoided going that route to reduce the complexity in the codebase.
+
+I'll need to revisit that decision once I have some benchmark numbers.
+****
+
+Now that we know how to append and iterate over multiple values, there is just one last thing that we need to do, _remove_ a value from a multi value hash table. 
+
+==== Deleting a value from multi value keys
+
+Removal of a value from the multi value hash is very similar to looking it up. The process starts with `hash_multi_del()`, shown on <<hash_multi_del>>.
+
+[source]
+[[hash_multi_del]]
+.`hash.multi.c` - Remove a value from a multi value hash table
+----
+include::./code/hash.multi.c[tags=hash_multi_del]
+----
+
+The `hash_multi_del()` has four options that it needs do deal with. If there are no values for the provided key, there is nothing to be done. This is the easiest option. If there
+is a single value for the key, we can simple remove it from the hash table and we are done. Things gets more interesting with the other two options. If we have to deal with either
+packed value or nested hash table. Let's look at how we deal with packed values first in <<hash_multi_del_packed>>.
+
+[source]
+[[hash_multi_del_packed]]
+.`hash.multi.c` - Removing a value from a packed set of values inside a container
+----
+include::./code/hash.multi.c[tags=hash_multi_del_packed]
+----
+
+In `hash_multi_del_packed()` we are scanning through the values packed into a container item. If we find a value, we allocate a temporary buffer from the transaction and copy the
+_rest_ of the value to the new buffer. Then we update the container item. If the new value is empty, we can delete the item from the container and the key from the hash table. Note
+that updating the container's item may move it. In that case, we'll need to update the item id that we store in the hash table. 
+
+It is important to note that we aren't ever moving from a packed mode to a single mode. In theory, we could do that, it is easy enough to detect when we have a single value and move
+the key to a single mode. The reason I'm not doing that is that in almost all cases, the key is going to be shortly removed or appended to with more values. 
+
+[source]
+[[hash_get_entries_count]]
+.`hash.c` - Getting the count of entries in a hash table
+----
+include::./code/hash.multi.c[tags=hash_get_entries_count]
+----
+
+We haven't looked yet on how `hash_multi_del()` deals with nested hash tables. In <<hash_multi_del>> you can see that we call `hash_del()` on the nested hash table, but we aren't 
+done just yet. We need to check if the nested hash table is empty. We do that by calling to `hash_get_entries_count()`, shown in <<hash_get_entries_count>>. If the nested table is
+empty, we can drop the nested table and remove the key from the parent table. 
+
+Removing the key from the parent table is obvious, but dropping the nest table is a bit more complex. In addition to freeing the pages held by the nested hash table, we also need
+to remove the nested table from the linked list of associated tables on the parent table. This is all handled in the `hash_drop_nested()` function, shown on <<hash_drop_nested>>.
+
+[source]
+[[hash_drop_nested]]
+.`hash.multi.c` - Dropping a nested hash table and removing it from the parent table
+----
+include::./code/hash.multi.c[tags=hash_drop_nested]
+----
+
+The code in `hash_drop_nested()` will first update the linked list of associated hash tables to remove the dropped nested table. Then it will call to `hash_drop_one()` to do the
+actual dropping of the nested hash table pages. But what _is_ `hash_drop_one()`? We haven't seen that function before. I had to rename the `hash_drop()` to `hash_drop_one()` to
+allow us to handle associated hash tables. This is because we may want to call `hash_drop()` on a hash table that is used with multiple values. The new `hash_drop()` implementation
+is shown in <<hash_drop_with_nesting>>.
+
+[source]
+[[hash_drop_with_nesting]]
+.`hash.c` - Drop a hash table and all its associated tables
+----
+include::./code/hash.multi.c[tags=hash_drop_with_nesting]
+----
+
+The first item in the linked list is the parent hash table, so we'll simply scan from the given `hash_id` and remove all the nested hash tables in the list. The bulk of the work
+is still done by `hash_drop_one()`, we simply added another function to orchestrate it. 
+
+And now we are done. We have the ability to store multiple values per key on both B+Trees and hash tables. What we are left with is to look at the tests and see how we can _use_
+this feature, but we'll do that in the next chapter.
+
+=== Unit Tests
+
+The tests we have for this feature are fairly simple. We append, iterate, remove and check the contents of the multi value key again. The nice thing about this feature is that there
+isn't _much_ to it, making it straightforward to test and use.
+
+[source]
+[[tests15]]
+.`test.c` - Testing using multiple values for B+Tree and hash table
+----
+include::./code/test.c[tags=tests17]
+----

@@ -100,7 +100,6 @@ typedef struct hash_page_directory {
   uint8_t padding[2];
   uint32_t number_of_buckets;
   uint64_t number_of_entries;
-  nested_list_t nested;
 } hash_page_directory_t;
 
 typedef struct hash_page {
@@ -410,6 +409,8 @@ result_t hash_get(txn_t *tx, hash_val_t *kvp);
 result_t hash_del(txn_t *tx, hash_val_t *del);
 result_t hash_get_next(
     txn_t *tx, pages_map_t **state, hash_val_t *it);
+result_t hash_get_entries_count(
+    txn_t *tx, uint64_t hash_id, uint64_t *number_of_entries);
 // end::hash_api[]
 
 // tag::hash_multi_api[]

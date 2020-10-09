@@ -35,31 +35,17 @@ static result_t hash_drop_nested(txn_t *tx, uint64_t nested_hash_id) {
     page_metadata_t *nested_next;
     ensure(txn_modify_metadata(
         tx, nested->hash.nested.next, &nested_next));
-    if (nested_next->common.page_flags == page_flags_hash) {
-      nested_next->hash.nested.prev = nested->hash.nested.prev;
-    } else if (nested_next->common.page_flags ==
-               page_flags_hash_directory) {
-      nested_next->hash_dir.nested.prev = nested->hash.nested.prev;
-    } else {
-      failed(EINVAL, msg("Bad page flag"));
-    }
+    assert(nested_next->common.page_flags == page_flags_hash);
+    nested_next->hash.nested.prev = nested->hash.nested.prev;
   }
   if (nested->tree.nested.prev) {
     page_metadata_t *nested_prev;
     ensure(txn_modify_metadata(
         tx, nested->hash.nested.prev, &nested_prev));
-    if (nested_prev->common.page_flags == page_flags_hash) {
-      nested_prev->hash.nested.next = nested->hash.nested.next;
-    } else if (nested_prev->common.page_flags ==
-               page_flags_hash_directory) {
-      nested_prev->hash_dir.nested.next = nested->hash.nested.next;
-    } else {
-      failed(EINVAL, msg("Bad page flag"));
-    }
+    assert(nested_prev->common.page_flags == page_flags_hash);
+    nested_prev->hash.nested.next = nested->hash.nested.next;
   }
-  nested->tree.nested.next = 0;
-  nested->tree.nested.prev = 0;
-  ensure(hash_drop(tx, nested_hash_id));
+  ensure(hash_drop_one(tx, nested_hash_id));
   return success();
 }
 // end::hash_drop_nested[]
@@ -67,25 +53,20 @@ static result_t hash_drop_nested(txn_t *tx, uint64_t nested_hash_id) {
 // tag::hash_multi_write_nested_hash[]
 static result_t hash_multi_write_nested_hash(
     txn_t *tx, uint64_t root, uint64_t nested) {
-  page_metadata_t *root_metadata, *nested_metadata;
-  ensure(txn_modify_metadata(tx, root, &root_metadata));
-  ensure(txn_modify_metadata(tx, nested, &nested_metadata));
-  nested_list_t *l;
-  if (root_metadata->common.page_flags == page_flags_hash) {
-    l = &root_metadata->hash.nested;
-  } else if (root_metadata->common.page_flags == page_flags_hash) {
-    l = &root_metadata->hash_dir.nested;
-  } else {
-    failed(EINVAL, msg("Unexpected page flags"));
-  }
-  nested_metadata->hash_dir.nested.next =
-      root_metadata->hash_dir.nested.next;
-  root_metadata->hash_dir.nested.next = nested;
-  if (nested_metadata->hash_dir.nested.next) {
+  page_metadata_t *r_metadata, *n_metadata;
+  ensure(txn_modify_metadata(tx, root, &r_metadata));
+  ensure(txn_modify_metadata(tx, nested, &n_metadata));
+
+  assert(r_metadata->common.page_flags == page_flags_hash);
+  assert(n_metadata->common.page_flags == page_flags_hash);
+  n_metadata->hash.nested.next = r_metadata->hash.nested.next;
+  r_metadata->hash.nested.next = nested;
+  if (n_metadata->hash.nested.next) {
     page_metadata_t *next;
-    ensure(txn_modify_metadata(
-        tx, nested_metadata->hash_dir.nested.next, &next));
-    next->hash_dir.nested.prev = nested;
+    ensure(
+        txn_modify_metadata(tx, n_metadata->hash.nested.next, &next));
+    assert(next->common.page_flags == page_flags_hash);
+    next->hash.nested.prev = nested;
   }
   return success();
 }
@@ -141,22 +122,24 @@ static result_t hash_multi_set_packed(txn_t *tx, hash_val_t *set,
   bool in_place;
   ensure(container_item_update(tx, &item, &in_place));
   if (in_place == false) {
-    uint64_t old_val = set->val;
-    set->val         = item.item_id;
-    set->flags       = hash_multi_packed;
-    ensure(hash_set(tx, set, 0));
-    set->val = old_val;
+    hash_val_t update = {.hash_id = set->hash_id,
+        .flags                    = hash_multi_packed,
+        .val                      = item.item_id,
+        .key                      = set->key};
+    ensure(hash_set(tx, &update, 0));
   }
   return success();
 }
 // end::hash_multi_set_packed[]
 
+// tag::hash_multi_set_nested[]
 static result_t hash_multi_set_nested(
     txn_t *tx, hash_val_t *set, uint64_t nested_hash_id) {
   hash_val_t nested = {.hash_id = nested_hash_id, .key = set->val};
   ensure(hash_set(tx, &nested, 0));
   return success();
 }
+// end::hash_multi_set_nested[]
 
 // tag::hash_multi_append[]
 result_t hash_multi_append(
@@ -190,6 +173,7 @@ result_t hash_multi_append(
 }
 // end::hash_multi_append[]
 
+// tag::hash_multi_del_packed[]
 static result_t hash_multi_del_packed(txn_t *tx, hash_val_t *del,
     hash_val_t *existing, uint64_t container_id) {
   container_item_t item = {
@@ -201,24 +185,22 @@ static result_t hash_multi_del_packed(txn_t *tx, hash_val_t *del,
     uint64_t v;
     void *cur = varint_decode(start, &v);
     if (v == del->val) {  // found the value
-      span_t new_val = {.size = (size_t)(start - item.data.address)};
-      ensure(txn_alloc_temp(tx, item.data.size, &new_val.address));
-      memcpy(new_val.address, item.data.address, new_val.size);
-      memcpy(
-          new_val.address + new_val.size, cur, (size_t)(end - cur));
-      new_val.size += (size_t)(end - cur);
-      if (new_val.size == 0) {  // completely empty
+      span_t buf = {.size = (size_t)(start - item.data.address)};
+      ensure(txn_alloc_temp(tx, item.data.size, &buf.address));
+      memcpy(buf.address, item.data.address, buf.size);
+      memcpy(buf.address + buf.size, cur, (size_t)(end - cur));
+      buf.size += (size_t)(end - cur);
+      if (buf.size == 0) {  // completely empty
         ensure(container_item_del(tx, &item));
         ensure(hash_del(tx, del));
         return success();
       }
-      item.data = new_val;
+      item.data = buf;
       bool in_place;
       ensure(container_item_update(tx, &item, &in_place));
       if (in_place == false) {
         existing->val = item.item_id;
         ensure(hash_set(tx, existing, 0));
-        del->hash_id = existing->hash_id;
       }
       return success();
     }
@@ -226,7 +208,9 @@ static result_t hash_multi_del_packed(txn_t *tx, hash_val_t *del,
   }
   return success();  // value not found, no change
 }
+// end::hash_multi_del_packed[]
 
+// tag::hash_multi_del[]
 result_t hash_multi_del(
     txn_t *tx, hash_val_t *del, uint64_t container_id) {
   hash_val_t existing = {.hash_id = del->hash_id, .key = del->key};
@@ -245,8 +229,9 @@ result_t hash_multi_del(
       ensure(hash_del(tx, &existing));
       page_metadata_t *metadata;
       ensure(txn_get_metadata(tx, existing.hash_id, &metadata));
-      if (metadata->common.page_flags == page_flags_hash &&
-          metadata->hash.number_of_entries == 0) {  // empty, remove
+      uint64_t entries;
+      ensure(hash_get_entries_count(tx, existing.hash_id, &entries));
+      if (entries == 0) {  // empty, remove
         ensure(hash_drop_nested(tx, existing.hash_id));
         ensure(hash_del(tx, del));
         return success();
@@ -256,7 +241,9 @@ result_t hash_multi_del(
       failed(EINVAL, msg("Unknown flag type"));
   }
 }
+// end::hash_multi_del[]
 
+// tag::hash_multi_get_next_packed[]
 static result_t hash_multi_get_next_packed(txn_t *tx,
     uint64_t item_id, hash_val_t *it, uint64_t container_id) {
   container_item_t item = {
@@ -271,7 +258,9 @@ static result_t hash_multi_get_next_packed(txn_t *tx,
   it->iter_state.pos_in_page = (uint16_t)(end - item.data.address);
   return success();
 }
+// end::hash_multi_get_next_packed[]
 
+// tag::hash_multi_get_next[]
 result_t hash_multi_get_next(txn_t *tx, pages_map_t **state,
     hash_val_t *it, uint64_t container_id) {
   if (it->iter_state.iterating_nested) {
@@ -289,23 +278,24 @@ result_t hash_multi_get_next(txn_t *tx, pages_map_t **state,
   }
   it->has_val = true;
   switch (existing.flags) {
-    case hash_multi_single:  // just delete normally
+    case hash_multi_single:
       if (it->iter_state.pos_in_page != 0) {
         it->has_val = false;
         return success();
       }
       it->iter_state.pos_in_page++;
       return success();
-    case hash_multi_packed:
-      ensure(hash_multi_get_next_packed(
-          tx, existing.val, it, container_id));
-      return success();
     case hash_multi_nested:
       it->hash_id                     = existing.val;
       it->iter_state.iterating_nested = true;
       ensure(hash_multi_get_next(tx, state, it, container_id));
       return success();
+    case hash_multi_packed:
+      ensure(hash_multi_get_next_packed(
+          tx, existing.val, it, container_id));
+      return success();
     default:
       failed(EINVAL, msg("Unknown flag type"));
   }
 }
+// end::hash_multi_get_next[]
