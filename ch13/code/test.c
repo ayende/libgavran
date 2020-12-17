@@ -68,7 +68,10 @@ static result_t apply_backups(
     start += sizeof(uint64_t);
     uint64_t tx_size = *(uint64_t*)start;
     start += sizeof(uint64_t);
-    span_t tx = {.address = start, .size = (size_t)tx_size};
+    span_t tx = {.size = (size_t)tx_size};
+    ensure(mem_alloc_page_aligned(&tx.address, tx.size));
+    defer(free, tx.address);
+    memcpy(tx.address, start, tx.size);
     ensure(wal_apply_wal_record(&db, &tmp_buffer, tx_id, &tx));
     start += tx_size;
   }

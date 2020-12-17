@@ -17,12 +17,12 @@ DEPS := $(OBJS:.o=.d)
 INC_DIRS := $(shell find $(SRC_DIRS) -type d) ./../../include
 INC_FLAGS := $(addprefix -I,$(INC_DIRS))
 
-WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments -Wno-pointer-arith -Wno-reserved-id-macro -Wno-covered-switch-default -Wno-newline-eof -Wno-assign-enum
+WARNINGS = -Weverything -Werror -Wno-gnu-zero-variadic-macro-arguments -Wno-pointer-arith -Wno-reserved-id-macro -Wno-covered-switch-default -Wno-newline-eof -Wno-assign-enum -Wno-extra-semi-stmt
 DEFINES = -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE
 
-CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN) -fblocks
+CFLAGS  = -g $(WARNINGS) $(INC_FLAGS) -MMD -MP $(DEFINES) -fPIC  $(ASAN) 
 
-LDFLAGS = -lm -lsodium -lzstd -lncurses -lBlocksRuntime #-shared
+LDFLAGS = -lm -lsodium -lzstd #-shared
 
 $(BUILD_DIR)/$(TARGET_EXEC): $(OBJS)
 	$(CC) $(OBJS) -o $@.so $(LDFLAGS) -shared

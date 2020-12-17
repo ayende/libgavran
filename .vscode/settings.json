@@ -3,6 +3,7 @@
     "cSpell.enableFiletypes": [
         "asciidoc"
     ],
+    "editor.formatOnSave": true,
     "files.associations": {
         "array": "c",
         "deque": "c",

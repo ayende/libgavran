@@ -619,6 +619,9 @@ result_t wal_apply_wal_record(db_t *db, reusable_buffer_t *tmp_buffer,
     uint64_t tx_id, span_t *wal_record) {
   ensure(db->state->options.flags & db_flags_log_shipping_target,
       msg("db wasn't set with db_flags_apply_log flag"));
+  ensure(((intptr_t)wal_record->address & 4095) == 0,
+      msg("wal_record must be aligned on 4KB boundary, but wasn't"),
+      with(wal_record->address, "%p"));
   // <1>
   txn_t write_tx;
   ensure(txn_create(db, TX_WRITE | TX_APPLY_LOG, &write_tx));
@@ -724,14 +727,19 @@ static result_t wal_get_wal_filename(
   memcpy((*wal_file_name) + db_name_len, ".wal", 5);  // include \0
   return success();
 }
-static result_t wal_open_single_file(
-    struct wal_file_state *file_state, db_t *db, char wal_code) {
+static result_t wal_open_file(struct wal_file_state *file_state,
+    db_t *db, char wal_code, enum pal_file_creation_flags flags) {
   char *wal_file_name;
   ensure(wal_get_wal_filename(
       db->state->handle->filename, wal_code, &wal_file_name));
   defer(free, wal_file_name);
-  ensure(pal_create_file(wal_file_name, &file_state->handle,
-      pal_file_creation_flags_durable));
+  ensure(pal_create_file(wal_file_name, &file_state->handle, flags));
+  return success();
+}
+static result_t wal_open_single_file(
+    struct wal_file_state *file_state, db_t *db, char wal_code) {
+  ensure(wal_open_file(
+      file_state, db, wal_code, pal_file_creation_flags_none));
   ensure(pal_set_file_size(
       file_state->handle, db->state->options.wal_size, UINT64_MAX));
   file_state->span.size = file_state->handle->size;
@@ -744,11 +752,19 @@ static result_t wal_open_single_file(
 result_t wal_open_and_recover(db_t *db) {
   memset(&db->state->wal_state, 0, sizeof(wal_state_t));
   wal_state_t *wal = &db->state->wal_state;
-  ensure(wal_open_single_file(&wal->files[0], db, 'a'));
-  defer(pal_unmap, wal->files[0].span);
-  ensure(wal_open_single_file(&wal->files[1], db, 'b'));
-  defer(pal_unmap, wal->files[1].span);
-  ensure(wal_recover(db, wal));
+  {
+    ensure(wal_open_single_file(&wal->files[0], db, 'a'));
+    defer(pal_unmap, wal->files[0].span);
+    defer(pal_close_file, wal->files[0].handle);
+    ensure(wal_open_single_file(&wal->files[1], db, 'b'));
+    defer(pal_unmap, wal->files[1].span);
+    defer(pal_close_file, wal->files[1].handle);
+    ensure(wal_recover(db, wal));
+  }
+  ensure(wal_open_file(
+      &wal->files[0], db, 'a', pal_file_creation_flags_durable));
+  ensure(wal_open_file(
+      &wal->files[1], db, 'b', pal_file_creation_flags_durable));
   return success();
 }
 // end::wal_open_and_recover[]
