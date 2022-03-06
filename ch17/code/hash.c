@@ -647,7 +647,7 @@ result_t hash_del(txn_t* tx, hash_val_t* del) {
 }
 // end::hash_del[]
 
-// tag::hash_get_number_of_entries[]
+// tag::hash_get_entries_count[]
 result_t hash_get_entries_count(
     txn_t* tx, uint64_t hash_id, uint64_t* number_of_entries) {
   page_t hash_root = {0};
@@ -660,7 +660,7 @@ result_t hash_get_entries_count(
   }
   return success();
 }
-// end::hash_get_number_of_entries[]
+// end::hash_get_entries_count[]
 
 // tag::hash_get_next[]
 result_t hash_get_next(

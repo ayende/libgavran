@@ -573,7 +573,7 @@ the key to a single mode. The reason I'm not doing that is that in almost all ca
 [[hash_get_entries_count]]
 .`hash.c` - Getting the count of entries in a hash table
 ----
-include::./code/hash.multi.c[tags=hash_get_entries_count]
+include::./code/hash.c[tags=hash_get_entries_count]
 ----
 
 We haven't looked yet on how `hash_multi_del()` deals with nested hash tables. In <<hash_multi_del>> you can see that we call `hash_del()` on the nested hash table, but we aren't 
@@ -599,7 +599,7 @@ is shown in <<hash_drop_with_nesting>>.
 [[hash_drop_with_nesting]]
 .`hash.c` - Drop a hash table and all its associated tables
 ----
-include::./code/hash.multi.c[tags=hash_drop_with_nesting]
+include::./code/hash.c[tags=hash_drop_with_nesting]
 ----
 
 The first item in the linked list is the parent hash table, so we'll simply scan from the given `hash_id` and remove all the nested hash tables in the list. The bulk of the work
