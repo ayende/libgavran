@@ -202,7 +202,7 @@ result_t btree_multi_cursor_search(btree_cursor_t *cursor) {
 }
 // end::btree_multi_cursor_search[]
 
-// tag::btree_multi_get_next[]]
+// tag::btree_multi_get_next[]
 result_t btree_multi_get_next(btree_cursor_t *cursor) {
   if (cursor->has_val == false) return success();
   span_t k = cursor->key;
